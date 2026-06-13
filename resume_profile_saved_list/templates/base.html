@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Resume Profile{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=5">
+</head>
+<body>
+    <header class="site-header">
+        <nav class="navbar">
+            <a class="brand" href="{{ url_for('edit_resume') }}">&#128196; Resume Profile</a>
+            <button class="menu-toggle" type="button" aria-label="Toggle menu" onclick="document.body.classList.toggle('menu-open')">&#9776;</button>
+            <div class="menu">
+                <a href="{{ url_for('edit_resume') }}">&#8679; Upload File</a>
+                <a href="{{ url_for('profile_list') }}">&#128101; View Profiles</a>
+            </div>
+        </nav>
+    </header>
+    <main class="page-shell">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                <section class="flash-wrap" aria-live="polite">
+                    {% for category, message in messages %}
+                        <div class="flash {{ category }}">{{ message }}</div>
+                    {% endfor %}
+                </section>
+            {% endif %}
+        {% endwith %}
+        {% block content %}{% endblock %}
+    </main>
+</body>
+</html>

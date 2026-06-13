@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Saved Resumes | Resume Profile{% endblock %}
+{% block content %}
+<section class="hero card">
+    <div>
+        <p class="eyebrow">Resume Library</p>
+        <h1>Saved Resumes</h1>
+        <p class="muted">All saved resumes are listed below. Click <strong>View Profile</strong> to open full details.</p>
+    </div>
+    <a class="button" href="{{ url_for('edit_resume') }}">+ Upload New Resume</a>
+</section>
+
+<section class="card">
+    {% if resumes %}
+        <div class="resume-list">
+            {% for resume in resumes %}
+            <article class="resume-row">
+                <div class="resume-initials">{{ (resume.full_name or 'U')[:2] | upper }}</div>
+                <div class="resume-main">
+                    <h2>{{ resume.full_name or 'Unnamed Resume' }}</h2>
+                    <p class="title">{{ resume.title or 'No title added' }}</p>
+                    <div class="contact-grid" style="margin-top:4px;">
+                        {% if resume.email %}<span class="contact-item small"><span class="contact-icon">✉</span>{{ resume.email }}</span>{% endif %}
+                        {% if resume.phone %}<span class="contact-item small"><span class="contact-icon">📞</span>{{ resume.phone }}</span>{% endif %}
+                        {% if resume.location %}<span class="contact-item small"><span class="contact-icon">📍</span>{{ resume.location }}</span>{% endif %}
+                    </div>
+                </div>
+                <div class="resume-actions">
+                    <a class="button" href="{{ url_for('profile_detail', resume_id=resume.id) }}">View Profile</a>
+                    <a class="button secondary" href="{{ url_for('edit_resume', resume_id=resume.id) }}">Edit</a>
+                    {% if resume.resume_file %}
+                        <a class="button secondary" href="{{ url_for('uploaded_file', filename=resume.resume_file) }}" target="_blank" rel="noopener">Download</a>
+                    {% endif %}
+                    <form method="post" action="{{ url_for('delete_resume', resume_id=resume.id) }}" style="display:inline" onsubmit="return confirm('Delete this profile? This cannot be undone.')">
+                        <button type="submit" class="button danger">Delete</button>
+                    </form>
+                </div>
+            </article>
+            {% endfor %}
+        </div>
+    {% else %}
+        <div class="empty-state">
+            <p style="font-size:3rem; margin-bottom:16px;">📄</p>
+            <h2>No saved resumes yet</h2>
+            <p class="muted" style="margin-bottom:24px;">Upload a resume and click Save Profile. Saved resumes will appear here.</p>
+            <a class="button" href="{{ url_for('edit_resume') }}">Upload Resume</a>
+        </div>
+    {% endif %}
+</section>
+{% endblock %}

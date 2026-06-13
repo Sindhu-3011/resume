@@ -1,0 +1,112 @@
+{% extends "base.html" %}
+{% block title %}{{ resume.full_name or 'View Profile' }} | Resume Profile{% endblock %}
+{% block content %}
+
+<!-- Profile Header Card -->
+<section class="card profile-header-card">
+    <div class="profile-info-row">
+        <div class="profile-avatar">{{ (resume.full_name or 'U')[0] | upper }}</div>
+        <div style="flex:1; min-width:0;">
+            <p class="eyebrow">Profile</p>
+            <h1>{{ resume.full_name or 'Your Name' }}</h1>
+            {% if resume.title %}<p class="profile-title-text">{{ resume.title }}</p>{% endif %}
+            <div class="contact-grid">
+                {% if resume.email %}
+                <span class="contact-item"><span class="contact-icon">✉</span>{{ resume.email }}</span>
+                {% endif %}
+                {% if resume.phone %}
+                <span class="contact-item"><span class="contact-icon">📞</span>{{ resume.phone }}</span>
+                {% endif %}
+                {% if resume.linkedin %}
+                <span class="contact-item"><span class="contact-icon">🔗</span><a href="{{ resume.linkedin }}" target="_blank" rel="noopener noreferrer">LinkedIn Profile</a></span>
+                {% endif %}
+                {% if resume.location %}
+                <span class="contact-item"><span class="contact-icon">📍</span>{{ resume.location }}</span>
+                {% endif %}
+            </div>
+        </div>
+        <div class="profile-actions">
+            <a class="button secondary" href="{{ url_for('profile_list') }}">← Back</a>
+            <a class="button secondary" href="{{ url_for('edit_resume', resume_id=resume.id) }}">Edit</a>
+            {% if resume.resume_file %}<a class="button" href="{{ url_for('uploaded_file', filename=resume.resume_file) }}" target="_blank" rel="noopener">Download Resume</a>{% endif %}
+            <form method="post" action="{{ url_for('delete_resume', resume_id=resume.id) }}" style="display:inline" onsubmit="return confirm('Delete this profile? This cannot be undone.')">
+                <button type="submit" class="button danger">Delete</button>
+            </form>
+        </div>
+    </div>
+</section>
+
+<!-- Content Sections -->
+<section class="card profile-body">
+    {% if resume.summary %}
+    <div class="profile-section first-section">
+        <div class="section-header">
+            <div class="section-icon icon-summary">📋</div>
+            <h2>Summary</h2>
+        </div>
+        <div class="section-content">{{ resume.summary | replace('\n', '<br>') | safe }}</div>
+    </div>
+    {% endif %}
+
+    {% if resume.skills %}
+    <div class="profile-section">
+        <div class="section-header">
+            <div class="section-icon icon-skills">⚡</div>
+            <h2>Skills</h2>
+        </div>
+        <div class="skills-tags">
+            {% for line in resume.skills.split('\n') %}
+                {% set stripped = line.strip().strip('•-,') %}
+                {% if stripped %}
+                    {% for tag in stripped.replace('|', ',').replace('•', ',').split(',') %}
+                        {% set t = tag.strip().strip('•- ') %}
+                        {% if t and '://' not in t and 'www.' not in t.lower() and t|length > 1 %}<span class="skill-tag">{{ t }}</span>{% endif %}
+                    {% endfor %}
+                {% endif %}
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+
+    {% if resume.experience %}
+    <div class="profile-section">
+        <div class="section-header">
+            <div class="section-icon icon-experience">💼</div>
+            <h2>Work Experience</h2>
+        </div>
+        <div class="section-content">{{ resume.experience | replace('\n', '<br>') | safe }}</div>
+    </div>
+    {% endif %}
+
+    {% if resume.education %}
+    <div class="profile-section">
+        <div class="section-header">
+            <div class="section-icon icon-education">🎓</div>
+            <h2>Education</h2>
+        </div>
+        <div class="section-content">{{ resume.education | replace('\n', '<br>') | safe }}</div>
+    </div>
+    {% endif %}
+
+    {% if resume.certifications %}
+    <div class="profile-section">
+        <div class="section-header">
+            <div class="section-icon icon-certifications">🏆</div>
+            <h2>Certifications</h2>
+        </div>
+        <div class="section-content">{{ resume.certifications | replace('\n', '<br>') | safe }}</div>
+    </div>
+    {% endif %}
+
+    {% if resume.projects %}
+    <div class="profile-section">
+        <div class="section-header">
+            <div class="section-icon icon-projects">🔧</div>
+            <h2>Project Details</h2>
+        </div>
+        <div class="section-content">{{ resume.projects | replace('\n', '<br>') | safe }}</div>
+    </div>
+    {% endif %}
+</section>
+
+{% endblock %}
