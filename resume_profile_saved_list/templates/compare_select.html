@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}Compare Resume | Resume Profile{% endblock %}
+{% block content %}
+
+<section class="hero card">
+    <div>
+        <p class="eyebrow">Resume vs JD Matching</p>
+        <h1>Select a Job Description</h1>
+        <p class="muted">Comparing: <strong>{{ resume.full_name }}</strong>
+            {% if resume.title %} — {{ resume.title }}{% endif %}
+        </p>
+    </div>
+    <a class="button secondary" href="{{ url_for('profile_detail', resume_id=resume.id) }}">← Back to Profile</a>
+</section>
+
+<!-- Search box -->
+<div class="card" style="padding:16px 24px;">
+    <input type="text" id="jd-search" placeholder="&#128269;  Search by title or role..."
+           style="width:100%; padding:10px 14px; border:1px solid #d1dbe8; border-radius:8px; font-size:1rem;">
+</div>
+
+{% set categories = ['Validation Roles', 'IT Roles'] %}
+{% for cat in categories %}
+    {% set cat_jds = jds | selectattr('category', 'equalto', cat) | list %}
+    {% if cat_jds %}
+    <div class="card csel-group" data-group="{{ cat }}">
+        <h3 class="csel-group-title">
+            {% if cat == 'Validation Roles' %}&#128209;{% else %}&#128187;{% endif %}
+            {{ cat }}
+        </h3>
+        <div class="csel-grid">
+            {% for jd in cat_jds %}
+            <a class="csel-card jd-searchable" href="{{ url_for('compare_result', resume_id=resume.id, jd_id=jd.id) }}"
+               data-title="{{ jd.title | lower }}" data-role="{{ (jd.role or '') | lower }}">
+                <div class="csel-card-icon">&#128221;</div>
+                <div class="csel-card-body">
+                    <strong class="csel-card-title">{{ jd.title }}</strong>
+                    {% if jd.role %}<span class="role-badge" style="font-size:0.75rem;">{{ jd.role }}</span>{% endif %}
+                </div>
+                <span class="csel-card-arrow">&#8594;</span>
+            </a>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+{% endfor %}
+
+{% if not jds %}
+<div class="card" style="text-align:center; padding:40px;">
+    <p style="font-size:2.5rem; margin-bottom:12px;">&#128221;</p>
+    <h3>No Job Descriptions available</h3>
+    <p class="muted" style="margin-bottom:20px;">Add JDs first from the JD Management section.</p>
+    <a class="button" href="{{ url_for('jd_management') }}">Go to JD Management</a>
+</div>
+{% endif %}
+
+<script>
+(function () {
+    var searchInput = document.getElementById('jd-search');
+    var cards = document.querySelectorAll('.jd-searchable');
+    var groups = document.querySelectorAll('.csel-group');
+
+    searchInput.addEventListener('input', function () {
+        var q = this.value.toLowerCase().trim();
+        cards.forEach(function (card) {
+            var match = !q || card.dataset.title.includes(q) || card.dataset.role.includes(q);
+            card.style.display = match ? '' : 'none';
+        });
+        groups.forEach(function (group) {
+            var visible = group.querySelectorAll('.jd-searchable:not([style*="display: none"])').length;
+            group.style.display = visible ? '' : 'none';
+        });
+    });
+})();
+</script>
+{% endblock %}

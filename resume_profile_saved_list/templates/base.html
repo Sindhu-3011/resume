@@ -3,31 +3,125 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{% block title %}Resume Profile{% endblock %}</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=5">
+    <title>{% block title %}Resume Profile{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=12">
 </head>
 <body>
-    <header class="site-header">
-        <nav class="navbar">
-            <a class="brand" href="{{ url_for('edit_resume') }}">&#128196; Resume Profile</a>
-            <button class="menu-toggle" type="button" aria-label="Toggle menu" onclick="document.body.classList.toggle('menu-open')">&#9776;</button>
-            <div class="menu">
-                <a href="{{ url_for('edit_resume') }}">&#8679; Upload File</a>
-                <a href="{{ url_for('profile_list') }}">&#128101; View Profiles</a>
-            </div>
+<div class="app-layout">
+
+    <!-- ── Left Sidebar ── -->
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-logo">
+            <span class="sidebar-logo-icon">&#128196;</span>
+            <span class="sidebar-logo-text">Resume<br>Profile</span>
+        </div>
+
+        <nav class="sidebar-nav">
+            <p class="nav-section-label">Overview</p>
+
+            <a href="{{ url_for('dashboard') }}"
+               class="nav-item {{ 'active' if request.endpoint == 'dashboard' else '' }}">
+                <span class="nav-icon">&#128202;</span>
+                <span class="nav-label">Dashboard</span>
+            </a>
+
+            <p class="nav-section-label">Manage</p>
+
+            <a href="{{ url_for('upload_files') }}"
+               class="nav-item {{ 'active' if request.endpoint == 'upload_files' else '' }}">
+                <span class="nav-icon">&#128193;</span>
+                <span class="nav-label">Upload Files</span>
+            </a>
+
+            <a href="{{ url_for('jd_management') }}"
+               class="nav-item {{ 'active' if request.endpoint in ('jd_management','jd_add','jd_detail','jd_edit') else '' }}">
+                <span class="nav-icon">&#128221;</span>
+                <span class="nav-label">JD Management</span>
+            </a>
+
+            <p class="nav-section-label">Profiles</p>
+
+            <a href="{{ url_for('profile_list') }}"
+               class="nav-item {{ 'active' if request.endpoint == 'profile_list' else '' }}">
+                <span class="nav-icon">&#128203;</span>
+                <span class="nav-label">View Profiles</span>
+            </a>
+
+            <a href="{{ url_for('edit_resume') }}"
+               class="nav-item {{ 'active' if request.endpoint == 'edit_resume' and not request.view_args.get('resume_id') else '' }}">
+                <span class="nav-icon">&#10010;</span>
+                <span class="nav-label">Add Profile</span>
+            </a>
         </nav>
-    </header>
-    <main class="page-shell">
-        {% with messages = get_flashed_messages(with_categories=true) %}
-            {% if messages %}
-                <section class="flash-wrap" aria-live="polite">
-                    {% for category, message in messages %}
-                        <div class="flash {{ category }}">{{ message }}</div>
-                    {% endfor %}
-                </section>
-            {% endif %}
-        {% endwith %}
-        {% block content %}{% endblock %}
-    </main>
+
+        <div class="sidebar-footer">
+            <span class="sidebar-version">Resume Profile v1.0</span>
+        </div>
+    </aside>
+
+    <!-- ── Main Area ── -->
+    <div class="main-area" id="main-area">
+        <header class="site-header">
+            <nav class="navbar">
+                <button class="sidebar-toggle" id="sidebar-toggle" type="button" aria-label="Toggle sidebar">&#9776;</button>
+                <a class="brand" href="{{ url_for('dashboard') }}">&#128196; Resume Profile</a>
+                <button class="menu-toggle" type="button" aria-label="Toggle menu" onclick="document.body.classList.toggle('menu-open')">&#9776;</button>
+                <div class="menu">
+                    <a href="{{ url_for('dashboard') }}">&#128202; Dashboard</a>
+                    <a href="{{ url_for('upload_files') }}">&#128193; Upload Files</a>
+                    <a href="{{ url_for('profile_list') }}">&#128203; View Profiles</a>
+                    <a href="{{ url_for('edit_resume') }}">&#8679; Add Profile</a>
+                </div>
+            </nav>
+        </header>
+
+        <main class="page-shell">
+            {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                    <section class="flash-wrap" aria-live="polite">
+                        {% for category, message in messages %}
+                            <div class="flash {{ category }}">{{ message }}</div>
+                        {% endfor %}
+                    </section>
+                {% endif %}
+            {% endwith %}
+            {% block content %}{% endblock %}
+        </main>
+    </div>
+
+</div>
+
+<script>
+(function () {
+    var toggle = document.getElementById('sidebar-toggle');
+    var sidebar = document.getElementById('sidebar');
+    var mainArea = document.getElementById('main-area');
+
+    // Restore saved state
+    if (localStorage.getItem('sidebarCollapsed') === '1') {
+        document.body.classList.add('sidebar-collapsed');
+    }
+
+    toggle.addEventListener('click', function () {
+        var collapsed = document.body.classList.toggle('sidebar-collapsed');
+        localStorage.setItem('sidebarCollapsed', collapsed ? '1' : '0');
+    });
+
+    // Close sidebar overlay on mobile when clicking outside
+    mainArea.addEventListener('click', function () {
+        if (window.innerWidth <= 900 && document.body.classList.contains('sidebar-open')) {
+            document.body.classList.remove('sidebar-open');
+        }
+    });
+
+    // On mobile, sidebar-toggle opens rather than collapses
+    if (window.innerWidth <= 900) {
+        toggle.addEventListener('click', function (e) {
+            e.stopPropagation();
+            document.body.classList.toggle('sidebar-open');
+        }, true);
+    }
+})();
+</script>
 </body>
 </html>

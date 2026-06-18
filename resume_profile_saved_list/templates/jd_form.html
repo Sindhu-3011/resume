@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block title %}{% if jd %}Edit JD{% else %}Add JD{% endif %} | Resume Profile{% endblock %}
+{% block content %}
+
+<section class="hero card">
+    <div>
+        <p class="eyebrow">{% if jd %}Edit{% else %}New{% endif %} Job Description</p>
+        <h1>{% if jd %}Edit: {{ jd.title }}{% else %}Add Job Description{% endif %}</h1>
+        <p class="muted">Fill in the details below. Skills (one per line) and Keywords are used for resume matching.</p>
+    </div>
+    <a class="button secondary" href="{{ url_for('jd_management') }}">← Back to JD List</a>
+</section>
+
+<form class="card form-grid" method="post" enctype="multipart/form-data">
+
+    <div class="full">
+        <label for="title">Job Title <span style="color:#c0182c;">*</span></label>
+        <input id="title" name="title" required placeholder="e.g. CSV Lead, Full Stack Developer"
+               value="{{ jd.title if jd else '' }}">
+    </div>
+
+    <div>
+        <label for="role">Role (links to Groups)</label>
+        <select id="role" name="role" class="form-select">
+            <option value="">— Select a role —</option>
+            {% for group, roles in all_roles.items() %}
+            <optgroup label="{{ group }}">
+                {% for r in roles %}
+                <option value="{{ r }}" {% if jd and jd.role == r %}selected{% endif %}>{{ r }}</option>
+                {% endfor %}
+            </optgroup>
+            {% endfor %}
+        </select>
+    </div>
+
+    <div>
+        <label for="category">Category</label>
+        <select id="category" name="category" class="form-select">
+            <option value="Validation Roles" {% if not jd or jd.category == 'Validation Roles' %}selected{% endif %}>Validation Roles</option>
+            <option value="IT Roles" {% if jd and jd.category == 'IT Roles' %}selected{% endif %}>IT Roles</option>
+            <option value="General" {% if jd and jd.category == 'General' %}selected{% endif %}>General</option>
+        </select>
+    </div>
+
+    <div class="full">
+        <label for="responsibilities">Responsibilities</label>
+        <textarea id="responsibilities" name="responsibilities" rows="7"
+                  placeholder="Paste or type the responsibilities from the JD (one per line)...">{{ jd.responsibilities if jd else '' }}</textarea>
+    </div>
+
+    <div class="full">
+        <label for="requirements">Requirements / Qualifications</label>
+        <textarea id="requirements" name="requirements" rows="6"
+                  placeholder="Minimum qualifications, experience requirements, education, etc.">{{ jd.requirements if jd else '' }}</textarea>
+    </div>
+
+    <div class="full">
+        <label for="skills">Required Skills <span class="muted" style="font-weight:400;">(one skill per line — used for matching)</span></label>
+        <textarea id="skills" name="skills" rows="8"
+                  placeholder="e.g.&#10;CSV&#10;GAMP 5&#10;21 CFR Part 11&#10;GxP&#10;HP ALM&#10;Agile">{{ jd.skills if jd else '' }}</textarea>
+    </div>
+
+    <div class="full">
+        <label for="keywords">Keywords <span class="muted" style="font-weight:400;">(comma-separated, used to boost matching)</span></label>
+        <input id="keywords" name="keywords"
+               placeholder="e.g. CSV, validation, pharmaceutical, GxP, compliance"
+               value="{{ jd.keywords if jd else '' }}">
+    </div>
+
+    <div class="full">
+        <label for="jd_file">Upload JD File <span class="muted" style="font-weight:400;">(PDF or DOCX — optional, text auto-extracted)</span></label>
+        <input id="jd_file" name="jd_file" type="file" accept=".pdf,.docx">
+        {% if jd and jd.jd_file %}
+        <p class="small">Current file:
+            <a href="{{ url_for('jd_uploaded_file', filename=jd.jd_file) }}" target="_blank" rel="noopener">{{ jd.jd_file }}</a>
+        </p>
+        {% endif %}
+    </div>
+
+    <div class="full actions">
+        <button class="button" type="submit">{% if jd %}Save Changes{% else %}Add Job Description{% endif %}</button>
+        <a class="button secondary" href="{{ url_for('jd_management') }}">Cancel</a>
+    </div>
+
+</form>
+{% endblock %}

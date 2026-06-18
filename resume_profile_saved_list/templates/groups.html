@@ -1,0 +1,164 @@
+{% extends "base.html" %}
+{% block title %}Groups | Resume Profile{% endblock %}
+{% block content %}
+
+<section class="hero card">
+    <div>
+        <p class="eyebrow">Role Management</p>
+        <h1>Groups</h1>
+        <p class="muted">Browse profiles by job role. Select a category and role to view matched candidates.</p>
+    </div>
+    <a class="button secondary" href="{{ url_for('upload_files') }}">&#8679; Upload Files</a>
+</section>
+
+<!-- Search & Role Filter -->
+<div class="card">
+    <div class="groups-search-row">
+        <div class="groups-search-wrap">
+            <span class="groups-search-icon">&#128269;</span>
+            <input type="text" id="role-search" class="groups-search-input"
+                   placeholder="Search roles (e.g. Validation Engineer, DevOps…)"
+                   value="{{ selected_role or '' }}" autocomplete="off">
+            <button class="groups-search-clear" id="search-clear-btn" type="button"
+                    style="{{ 'display:none' if not selected_role else '' }}" title="Clear">&times;</button>
+        </div>
+        <a href="{{ url_for('groups') }}" class="button secondary" style="white-space:nowrap;">Show All</a>
+    </div>
+
+    <!-- Dropdown Suggestions -->
+    <div id="role-suggestions" class="role-suggestions" style="display:none;"></div>
+
+    <!-- Category Tabs -->
+    <div class="groups-categories" id="groups-categories">
+        {% for category, roles in all_roles.items() %}
+            <div class="groups-category" data-category="{{ category }}">
+                <p class="groups-category-title">
+                    <span class="groups-cat-icon">{% if 'Validation' in category %}&#128203;{% else %}&#128187;{% endif %}</span>
+                    {{ category }}
+                    <span class="groups-cat-count">{{ roles | length }} roles</span>
+                </p>
+                <div class="groups-role-grid">
+                    {% for role in roles %}
+                        <a href="{{ url_for('groups', role=role) }}"
+                           class="groups-role-chip {{ 'active' if selected_role == role else '' }}"
+                           data-role="{{ role | lower }}">{{ role }}</a>
+                    {% endfor %}
+                </div>
+            </div>
+        {% endfor %}
+    </div>
+</div>
+
+<!-- Results Panel -->
+{% if selected_role %}
+<div class="card" id="results-panel">
+    <div class="section-header" style="margin-bottom:18px;">
+        <div class="section-icon icon-experience">&#128101;</div>
+        <h2>Profiles: <em style="font-style:normal;color:#1554a0;">{{ selected_role }}</em></h2>
+        <span class="section-note">{{ profiles | length }} candidate(s) found</span>
+    </div>
+
+    {% if profiles %}
+        <div class="resume-list">
+            {% for p in profiles %}
+            <article class="resume-row">
+                <div class="resume-initials">{{ (p.full_name or 'U')[:2] | upper }}</div>
+                <div class="resume-main">
+                    <h2>{{ p.full_name or 'Unnamed' }}</h2>
+                    <p class="title">{{ p.title or 'No title' }}</p>
+                    <div class="contact-grid" style="margin-top:4px;">
+                        {% if p.email %}<span class="contact-item small"><span class="contact-icon">&#9993;</span>{{ p.email }}</span>{% endif %}
+                        {% if p.phone %}<span class="contact-item small"><span class="contact-icon">&#128222;</span>{{ p.phone }}</span>{% endif %}
+                        {% if p.location %}<span class="contact-item small"><span class="contact-icon">&#128205;</span>{{ p.location }}</span>{% endif %}
+                    </div>
+                </div>
+                <div class="resume-actions">
+                    <a class="button" href="{{ url_for('profile_detail', resume_id=p.id) }}">View Profile</a>
+                    <a class="button secondary" href="{{ url_for('edit_resume', resume_id=p.id) }}">Edit</a>
+                </div>
+            </article>
+            {% endfor %}
+        </div>
+    {% else %}
+        <div class="empty-state">
+            <p style="font-size:3rem;margin-bottom:16px;">&#128202;</p>
+            <h2>No profiles found for "{{ selected_role }}"</h2>
+            <p class="muted" style="margin-bottom:24px;">Upload resumes and tag them with this role to see them here.</p>
+            <a class="button" href="{{ url_for('upload_files') }}">Upload Files</a>
+        </div>
+    {% endif %}
+</div>
+{% endif %}
+
+<script>
+(function () {
+    /* Build a flat list of all roles for autocomplete */
+    var ALL_ROLES = [];
+    document.querySelectorAll('.groups-role-chip').forEach(function (el) {
+        ALL_ROLES.push({ label: el.textContent.trim(), href: el.href });
+    });
+
+    var searchInput = document.getElementById('role-search');
+    var suggestions = document.getElementById('role-suggestions');
+    var clearBtn    = document.getElementById('search-clear-btn');
+
+    searchInput.addEventListener('input', function () {
+        var q = searchInput.value.trim().toLowerCase();
+        clearBtn.style.display = q ? '' : 'none';
+        filterChips(q);
+        showSuggestions(q);
+    });
+
+    clearBtn.addEventListener('click', function () {
+        searchInput.value = '';
+        clearBtn.style.display = 'none';
+        filterChips('');
+        suggestions.style.display = 'none';
+    });
+
+    function filterChips(q) {
+        document.querySelectorAll('.groups-role-chip').forEach(function (chip) {
+            var match = !q || chip.dataset.role.indexOf(q) !== -1;
+            chip.style.display = match ? '' : 'none';
+        });
+        /* Hide categories with no visible chips */
+        document.querySelectorAll('.groups-category').forEach(function (cat) {
+            var visible = Array.from(cat.querySelectorAll('.groups-role-chip'))
+                              .some(function (c) { return c.style.display !== 'none'; });
+            cat.style.display = visible ? '' : 'none';
+        });
+    }
+
+    function showSuggestions(q) {
+        if (!q) { suggestions.style.display = 'none'; return; }
+        var matches = ALL_ROLES.filter(function (r) {
+            return r.label.toLowerCase().indexOf(q) !== -1;
+        });
+        if (!matches.length) { suggestions.style.display = 'none'; return; }
+        suggestions.innerHTML = '';
+        matches.slice(0, 8).forEach(function (r) {
+            var li = document.createElement('a');
+            li.href = r.href;
+            li.className = 'role-suggestion-item';
+            li.textContent = r.label;
+            suggestions.appendChild(li);
+        });
+        suggestions.style.display = 'block';
+    }
+
+    /* Close suggestions on outside click */
+    document.addEventListener('click', function (e) {
+        if (!searchInput.contains(e.target) && !suggestions.contains(e.target)) {
+            suggestions.style.display = 'none';
+        }
+    });
+
+    searchInput.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') {
+            var q = searchInput.value.trim();
+            if (q) window.location.href = '{{ url_for("groups") }}/' + encodeURIComponent(q);
+        }
+    });
+})();
+</script>
+{% endblock %}

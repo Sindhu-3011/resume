@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% block title %}JD Management | Resume Profile{% endblock %}
+{% block content %}
+
+<section class="hero card">
+    <div>
+        <p class="eyebrow">Job Descriptions</p>
+        <h1>JD Management</h1>
+        <p class="muted">View, add, edit, and delete Job Descriptions. Use the built-in JDs or upload your own company-specific ones.</p>
+    </div>
+    <a class="button" href="{{ url_for('jd_add') }}">+ Add New JD</a>
+</section>
+
+<!-- Category filter tabs -->
+{% set categories = jds | map(attribute='category') | unique | list %}
+<div class="jdm-tabs" id="jdm-tabs">
+    <button class="jdm-tab active" data-cat="all">All <span class="jdm-tab-badge">{{ jds | length }}</span></button>
+    {% for cat in ['Validation Roles', 'IT Roles'] %}
+        {% set cat_count = jds | selectattr('category', 'equalto', cat) | list | length %}
+        {% if cat_count %}
+        <button class="jdm-tab" data-cat="{{ cat }}">{{ cat }} <span class="jdm-tab-badge">{{ cat_count }}</span></button>
+        {% endif %}
+    {% endfor %}
+</div>
+
+{% if jds %}
+<div class="card" style="padding:0; overflow:hidden;">
+    <table class="jdm-table" id="jdm-table">
+        <thead>
+            <tr>
+                <th>#</th>
+                <th>Job Title</th>
+                <th>Role</th>
+                <th>Category</th>
+                <th>Added On</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for jd in jds %}
+            <tr data-cat="{{ jd.category }}">
+                <td class="jdm-td-num">{{ loop.index }}</td>
+                <td>
+                    <a class="jdm-link" href="{{ url_for('jd_detail', jd_id=jd.id) }}">{{ jd.title }}</a>
+                </td>
+                <td>
+                    <span class="role-badge">{{ jd.role or '—' }}</span>
+                </td>
+                <td>
+                    <span class="jdm-cat-badge {% if jd.category == 'Validation Roles' %}jdm-cat-val{% else %}jdm-cat-it{% endif %}">
+                        {{ jd.category }}
+                    </span>
+                </td>
+                <td class="text-muted">
+                    {{ jd.created_at.strftime('%Y-%m-%d') if jd.created_at else '—' }}
+                </td>
+                <td class="jdm-actions">
+                    <a class="button secondary jdm-btn" href="{{ url_for('jd_detail', jd_id=jd.id) }}">View</a>
+                    <a class="button secondary jdm-btn" href="{{ url_for('jd_edit', jd_id=jd.id) }}">Edit</a>
+                    <form method="post" action="{{ url_for('jd_delete', jd_id=jd.id) }}" style="display:inline"
+                          onsubmit="return confirm('Delete this JD? This cannot be undone.')">
+                        <button type="submit" class="button danger jdm-btn">Delete</button>
+                    </form>
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% else %}
+<div class="card" style="text-align:center; padding:48px 24px;">
+    <p style="font-size:3rem; margin-bottom:12px;">&#128221;</p>
+    <h3>No Job Descriptions yet</h3>
+    <p class="muted" style="margin-bottom:20px;">Pre-loaded JDs will appear here. Click "Add New JD" to add your own.</p>
+    <a class="button" href="{{ url_for('jd_add') }}">+ Add New JD</a>
+</div>
+{% endif %}
+
+<script>
+(function () {
+    var tabs  = document.querySelectorAll('.jdm-tab');
+    var rows  = document.querySelectorAll('#jdm-table tbody tr');
+    tabs.forEach(function (tab) {
+        tab.addEventListener('click', function () {
+            tabs.forEach(function (t) { t.classList.remove('active'); });
+            tab.classList.add('active');
+            var cat = tab.dataset.cat;
+            rows.forEach(function (row) {
+                row.style.display = (cat === 'all' || row.dataset.cat === cat) ? '' : 'none';
+            });
+        });
+    });
+})();
+</script>
+{% endblock %}

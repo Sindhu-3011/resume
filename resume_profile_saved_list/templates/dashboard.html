@@ -1,0 +1,140 @@
+{% extends "base.html" %}
+{% block title %}Dashboard | Resume Profile{% endblock %}
+{% block content %}
+
+<!-- Summary Cards -->
+<div class="dash-cards">
+    <div class="dash-card dash-card-blue">
+        <div class="dash-card-icon">&#128203;</div>
+        <div class="dash-card-body">
+            <p class="dash-card-label">Total Resumes</p>
+            <p class="dash-card-value">{{ total_resumes }}</p>
+        </div>
+    </div>
+    <div class="dash-card dash-card-green">
+        <div class="dash-card-icon">&#128197;</div>
+        <div class="dash-card-body">
+            <p class="dash-card-label">Uploaded Today</p>
+            <p class="dash-card-value">{{ today_resumes | length }}</p>
+        </div>
+    </div>
+    <div class="dash-card dash-card-purple">
+        <div class="dash-card-icon">&#127970;</div>
+        <div class="dash-card-body">
+            <p class="dash-card-label">Unique Roles</p>
+            <p class="dash-card-value">{{ total_roles }}</p>
+        </div>
+    </div>
+    <div class="dash-card dash-card-orange">
+        <div class="dash-card-icon">&#128196;</div>
+        <div class="dash-card-body">
+            <p class="dash-card-label">JD Categories</p>
+            <p class="dash-card-value">{{ all_jd_roles | length }}</p>
+        </div>
+    </div>
+</div>
+
+<div class="dash-two-col">
+
+    <!-- Left column -->
+    <div class="dash-col">
+
+        <!-- Profiles Uploaded Today -->
+        <div class="card">
+            <div class="section-header" style="margin-bottom:18px;">
+                <div class="section-icon icon-experience">&#128197;</div>
+                <h2>Profiles Uploaded Today</h2>
+            </div>
+            {% if today_resumes %}
+                <div class="dash-table-wrap">
+                    <table class="dash-table">
+                        <thead>
+                            <tr><th>#</th><th>Name</th><th>Role / Title</th><th>Uploaded At</th><th></th></tr>
+                        </thead>
+                        <tbody>
+                        {% for r in today_resumes %}
+                            <tr>
+                                <td class="dash-td-num">{{ loop.index }}</td>
+                                <td><a class="dash-link" href="{{ url_for('profile_detail', resume_id=r.id) }}">{{ r.full_name or '—' }}</a></td>
+                                <td><span class="role-badge">{{ r.title or '—' }}</span></td>
+                                <td class="text-muted">{{ r.created_at.strftime('%H:%M') if r.created_at else '—' }}</td>
+                                <td><a class="button secondary" style="padding:5px 12px;font-size:0.85rem;" href="{{ url_for('profile_detail', resume_id=r.id) }}">View</a></td>
+                            </tr>
+                        {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            {% else %}
+                <p class="muted" style="text-align:center;padding:24px 0;">No profiles uploaded today.</p>
+            {% endif %}
+        </div>
+
+        <!-- Recent Activity -->
+        <div class="card">
+            <div class="section-header" style="margin-bottom:18px;">
+                <div class="section-icon icon-projects">&#128336;</div>
+                <h2>Recent Activity</h2>
+                <span class="section-note">Last 10 updates</span>
+            </div>
+            {% if recent_activity %}
+                <div class="dash-table-wrap">
+                    <table class="dash-table">
+                        <thead>
+                            <tr><th>Name</th><th>Role / Title</th><th>Last Updated</th><th></th></tr>
+                        </thead>
+                        <tbody>
+                        {% for r in recent_activity %}
+                            <tr>
+                                <td><a class="dash-link" href="{{ url_for('profile_detail', resume_id=r.id) }}">{{ r.full_name or '—' }}</a></td>
+                                <td><span class="role-badge">{{ r.title or '—' }}</span></td>
+                                <td class="text-muted">
+                                    {% if r.updated_at %}
+                                        {{ r.updated_at.strftime('%Y-%m-%d %H:%M') }}
+                                    {% else %}—{% endif %}
+                                </td>
+                                <td><a class="button secondary" style="padding:5px 12px;font-size:0.85rem;" href="{{ url_for('profile_detail', resume_id=r.id) }}">View</a></td>
+                            </tr>
+                        {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            {% else %}
+                <p class="muted" style="text-align:center;padding:24px 0;">No profiles found.</p>
+            {% endif %}
+        </div>
+
+    </div><!-- end left col -->
+
+    <!-- Right column -->
+    <div class="dash-col">
+
+        <!-- Role-wise Candidate Count -->
+        <div class="card">
+            <div class="section-header" style="margin-bottom:18px;">
+                <div class="section-icon icon-skills">&#128101;</div>
+                <h2>Role-wise Candidate Count</h2>
+            </div>
+            {% if role_counts %}
+                <div class="role-bar-list">
+                    {% set max_count = role_counts[0].count if role_counts else 1 %}
+                    {% for rc in role_counts %}
+                        <div class="role-bar-row">
+                            <span class="role-bar-label" title="{{ rc.role }}">{{ rc.role }}</span>
+                            <div class="role-bar-track">
+                                <div class="role-bar-fill" style="width:{{ [(rc.count / max_count * 100)|int, 4]|max }}%"></div>
+                            </div>
+                            <span class="role-bar-count">{{ rc.count }}</span>
+                        </div>
+                    {% endfor %}
+                </div>
+            {% else %}
+                <p class="muted" style="text-align:center;padding:24px 0;">No data yet.</p>
+            {% endif %}
+        </div>
+
+
+    </div><!-- end right col -->
+
+</div><!-- end two-col -->
+
+{% endblock %}

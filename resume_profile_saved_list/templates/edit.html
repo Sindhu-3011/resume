@@ -1,53 +1,225 @@
 {% extends "base.html" %}
-{% block title %}Upload File | Resume Profile{% endblock %}
+{% block title %}{% if resume.id %}Edit Profile{% else %}Add Profile{% endif %} | Resume Profile{% endblock %}
 {% block content %}
-<section class="hero card">
+
+<!-- Page Hero -->
+<section class="hero card" style="margin-bottom: 24px;">
     <div>
-        <p class="eyebrow">Upload File</p>
+        <p class="eyebrow">{% if resume.id %}Edit Profile{% else %}Upload File{% endif %}</p>
         <h1>{% if resume.id %}Edit saved resume{% else %}Create a new saved resume{% endif %}</h1>
-        <p class="muted">Select a PDF or DOCX resume. The fields below will populate automatically from the selected file. Click Save Profile to store it in the saved resume list.</p>
+        <p class="muted">Select a PDF or DOCX resume — fields populate automatically. Click <strong>Save Profile</strong> to store it.</p>
     </div>
-    <a class="button secondary" href="{{ url_for('profile_list') }}">View Saved List</a>
+    <a class="button secondary" href="{{ url_for('profile_list') }}">&#128203; View Saved List</a>
 </section>
 
-<form class="card form-grid" method="post" enctype="multipart/form-data">
-    <div class="full upload-box">
-        <label for="resume_file">Resume file</label>
-        <input id="resume_file" name="resume_file" type="file" accept=".pdf,.docx">
+<form method="post" enctype="multipart/form-data" class="edit-form">
+
+    <!-- ── Section 1: Resume Upload ──────────────────────────────────── -->
+    <div class="form-section card">
+        <div class="form-section-hdr">
+            <span class="form-section-icon" style="background:#e0e7ff;color:#4338ca;">&#128196;</span>
+            <div>
+                <h2 class="form-section-title">Resume File</h2>
+                <p class="form-section-sub">Upload PDF or DOCX — fields below auto-fill from the document</p>
+            </div>
+        </div>
+
+        <div class="upload-drop-zone" id="upload-drop-zone">
+            <div class="upload-drop-icon">&#128228;</div>
+            <p class="upload-drop-title">
+                {% if resume.resume_file %}
+                    Replace resume file
+                {% else %}
+                    Drag &amp; drop your resume here
+                {% endif %}
+            </p>
+            <p class="upload-drop-sub">or click the button below to browse</p>
+            <label class="button" style="cursor:pointer; margin-top:12px;">
+                &#128194; Choose File
+                <input id="resume_file" name="resume_file" type="file" accept=".pdf,.docx" style="display:none;">
+            </label>
+            <p id="upload-filename" class="upload-filename"></p>
+        </div>
+
         <div id="parse_status" class="parse-status" role="status" aria-live="polite"></div>
+
         {% if resume.resume_file %}
-            <p class="small">Current file: <a href="{{ url_for('uploaded_file', filename=resume.resume_file) }}" target="_blank" rel="noopener">{{ resume.resume_file }}</a></p>
+        <div class="current-file-info">
+            <span class="current-file-icon">&#128206;</span>
+            <div>
+                <span class="current-file-label">Current file</span>
+                <a href="{{ url_for('uploaded_file', filename=resume.resume_file) }}" target="_blank" rel="noopener" class="current-file-link">
+                    {{ resume.resume_file }}
+                </a>
+            </div>
+        </div>
         {% else %}
-            <p class="small">Supported file types: PDF and DOCX. Maximum size: 50 MB.</p>
+        <p class="form-hint" style="margin-top: 10px;">Supported: PDF and DOCX &nbsp;·&nbsp; Max 50 MB</p>
         {% endif %}
     </div>
 
-    <div><label for="full_name">Full name</label><input id="full_name" name="full_name" value="{{ resume.full_name or '' }}" placeholder="Your name"></div>
-    <div><label for="title">Title</label><input id="title" name="title" value="{{ resume.title or '' }}" placeholder="CSV Lead, Validation Consultant, etc."></div>
-    <div><label for="email">Email</label><input id="email" name="email" type="email" value="{{ resume.email or '' }}" placeholder="name@example.com"></div>
-    <div><label for="phone">Phone</label><input id="phone" name="phone" value="{{ resume.phone or '' }}" placeholder="Phone number"></div>
-    <div class="full"><label for="linkedin">LinkedIn</label><input id="linkedin" name="linkedin" type="url" value="{{ resume.linkedin or '' }}" placeholder="https://www.linkedin.com/in/yourprofile"></div>
-    <div class="full"><label for="location">Location</label><input id="location" name="location" value="{{ resume.location or '' }}" placeholder="City, State, Country"></div>
+    <!-- ── Section 2: Role / Group ───────────────────────────────────── -->
+    <div class="form-section card">
+        <div class="form-section-hdr">
+            <span class="form-section-icon" style="background:#d1fae5;color:#065f46;">&#127919;</span>
+            <div>
+                <h2 class="form-section-title">Role &amp; Group <span class="required-star">*</span></h2>
+                <p class="form-section-sub">Choose a group — it auto-fills the Title field below</p>
+            </div>
+        </div>
 
-    {% for field, label in [('summary','Summary'),('skills','Skills'),('experience','Work Experience'),('education','Education'),('certifications','Certifications'),('projects','Project Details')] %}
-    <div class="full">
-        <label for="{{ field }}">{{ label }}</label>
-        <textarea id="{{ field }}" name="{{ field }}" rows="5" placeholder="Add {{ label|lower }} details">{{ resume[field] or '' }}</textarea>
+        <div class="groups-field-wrap">
+            <select id="groups_select" class="form-select groups-select">
+                <option value="">— Select a role group —</option>
+                <optgroup label="Validation Roles">
+                    <option value="CSV Analyst">CSV Analyst</option>
+                    <option value="CSV Lead">CSV Lead</option>
+                    <option value="Validation Engineer">Validation Engineer</option>
+                    <option value="Validation Lead">Validation Lead</option>
+                    <option value="CQV Engineer">CQV Engineer</option>
+                    <option value="CQV Lead">CQV Lead</option>
+                    <option value="Automation Engineer">Automation Engineer</option>
+                    <option value="Automation Lead">Automation Lead</option>
+                    <option value="Tosca Engineer">Tosca Engineer</option>
+                    <option value="Tosca Lead">Tosca Lead</option>
+                    <option value="Test Engineer">Test Engineer</option>
+                    <option value="Test Lead">Test Lead</option>
+                    <option value="Design Control Consultant">Design Control Consultant</option>
+                </optgroup>
+                <optgroup label="IT Roles">
+                    <option value="Software Developer">Software Developer</option>
+                    <option value="Full Stack Developer">Full Stack Developer</option>
+                    <option value="Frontend Developer">Frontend Developer</option>
+                    <option value="Backend Developer">Backend Developer</option>
+                    <option value="DevOps Engineer">DevOps Engineer</option>
+                    <option value="Cloud Engineer">Cloud Engineer</option>
+                    <option value="Data Analyst">Data Analyst</option>
+                    <option value="Data Engineer">Data Engineer</option>
+                    <option value="Business Analyst">Business Analyst</option>
+                    <option value="QA Engineer">QA Engineer</option>
+                    <option value="Automation Tester">Automation Tester</option>
+                    <option value="Project Manager">Project Manager</option>
+                    <option value="Scrum Master">Scrum Master</option>
+                    <option value="UI/UX Designer">UI/UX Designer</option>
+                    <option value="Solution Architect">Solution Architect</option>
+                    <option value="Cybersecurity Engineer">Cybersecurity Engineer</option>
+                    <option value="Database Administrator">Database Administrator</option>
+                    <option value="AI/ML Engineer">AI/ML Engineer</option>
+                    <option value="SAP Consultant">SAP Consultant</option>
+                    <option value="Salesforce Developer">Salesforce Developer</option>
+                </optgroup>
+            </select>
+            <p id="groups_error" class="field-error-msg" style="display:none;">&#9888; Please select a Group before saving the profile.</p>
+        </div>
     </div>
-    {% endfor %}
 
-    <div class="full actions">
-        <button class="button" type="submit">Save Profile</button>
-        <a class="button secondary" href="{{ url_for('profile_list') }}">View Saved List</a>
+    <!-- ── Section 3: Personal Information ──────────────────────────── -->
+    <div class="form-section card">
+        <div class="form-section-hdr">
+            <span class="form-section-icon" style="background:#fef3c7;color:#92400e;">&#128100;</span>
+            <div>
+                <h2 class="form-section-title">Personal Information</h2>
+                <p class="form-section-sub">Basic contact and identity details</p>
+            </div>
+        </div>
+
+        <div class="field-grid">
+            <div class="field-group">
+                <label for="full_name">Full Name</label>
+                <input id="full_name" name="full_name" type="text"
+                       value="{{ resume.full_name or '' }}" placeholder="e.g. John Smith">
+            </div>
+            <div class="field-group">
+                <label for="title">Job Title</label>
+                <input id="title" name="title" type="text"
+                       value="{{ resume.title or '' }}" placeholder="e.g. CSV Lead, Validation Engineer">
+            </div>
+            <div class="field-group">
+                <label for="email">Email Address</label>
+                <input id="email" name="email" type="email"
+                       value="{{ resume.email or '' }}" placeholder="name@example.com">
+            </div>
+            <div class="field-group">
+                <label for="phone">Phone Number</label>
+                <input id="phone" name="phone" type="text"
+                       value="{{ resume.phone or '' }}" placeholder="+91 98765 43210">
+            </div>
+            <div class="field-group field-full">
+                <label for="linkedin">LinkedIn URL</label>
+                <input id="linkedin" name="linkedin" type="url"
+                       value="{{ resume.linkedin or '' }}" placeholder="https://www.linkedin.com/in/yourprofile">
+            </div>
+            <div class="field-group field-full">
+                <label for="location">Location</label>
+                <input id="location" name="location" type="text"
+                       value="{{ resume.location or '' }}" placeholder="City, State, Country">
+            </div>
+        </div>
     </div>
+
+    <!-- ── Section 4: Professional Details ──────────────────────────── -->
+    <div class="form-section card">
+        <div class="form-section-hdr">
+            <span class="form-section-icon" style="background:#ede9fe;color:#6d28d9;">&#128203;</span>
+            <div>
+                <h2 class="form-section-title">Professional Details</h2>
+                <p class="form-section-sub">These fields are auto-filled from the uploaded resume — review and edit as needed</p>
+            </div>
+        </div>
+
+        <div class="field-stack">
+            <div class="field-group">
+                <label for="summary">&#128221; Professional Summary</label>
+                <textarea id="summary" name="summary" rows="4"
+                          placeholder="Brief overview of professional background and expertise...">{{ resume.summary or '' }}</textarea>
+            </div>
+            <div class="field-group">
+                <label for="skills">&#9889; Skills</label>
+                <textarea id="skills" name="skills" rows="5"
+                          placeholder="List skills, one per line or comma-separated...">{{ resume.skills or '' }}</textarea>
+                <p class="form-hint">One skill per line works best, e.g. CSV, HP ALM, Python, GAMP5</p>
+            </div>
+            <div class="field-group">
+                <label for="experience">&#128188; Work Experience</label>
+                <textarea id="experience" name="experience" rows="6"
+                          placeholder="List positions held, companies, dates, and responsibilities...">{{ resume.experience or '' }}</textarea>
+            </div>
+            <div class="field-group">
+                <label for="education">&#127891; Education</label>
+                <textarea id="education" name="education" rows="4"
+                          placeholder="Degree, institution, year...">{{ resume.education or '' }}</textarea>
+            </div>
+            <div class="field-group">
+                <label for="certifications">&#127942; Certifications</label>
+                <textarea id="certifications" name="certifications" rows="4"
+                          placeholder="Certifications, courses, licenses...">{{ resume.certifications or '' }}</textarea>
+            </div>
+            <div class="field-group">
+                <label for="projects">&#128296; Project Details</label>
+                <textarea id="projects" name="projects" rows="5"
+                          placeholder="Key projects, clients, technologies used...">{{ resume.projects or '' }}</textarea>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Action Bar ────────────────────────────────────────────────── -->
+    <div class="form-action-bar">
+        <button class="button btn-save" type="submit">
+            &#10003; Save Profile
+        </button>
+        <a class="button secondary" href="{{ url_for('profile_list') }}">Cancel</a>
+    </div>
+
 </form>
 
 <script>
 (function () {
-    var fileInput = document.getElementById("resume_file");
-    var statusBox = document.getElementById("parse_status");
-    var parseUrl  = "{{ url_for('parse_resume_api') }}";
-    var fields    = ["full_name","title","email","phone","linkedin","location","summary","skills","experience","education","certifications","projects"];
+    /* ── Resume parse on file select ──────────────────────── */
+    var fileInput  = document.getElementById("resume_file");
+    var statusBox  = document.getElementById("parse_status");
+    var parseUrl   = "{{ url_for('parse_resume_api') }}";
+    var fields     = ["full_name","title","email","phone","linkedin","location","summary","skills","experience","education","certifications","projects"];
+    var fileNameEl = document.getElementById("upload-filename");
 
     function setStatus(msg, type) {
         statusBox.textContent = msg || "";
@@ -74,6 +246,10 @@
     fileInput.addEventListener("change", function() {
         var file = fileInput.files && fileInput.files[0];
         if (!file) return;
+
+        // Show filename
+        if (fileNameEl) fileNameEl.textContent = "Selected: " + file.name;
+
         var ext = file.name.split(".").pop().toLowerCase();
         if (["pdf", "docx"].indexOf(ext) === -1) {
             setStatus("Please choose a PDF or DOCX file only.", "error");
@@ -82,41 +258,61 @@
 
         var formData = new FormData();
         formData.append("resume_file", file);
-
         setStatus("Reading resume and updating fields...", "loading");
 
         var xhr = new XMLHttpRequest();
         xhr.open("POST", parseUrl, true);
         xhr.onload = function() {
-            if (xhr.status === 0) {
-                setStatus("Could not reach the server. Is Flask running?", "error");
-                return;
-            }
+            if (xhr.status === 0) { setStatus("Could not reach the server. Is Flask running?", "error"); return; }
             var result;
-            try {
-                result = JSON.parse(xhr.responseText);
-            } catch(e) {
-                setStatus("Server error (status " + xhr.status + "). Check the Flask console.", "error");
-                console.error("Non-JSON response:", xhr.responseText.substring(0, 300));
-                return;
+            try { result = JSON.parse(xhr.responseText); } catch(e) {
+                setStatus("Server error (status " + xhr.status + ").", "error"); return;
             }
-            if (!result.success) {
-                setStatus(result.message || "Could not extract resume details.", "error");
-                return;
-            }
+            if (!result.success) { setStatus(result.message || "Could not extract resume details.", "error"); return; }
             var count = fillFields(result.data || {});
             setStatus(
                 count > 0
-                    ? count + " field(s) updated from resume. Click Save Profile to add it to the list."
+                    ? "✓ " + count + " field(s) updated from resume. Review and click Save Profile."
                     : "Resume was read, but no matching values were found.",
                 count > 0 ? "success" : "error"
             );
         };
-        xhr.onerror = function() {
-            setStatus("Network error. Is Flask running on port 5000?", "error");
-        };
+        xhr.onerror = function() { setStatus("Network error. Is Flask running on port 5000?", "error"); };
         xhr.send(formData);
     });
+
+    /* ── Groups dropdown ─────────────────────────────────── */
+    var sel    = document.getElementById("groups_select");
+    var title  = document.getElementById("title");
+    var errMsg = document.getElementById("groups_error");
+    var form   = document.querySelector("form.edit-form");
+    if (!sel || !title || !form) return;
+
+    sel.addEventListener("change", function () {
+        if (this.value) {
+            title.value = this.value;
+            title.classList.add("auto-filled");
+            sel.classList.remove("field-error");
+            if (errMsg) errMsg.style.display = "none";
+        }
+    });
+
+    form.addEventListener("submit", function (e) {
+        if (!sel.value) {
+            e.preventDefault();
+            sel.classList.add("field-error");
+            if (errMsg) errMsg.style.display = "block";
+            sel.scrollIntoView({ behavior: "smooth", block: "center" });
+            sel.focus();
+        }
+    });
+
+    var currentTitle = title.value.trim();
+    if (currentTitle) {
+        for (var i = 0; i < sel.options.length; i++) {
+            if (sel.options[i].value === currentTitle) { sel.selectedIndex = i; break; }
+        }
+    }
 })();
 </script>
 {% endblock %}

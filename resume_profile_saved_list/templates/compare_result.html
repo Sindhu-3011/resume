@@ -1,0 +1,206 @@
+{% extends "base.html" %}
+{% block title %}Match Result | {{ resume.full_name }} vs {{ jd.title }}{% endblock %}
+{% block content %}
+
+<!-- Header -->
+<section class="hero card">
+    <div>
+        <p class="eyebrow">Resume vs JD Match</p>
+        <h1>{{ resume.full_name }}</h1>
+        <p class="muted">Compared against: <strong>{{ jd.title }}</strong>
+            <span class="jdm-cat-badge {% if jd.category == 'Validation Roles' %}jdm-cat-val{% else %}jdm-cat-it{% endif %}" style="margin-left:8px;">
+                {{ jd.category }}
+            </span>
+        </p>
+    </div>
+    <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:flex-start;">
+        <a class="button secondary" href="{{ url_for('compare_select_jd', resume_id=resume.id) }}">&#8592; Try Another JD</a>
+        <a class="button secondary" href="{{ url_for('profile_detail', resume_id=resume.id) }}">View Profile</a>
+    </div>
+</section>
+
+<!-- Change JD dropdown -->
+<div class="card" style="padding:14px 20px; display:flex; align-items:center; gap:14px; flex-wrap:wrap;">
+    <label style="font-weight:600; white-space:nowrap; color:#374151;">&#128260; Compare against:</label>
+    <select class="form-select" style="flex:1; min-width:220px; max-width:420px;"
+            onchange="if(this.value) window.location='/compare/{{ resume.id }}/'+this.value">
+        {% for other_jd in all_jds %}
+        <option value="{{ other_jd.id }}" {% if other_jd.id == jd.id %}selected{% endif %}>
+            [{{ other_jd.category }}] {{ other_jd.title }}
+        </option>
+        {% endfor %}
+    </select>
+</div>
+
+<!-- Main result layout -->
+<div class="dash-two-col">
+
+    <!-- Left: Score card -->
+    <div class="dash-col" style="flex:0.9;">
+
+        <!-- Big match percentage -->
+        <div class="card cmr-score-card">
+            <div class="cmr-circle-wrap">
+                <!-- SVG circle gauge. circumference = 2π×54 ≈ 339.29 -->
+                {% set circ = 339.29 %}
+                {% set fill = (result.match_percentage / 100 * circ) | round(1) %}
+                {% set stroke_color = '#15803d' if result.match_level_color == 'green'
+                                 else '#1d4ed8' if result.match_level_color == 'blue'
+                                 else '#d97706' if result.match_level_color == 'orange'
+                                 else '#dc2626' %}
+                <svg viewBox="0 0 120 120" class="cmr-svg">
+                    <circle cx="60" cy="60" r="54" class="cmr-circle-bg"/>
+                    <circle cx="60" cy="60" r="54" class="cmr-circle-fill"
+                            stroke="{{ stroke_color }}"
+                            stroke-dasharray="{{ fill }} {{ circ }}"
+                            transform="rotate(-90 60 60)"/>
+                </svg>
+                <div class="cmr-pct-label" style="color:{{ stroke_color }};">
+                    {{ result.match_percentage }}%
+                </div>
+            </div>
+
+            <div class="cmr-level-badge cmr-level-{{ result.match_level_color }}">
+                {{ result.match_level }}
+            </div>
+
+            <div class="cmr-sub-scores">
+                <div class="cmr-sub-row">
+                    <span class="cmr-sub-label">Skills Match</span>
+                    <div class="cmr-sub-bar-track">
+                        <div class="cmr-sub-bar-fill" style="width:{{ result.skills_match_percentage }}%; background:{{ stroke_color }};"></div>
+                    </div>
+                    <span class="cmr-sub-pct">{{ result.skills_match_percentage }}%</span>
+                </div>
+                <div class="cmr-sub-row">
+                    <span class="cmr-sub-label">Experience</span>
+                    <div class="cmr-sub-bar-track">
+                        <div class="cmr-sub-bar-fill" style="width:{{ result.experience_match_percentage }}%; background:#7c3aed;"></div>
+                    </div>
+                    <span class="cmr-sub-pct">{{ result.experience_match_percentage }}%</span>
+                </div>
+            </div>
+
+            <div class="cmr-stats-row">
+                <div class="cmr-stat">
+                    <span class="cmr-stat-val cmr-stat-green">{{ result.matched_count }}</span>
+                    <span class="cmr-stat-label">Matched</span>
+                </div>
+                <div class="cmr-stat">
+                    <span class="cmr-stat-val cmr-stat-red">{{ result.missing_count }}</span>
+                    <span class="cmr-stat-label">Missing</span>
+                </div>
+                <div class="cmr-stat">
+                    <span class="cmr-stat-val">{{ result.total_jd_requirements }}</span>
+                    <span class="cmr-stat-label">JD Items</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Experience Info -->
+        <div class="card cmr-exp-card">
+            <div class="section-header" style="margin-bottom:12px;">
+                <div class="section-icon icon-experience">&#128337;</div>
+                <h2 style="font-size:1rem;">Experience Assessment</h2>
+            </div>
+            <p class="muted" style="font-size:0.9rem; line-height:1.7;">{{ result.experience_note }}</p>
+            {% if result.jd_years_required %}
+            <div class="cmr-exp-row">
+                <span>JD requires</span>
+                <strong>{{ result.jd_years_required }}+ years</strong>
+            </div>
+            {% endif %}
+            {% if result.resume_years_estimated is not none %}
+            <div class="cmr-exp-row">
+                <span>Resume shows ~</span>
+                <strong>{{ result.resume_years_estimated }} year(s)</strong>
+            </div>
+            {% endif %}
+        </div>
+
+        <!-- JD info quick link -->
+        <div class="card" style="padding:16px 20px; display:flex; align-items:center; gap:12px;">
+            <span style="font-size:1.5rem;">&#128221;</span>
+            <div style="flex:1; min-width:0;">
+                <strong style="display:block; font-size:0.9rem;">{{ jd.title }}</strong>
+                <span class="text-muted" style="font-size:0.82rem;">{{ jd.category }}</span>
+            </div>
+            <a class="button secondary" style="padding:6px 14px; font-size:0.85rem;"
+               href="{{ url_for('jd_detail', jd_id=jd.id) }}">View JD</a>
+        </div>
+
+    </div>
+
+    <!-- Right: Matched / Missing skills -->
+    <div class="dash-col" style="flex:1.1;">
+
+        <!-- Matched skills -->
+        <div class="card">
+            <div class="section-header" style="margin-bottom:14px;">
+                <div class="section-icon" style="background:#d1fae5; color:#15803d;">&#10003;</div>
+                <h2 style="color:#15803d;">Matched Skills ({{ result.matched_count }})</h2>
+            </div>
+            {% if result.matched_skills %}
+            <div class="cmr-tag-wrap">
+                {% for skill in result.matched_skills %}
+                <span class="cmr-tag cmr-tag-match">{{ skill }}</span>
+                {% endfor %}
+            </div>
+            {% else %}
+            <p class="muted" style="text-align:center; padding:16px 0;">No matched skills found.</p>
+            {% endif %}
+        </div>
+
+        <!-- Missing skills -->
+        <div class="card">
+            <div class="section-header" style="margin-bottom:14px;">
+                <div class="section-icon" style="background:#fee2e2; color:#dc2626;">&#10007;</div>
+                <h2 style="color:#dc2626;">Missing / Gap Skills ({{ result.missing_count }})</h2>
+            </div>
+            {% if result.missing_skills %}
+            <div class="cmr-tag-wrap">
+                {% for skill in result.missing_skills %}
+                <span class="cmr-tag cmr-tag-miss">{{ skill }}</span>
+                {% endfor %}
+            </div>
+            {% else %}
+            <p class="muted" style="text-align:center; padding:16px 0; color:#15803d; font-weight:600;">
+                &#127881; All required skills matched!
+            </p>
+            {% endif %}
+        </div>
+
+        <!-- Strong Areas -->
+        {% if result.strong_areas %}
+        <div class="card">
+            <div class="section-header" style="margin-bottom:14px;">
+                <div class="section-icon" style="background:#ede9fe; color:#7c3aed;">&#9733;</div>
+                <h2 style="color:#7c3aed;">Strong Areas</h2>
+            </div>
+            <div class="cmr-tag-wrap">
+                {% for skill in result.strong_areas %}
+                <span class="cmr-tag cmr-tag-strong">{{ skill }}</span>
+                {% endfor %}
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Weak Areas -->
+        {% if result.weak_areas %}
+        <div class="card">
+            <div class="section-header" style="margin-bottom:14px;">
+                <div class="section-icon" style="background:#fff7ed; color:#d97706;">&#9888;</div>
+                <h2 style="color:#d97706;">Skill Gaps to Address</h2>
+            </div>
+            <div class="cmr-tag-wrap">
+                {% for skill in result.weak_areas %}
+                <span class="cmr-tag cmr-tag-weak">{{ skill }}</span>
+                {% endfor %}
+            </div>
+        </div>
+        {% endif %}
+
+    </div>
+
+</div>
+{% endblock %}

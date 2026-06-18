@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+{% block title %}{{ jd.title }} | JD Management{% endblock %}
+{% block content %}
+
+<section class="hero card">
+    <div>
+        <p class="eyebrow">Job Description</p>
+        <h1>{{ jd.title }}</h1>
+        <div style="display:flex; gap:10px; margin-top:8px; flex-wrap:wrap;">
+            <span class="jdm-cat-badge {% if jd.category == 'Validation Roles' %}jdm-cat-val{% else %}jdm-cat-it{% endif %}">{{ jd.category }}</span>
+            {% if jd.role %}<span class="role-badge">{{ jd.role }}</span>{% endif %}
+            {% if jd.jd_file %}
+            <a class="button secondary" style="padding:4px 12px; font-size:0.85rem;"
+               href="{{ url_for('jd_uploaded_file', filename=jd.jd_file) }}" target="_blank" rel="noopener">
+                &#128196; Download JD File
+            </a>
+            {% endif %}
+        </div>
+    </div>
+    <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:flex-start;">
+        <a class="button secondary" href="{{ url_for('jd_management') }}">← All JDs</a>
+        <a class="button secondary" href="{{ url_for('jd_edit', jd_id=jd.id) }}">Edit</a>
+        <form method="post" action="{{ url_for('jd_delete', jd_id=jd.id) }}" style="display:inline"
+              onsubmit="return confirm('Delete this JD?')">
+            <button type="submit" class="button danger">Delete</button>
+        </form>
+    </div>
+</section>
+
+<div class="dash-two-col">
+
+    <!-- Left: JD content -->
+    <div class="dash-col" style="flex:1.4;">
+
+        {% if jd.responsibilities %}
+        <div class="card">
+            <div class="section-header" style="margin-bottom:14px;">
+                <div class="section-icon icon-experience">&#128203;</div>
+                <h2>Responsibilities</h2>
+            </div>
+            <div class="jd-content-text">{{ jd.responsibilities | replace('\n', '<br>') | safe }}</div>
+        </div>
+        {% endif %}
+
+        {% if jd.requirements %}
+        <div class="card">
+            <div class="section-header" style="margin-bottom:14px;">
+                <div class="section-icon icon-education">&#127891;</div>
+                <h2>Requirements / Qualifications</h2>
+            </div>
+            <div class="jd-content-text">{{ jd.requirements | replace('\n', '<br>') | safe }}</div>
+        </div>
+        {% endif %}
+
+    </div>
+
+    <!-- Right: Skills + Compare -->
+    <div class="dash-col">
+
+        {% if jd.skills %}
+        <div class="card">
+            <div class="section-header" style="margin-bottom:14px;">
+                <div class="section-icon icon-skills">&#9881;</div>
+                <h2>Required Skills</h2>
+            </div>
+            <div class="jd-skills-wrap">
+                {% for skill in jd.skills.splitlines() %}
+                    {% set s = skill.strip() %}
+                    {% if s %}
+                    <span class="jd-skill-tag">{{ s }}</span>
+                    {% endif %}
+                {% endfor %}
+            </div>
+        </div>
+        {% endif %}
+
+        {% if jd.keywords %}
+        <div class="card">
+            <div class="section-header" style="margin-bottom:10px;">
+                <div class="section-icon icon-summary">&#128269;</div>
+                <h2>Keywords</h2>
+            </div>
+            <p class="muted" style="font-size:0.9rem; line-height:1.8;">{{ jd.keywords }}</p>
+        </div>
+        {% endif %}
+
+        <!-- Compare against a resume -->
+        <div class="card">
+            <div class="section-header" style="margin-bottom:14px;">
+                <div class="section-icon icon-projects">&#128202;</div>
+                <h2>Compare Resumes</h2>
+            </div>
+            <p class="muted" style="font-size:0.9rem; margin-bottom:14px;">Select a profile to compare against this JD.</p>
+            {% if resumes %}
+            <div class="jd-compare-list">
+                {% for r in resumes %}
+                <a class="jd-compare-row" href="{{ url_for('compare_result', resume_id=r.id, jd_id=jd.id) }}">
+                    <span class="profile-avatar" style="width:34px;height:34px;font-size:0.9rem;flex-shrink:0;">{{ (r.full_name or 'U')[0] | upper }}</span>
+                    <span style="flex:1; min-width:0;">
+                        <strong style="display:block; font-size:0.9rem;">{{ r.full_name or '—' }}</strong>
+                        <span class="text-muted" style="font-size:0.8rem;">{{ r.title or '—' }}</span>
+                    </span>
+                    <span class="jdm-compare-arrow">&#8594;</span>
+                </a>
+                {% endfor %}
+            </div>
+            {% else %}
+            <p class="muted" style="text-align:center; padding:16px 0;">No profiles in the system yet.</p>
+            {% endif %}
+        </div>
+
+    </div>
+</div>
+{% endblock %}
