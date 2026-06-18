@@ -814,6 +814,7 @@ _NAME_STOPWORDS = frozenset({
     "seeking", "passionate", "motivated", "proactive", "dedicated",
     "dynamic", "detail", "focused", "professional", "over", "years", "year",
     "strong", "excellent", "extensive", "hands", "proven", "seasoned",
+    "total", "experience", "current", "employer", "designation", "qualification",
 })
 
 
