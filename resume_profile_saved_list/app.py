@@ -1190,11 +1190,19 @@ def parse_resume_text(text, name_hint=None):
     ]
     # Name fallback: look for a line that actually looks like a person's name.
     # Prevents professional summary sentences from being assigned as the name.
+    # Prioritize all-caps names (likely to be actual names in resume headers)
     if not parsed["full_name"]:
+        # First pass: look for all-caps names (e.g., "SIVARANJANI D")
         for _nl in useful_top_lines:
-            if _looks_like_name(_nl):
+            if _nl.isupper() and _looks_like_name(_nl):
                 parsed["full_name"] = _nl[:80]
                 break
+        # Second pass: look for any proper-cased name
+        if not parsed["full_name"]:
+            for _nl in useful_top_lines:
+                if _looks_like_name(_nl):
+                    parsed["full_name"] = _nl[:80]
+                    break
         if not parsed["full_name"]:
             # Looser pass: short proper-cased line with 2-5 words and no stopwords
             for _nl in useful_top_lines:
