@@ -1144,6 +1144,17 @@ def parse_resume_text(text, name_hint=None):
     if linkedin_match:
         parsed["linkedin"] = "https://www.linkedin.com/in/" + linkedin_match.group(1)
 
+    # Remove all LinkedIn URLs and fragments from text
+    text = re.sub(r'https?://[^\s]*linkedin\.com[^\s]*', '', text, flags=re.I)
+    text = re.sub(r'www\.linkedin\.com[^\s]*', '', text, flags=re.I)
+    text = re.sub(r'linkedin\.com/in/[a-zA-Z0-9\-_%/@?=&#]*', '', text, flags=re.I)
+    text = re.sub(r'\?skipRedirect[^\s]*|\&skipRedirect[^\s]*|#skipRedirect[^\s]*', '', text, flags=re.I)
+    # Remove standalone LinkedIn profile ID fragments (e.g., "karnam-29a6b416a/")
+    text = re.sub(r'^\s*[a-z]+\-[a-z0-9]+/?$', '', text, flags=re.MULTILINE | re.I)
+
+    lines = [line.strip() for line in text.split('\n')]
+    lines = [line for line in lines if line]
+
     if not parsed["full_name"]:
         parsed["full_name"] = parse_label_value(lines, ["name", "full name", "candidate name"])
     parsed["title"] = parse_label_value(lines, ["title", "designation", "role", "current role"])
@@ -1458,7 +1469,8 @@ def edit_resume(resume_id=None):
             )
             new_id = cursor.fetchone()["id"]
             sync_skills(conn, new_id, merged.get("skills", ""))
-            return redirect(url_for("profile_list"))
+            flash("Profile saved successfully! Here are your top matching roles.", "success")
+            return redirect(url_for("profile_detail", resume_id=new_id))
 
         # GET
         if resume_id:
@@ -1499,9 +1511,30 @@ def profile_list():
 def profile_detail(resume_id):
     with db_conn() as conn:
         resume = conn.execute("SELECT * FROM resume WHERE id = %s", (resume_id,)).fetchone()
-    if not resume:
-        return "Profile not found", 404
-    return render_template("profile.html", resume=resume)
+        if not resume:
+            return "Profile not found", 404
+
+        # Calculate top 3 matching JDs
+        jds = conn.execute("SELECT * FROM job_description ORDER BY created_at DESC").fetchall()
+        resume_dict = dict(resume)
+
+        matches = []
+        for jd in jds:
+            jd_dict = dict(jd)
+            score = calculate_match_score(resume_dict, jd_dict)
+            matches.append({
+                'jd_id': jd['id'],
+                'jd_title': jd['title'],
+                'match_percentage': score['match_percentage'],
+                'matched_count': score['matched_count'],
+                'total_jd_requirements': score['total_jd_requirements']
+            })
+
+        matches.sort(key=lambda x: x['match_percentage'], reverse=True)
+        top_matches = matches[:3]
+        is_weak = top_matches and top_matches[0]['match_percentage'] < 50
+
+    return render_template("profile.html", resume=resume, top_matches=top_matches, is_weak=is_weak)
 
 
 @app.route("/profile/slug/<slug>")
