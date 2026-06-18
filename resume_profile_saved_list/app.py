@@ -1182,7 +1182,8 @@ def parse_resume_text(text, name_hint=None):
         and not (len(line.strip()) <= 4 and line.strip().isalpha() and line.strip().islower())
         and not re.search(
             r"@|www\.|linkedin|github|\d{6,}|\+\d{1,3}[\s\-]?\d{3,}|(?<!\w)\d{10,}"
-            r"|date.{0,5}birth|nationality|dob\b|gender|marital|\d{1,2}[./]\d{1,2}[./]\d{2,4}",
+            r"|date.{0,5}birth|nationality|dob\b|gender|marital|\d{1,2}[./]\d{1,2}[./]\d{2,4}"
+            r"|total experience|current employer|current designation|qualification|designation",
             line, re.I,
         )
     ]
