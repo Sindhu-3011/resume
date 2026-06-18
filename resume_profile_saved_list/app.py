@@ -672,6 +672,7 @@ def find_sections(lines):
         "websites portfolios and profiles", "websites and profiles",
         "websites portfolios", "and profiles",
         "additional information", "other information", "extra curricular",
+        "achievements", "soft skills",
     }
     _SKIP_STARTSWITH = {
         "websites portfolios and profiles", "websites and profiles",
