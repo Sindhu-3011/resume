@@ -667,11 +667,11 @@ def canonical_section_name(line):
 def find_sections(lines):
     sections = {key: "" for key in SECTION_ALIASES}
     _SKIP_HEADINGS = {
-        "personal", "personal information", "personal details",
-        "references", "declaration", "hobbies", "interests", "languages",
+        "personal", "personal information", "personal details", "other personal details",
+        "references", "declaration", "interests", "languages",
         "websites portfolios and profiles", "websites and profiles",
         "websites portfolios", "and profiles",
-        "additional information", "other information",
+        "additional information", "other information", "extra curricular",
     }
     _SKIP_STARTSWITH = {
         "websites portfolios and profiles", "websites and profiles",
