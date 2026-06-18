@@ -1199,12 +1199,19 @@ def parse_resume_text(text, name_hint=None):
     # Prevents professional summary sentences from being assigned as the name.
     # Prioritize all-caps names (likely to be actual names in resume headers)
     if not parsed["full_name"]:
-        # First pass: look for all-caps names (e.g., "SIVARANJANI D")
-        for _nl in useful_top_lines:
+        # First pass: look for all-caps names in FIRST 10 lines (e.g., "SIVARANJANI D")
+        for _nl in useful_top_lines[:10]:
             if _nl.isupper() and _looks_like_name(_nl):
                 parsed["full_name"] = _nl[:80]
                 break
-        # Second pass: look for any proper-cased name
+        # Second pass: look for TWO-WORD names (common name pattern) in first 15 lines
+        if not parsed["full_name"]:
+            for _nl in useful_top_lines[:15]:
+                _words = _nl.split()
+                if len(_words) == 2 and _looks_like_name(_nl):
+                    parsed["full_name"] = _nl[:80]
+                    break
+        # Third pass: look for any proper-cased name in all useful lines
         if not parsed["full_name"]:
             for _nl in useful_top_lines:
                 if _looks_like_name(_nl):
