@@ -1325,13 +1325,18 @@ def parse_resume_text(text, name_hint=None):
 
     # ── Post-process: Extract skills from 2-column layouts ──────────────────────
     # In some PDFs (e.g., Sivaranjani's), skills are interleaved with summary due to
-    # column extraction. If skills section is missing but summary exists and contains
-    # mixed skills + summary text, extract the skills items.
-    if not parsed.get("skills") and parsed.get("summary"):
-        summary_lines = parsed["summary"].split('\n')
+    # column extraction. If skills section is missing, extract from summary AND certifications.
+    if not parsed.get("skills"):
         skills_items = []
 
-        for line in summary_lines:
+        # Collect lines from multiple sections that might contain skills
+        sections_to_scan = []
+        if parsed.get("summary"):
+            sections_to_scan.extend(parsed["summary"].split('\n'))
+        if parsed.get("certifications"):
+            sections_to_scan.extend(parsed["certifications"].split('\n'))
+
+        for line in sections_to_scan:
             line_stripped = line.strip()
 
             if not line_stripped or len(line_stripped) < 5:
@@ -1345,39 +1350,60 @@ def parse_resume_text(text, name_hint=None):
             if line_stripped.endswith('.'):
                 continue
 
-            # Detection strategy: skills often have special formatting
-            # Pattern 1: Ends with & or ( (incomplete lines are often skills continuing to next line)
-            if line_stripped.endswith('&') or line_stripped.endswith('('):
-                skills_items.append(line_stripped)
+            # Extract skill, handling cases where skill + summary text appear on same line
+            # Pattern: skill text ends where summary paragraph begins (indicated by "Experienced", "professional", etc.)
+            skill_part = line_stripped
+            if any(marker in line_stripped for marker in [' Experienced ', ' professional ', ' compliance ', ' and compliance']):
+                # Find the skill part before summary text
+                for marker in [' Experienced ', ' professional ']:
+                    if marker in line_stripped:
+                        skill_part = line_stripped.split(marker)[0].strip()
+                        break
+
+            # Pattern 1: Ends with & or ( (incomplete lines are skills continuing to next line)
+            if skill_part.endswith('&') or skill_part.endswith('('):
+                skills_items.append(skill_part)
                 continue
 
-            # Pattern 2: Short lines (5-80 chars) with skill indicators (/, &, parens)
-            has_skill_indicator = any(c in line_stripped for c in ['&', '/', '(', ')'])
-            if has_skill_indicator and len(line_stripped) <= 80:
-                # Check it's not just a long sentence with parens
-                if not len(line_stripped.split()) > 7:
-                    skills_items.append(line_stripped)
+            # Pattern 2: Contains skill indicators (&, /, parens, colons) and is reasonably short
+            has_skill_indicator = any(c in skill_part for c in ['&', '/', '(', ')', ':'])
+            if has_skill_indicator and len(skill_part) <= 90:
+                # Accept if it has the skill pattern
+                word_count = len(skill_part.split())
+                if word_count <= 8:  # Allow slightly longer for multi-part skills
+                    skills_items.append(skill_part)
                     continue
 
-            # Pattern 3: Single/double-word skill names (5-40 chars, no spaces or 1-2 spaces)
-            word_count = len(line_stripped.split())
-            if 1 <= word_count <= 2 and 5 <= len(line_stripped) <= 40:
-                skills_items.append(line_stripped)
+            # Pattern 3: Short items (1-2 words, 5-40 chars) - likely single skill names
+            word_count = len(skill_part.split())
+            if 1 <= word_count <= 2 and 5 <= len(skill_part) <= 40:
+                skills_items.append(skill_part)
                 continue
 
-            # Pattern 4: Capitalized acronyms or standards (like "MDD & EU MDR 745/2017", "STED and GSPRC")
-            # These are usually short and have special chars or all-caps parts
-            if word_count <= 5 and len(line_stripped) <= 50:
-                has_acronym = any(w.isupper() and len(w) <= 5 for w in line_stripped.split())
-                has_number = any(c.isdigit() for c in line_stripped)
-                if (has_acronym or has_number) and has_skill_indicator:
-                    skills_items.append(line_stripped)
+            # Pattern 4: Multi-word items with acronyms/standards (3-6 words with & or /)
+            # Examples: "Medical Device Lifecycle Management & UDI", "ASTM F1980 / ISO 20417"
+            if 3 <= word_count <= 6 and (has_skill_indicator or any(c.isdigit() for c in skill_part)):
+                # Likely a skill with special formatting
+                if len(skill_part) <= 90:
+                    skills_items.append(skill_part)
+                    continue
+
+            # Pattern 5: Lines with acronyms/numbers that look like skills even without & or /
+            # Examples: "MDD & EU MDR 745/2017", "ASTM F1980 / ISO 20417"
+            # Accept short-medium lines (up to 5 words) that have numbers and caps
+            if 2 <= word_count <= 5 and len(skill_part) <= 90:
+                has_number = any(c.isdigit() for c in skill_part)
+                has_caps = any(w.isupper() for w in skill_part.split())
+                if has_number and has_caps and not skill_part.endswith(' that') and not skill_part.endswith(' and'):
+                    skills_items.append(skill_part)
 
         if skills_items:
             parsed["skills"] = "\n".join(skills_items)
             # Remove extracted skills from summary to clean it up
-            summary_cleaned = '\n'.join(l for l in summary_lines if l.strip() not in skills_items)
-            parsed["summary"] = summary_cleaned.strip()
+            if parsed.get("summary"):
+                summary_lines = parsed["summary"].split('\n')
+                summary_cleaned = '\n'.join(l for l in summary_lines if l.strip() not in skills_items)
+                parsed["summary"] = summary_cleaned.strip()
 
     # Capture the unheaded intro paragraph that precedes the first section heading.
     # Use it only when no explicitly labelled summary section was found; explicit
