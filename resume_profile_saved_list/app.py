@@ -671,6 +671,67 @@ def canonical_section_name(line):
     return None
 
 
+def _looks_like_company_name(line):
+    """
+    Detect if a line looks like a company name.
+    E.g., "HCL TECH", "TATA Elxsi", "Lyrus Life Sciences Pvt. Ltd.", "Google India"
+    """
+    line = line.strip()
+
+    # Remove trailing punctuation
+    line = line.rstrip('.,;:!?')
+    words = line.split()
+
+    # Must be 2-6 words
+    if not (2 <= len(words) <= 6):
+        return False
+
+    # Check if all words start with uppercase
+    if not all(w and w[0].isupper() for w in words):
+        return False
+
+    # Exclude common non-company words that appear in job titles or descriptions
+    exclude_words = {
+        "the", "and", "or", "for", "with", "in", "at", "by", "as",
+        "to", "from", "of", "on", "is", "are", "be", "been",
+        "experience", "duration", "designation", "project",
+        "highly", "skilled", "professional", "years", "month"
+    }
+    lower_words = {w.lower().rstrip('.,;:') for w in words}
+    if lower_words & exclude_words:
+        return False
+
+    # Company keywords (including variations)
+    company_keywords = {
+        "tech", "technologies", "systems", "solutions", "services",
+        "group", "corporation", "corp", "inc", "ltd", "llc", "llp",
+        "company", "consulting", "consultants", "labs", "designs",
+        "pvt", "private", "limited", "healthcare", "pharma", "bio",
+        "sciences", "elxsi", "tcs", "infosys", "wipro", "accenture"
+    }
+    has_company_keyword = any(w.lower().rstrip('.,;:') in company_keywords for w in words)
+
+    # Pattern 1: "XYZ Corp/Ltd/Inc" or "XYZ Group" etc
+    if has_company_keyword:
+        return True
+
+    # Pattern 2: All words are uppercase (e.g., "HCL TECH", "TATA ELXSI")
+    if all(w.isupper() for w in words):
+        return True
+
+    # Pattern 3: 2-3 capitalized words, likely a company (e.g., "Google India", "Amazon AWS")
+    # But exclude if it looks like a title (contains job keywords)
+    job_keywords = {
+        "engineer", "manager", "lead", "analyst", "developer", "designer",
+        "specialist", "consultant", "director", "officer", "executive"
+    }
+    has_job_keyword = any(w.lower() in job_keywords for w in words)
+    if not has_job_keyword and len(words) <= 4:
+        return True
+
+    return False
+
+
 def find_sections(lines):
     sections = {key: "" for key in SECTION_ALIASES}
     _SKIP_HEADINGS = {
@@ -713,19 +774,23 @@ def find_sections(lines):
         inline_remainder = None
 
         if not section:
-            words = line.split()
-            for n in range(min(3, len(words)), 0, -1):
-                prefix_section = canonical_section_name(" ".join(words[:n]))
-                if prefix_section:
-                    remainder = " ".join(words[n:]).strip()
-                    # Single-word prefix (e.g. "Experience") only counts as a heading when:
-                    #   • it IS the entire line (no remainder), OR
-                    #   • it ends with a separator like "Skills:" — not a content sentence.
-                    if n == 1 and remainder and not words[0].endswith(':'):
-                        break  # "Experience on all ALM modules" → content, not heading
-                    section = prefix_section
-                    inline_remainder = remainder if remainder else None
-                    break
+            # Check if this line looks like a company name (for experience sections)
+            if _looks_like_company_name(line):
+                section = "experience"
+            else:
+                words = line.split()
+                for n in range(min(3, len(words)), 0, -1):
+                    prefix_section = canonical_section_name(" ".join(words[:n]))
+                    if prefix_section:
+                        remainder = " ".join(words[n:]).strip()
+                        # Single-word prefix (e.g. "Experience") only counts as a heading when:
+                        #   • it IS the entire line (no remainder), OR
+                        #   • it ends with a separator like "Skills:" — not a content sentence.
+                        if n == 1 and remainder and not words[0].endswith(':'):
+                            break  # "Experience on all ALM modules" → content, not heading
+                        section = prefix_section
+                        inline_remainder = remainder if remainder else None
+                        break
 
         if section:
             if section == current:
@@ -1257,6 +1322,42 @@ def parse_resume_text(text, name_hint=None):
                 break
 
     parsed.update(find_sections(lines))
+
+    # ── Post-process: Extract skills from 2-column layouts ──────────────────────
+    # In some PDFs (e.g., Sivaranjani's), skills are interleaved with summary due to
+    # column extraction. If skills section is missing but summary exists and contains
+    # mixed skills + summary text, extract the skills items.
+    if not parsed.get("skills") and parsed.get("summary"):
+        summary_lines = parsed["summary"].split('\n')
+        skills_items = []
+
+        for line in summary_lines:
+            line_stripped = line.strip()
+
+            # Filter for skill-like items: short lines (10-80 chars) without periods
+            if not line_stripped or len(line_stripped) < 8 or len(line_stripped) > 80:
+                continue
+
+            # Skip full sentences/paragraphs (ends with period or has 7+ words)
+            word_count = len(line_stripped.split())
+            if line_stripped.endswith('.') or word_count > 6:
+                continue
+
+            # Must start with capital letter (name case)
+            if not line_stripped[0].isupper():
+                continue
+
+            # Skip lines with common non-skill words
+            if re.match(r'^(regulatory|experienced|proven|strong|expertise|knowledge|skills?)', line_stripped, re.I):
+                continue
+
+            skills_items.append(line_stripped)
+
+        if skills_items:
+            parsed["skills"] = "\n".join(skills_items)
+            # Remove extracted skills from summary to clean it up
+            summary_cleaned = '\n'.join(l for l in summary_lines if l.strip() not in skills_items)
+            parsed["summary"] = summary_cleaned.strip()
 
     # Capture the unheaded intro paragraph that precedes the first section heading.
     # Use it only when no explicitly labelled summary section was found; explicit
