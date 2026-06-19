@@ -1334,24 +1334,44 @@ def parse_resume_text(text, name_hint=None):
         for line in summary_lines:
             line_stripped = line.strip()
 
-            # Filter for skill-like items: short lines (10-80 chars) without periods
-            if not line_stripped or len(line_stripped) < 8 or len(line_stripped) > 80:
+            if not line_stripped or len(line_stripped) < 5:
                 continue
 
-            # Skip full sentences/paragraphs (ends with period or has 7+ words)
-            word_count = len(line_stripped.split())
-            if line_stripped.endswith('.') or word_count > 6:
-                continue
-
-            # Must start with capital letter (name case)
+            # Must start with capital letter
             if not line_stripped[0].isupper():
                 continue
 
-            # Skip lines with common non-skill words
-            if re.match(r'^(regulatory|experienced|proven|strong|expertise|knowledge|skills?)', line_stripped, re.I):
+            # Skip full sentences that end with periods
+            if line_stripped.endswith('.'):
                 continue
 
-            skills_items.append(line_stripped)
+            # Detection strategy: skills often have special formatting
+            # Pattern 1: Ends with & or ( (incomplete lines are often skills continuing to next line)
+            if line_stripped.endswith('&') or line_stripped.endswith('('):
+                skills_items.append(line_stripped)
+                continue
+
+            # Pattern 2: Short lines (5-80 chars) with skill indicators (/, &, parens)
+            has_skill_indicator = any(c in line_stripped for c in ['&', '/', '(', ')'])
+            if has_skill_indicator and len(line_stripped) <= 80:
+                # Check it's not just a long sentence with parens
+                if not len(line_stripped.split()) > 7:
+                    skills_items.append(line_stripped)
+                    continue
+
+            # Pattern 3: Single/double-word skill names (5-40 chars, no spaces or 1-2 spaces)
+            word_count = len(line_stripped.split())
+            if 1 <= word_count <= 2 and 5 <= len(line_stripped) <= 40:
+                skills_items.append(line_stripped)
+                continue
+
+            # Pattern 4: Capitalized acronyms or standards (like "MDD & EU MDR 745/2017", "STED and GSPRC")
+            # These are usually short and have special chars or all-caps parts
+            if word_count <= 5 and len(line_stripped) <= 50:
+                has_acronym = any(w.isupper() and len(w) <= 5 for w in line_stripped.split())
+                has_number = any(c.isdigit() for c in line_stripped)
+                if (has_acronym or has_number) and has_skill_indicator:
+                    skills_items.append(line_stripped)
 
         if skills_items:
             parsed["skills"] = "\n".join(skills_items)
