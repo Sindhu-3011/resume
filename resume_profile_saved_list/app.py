@@ -823,6 +823,9 @@ _NAME_STOPWORDS = frozenset({
     "strong", "excellent", "extensive", "hands", "proven", "seasoned",
     "total", "experience", "current", "employer", "designation", "qualification",
     "key", "skills", "competencies", "summary", "objectives", "highlights",
+    "personal", "information", "education", "project", "work", "certification",
+    "achievement", "language", "hobby", "extracurricular", "tools", "applications",
+    "core", "section", "header", "details", "accomplishment", "award",
 })
 
 
