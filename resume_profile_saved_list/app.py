@@ -2081,6 +2081,234 @@ def profile_detail(resume_id):
     return render_template("profile.html", resume=resume, top_matches=top_matches, is_weak=is_weak)
 
 
+@app.route("/profile/<int:resume_id>/export-top-matches")
+def export_top_matches(resume_id):
+    """Export top 3 matching JDs with resume comparison as JSON."""
+    with db_conn() as conn:
+        resume = conn.execute("SELECT * FROM resume WHERE id = %s", (resume_id,)).fetchone()
+        if not resume:
+            return jsonify({"error": "Profile not found"}), 404
+
+        # Calculate top 3 matching JDs
+        jds = conn.execute("SELECT * FROM job_description ORDER BY created_at DESC").fetchall()
+        resume_dict = dict(resume)
+
+        matches = []
+        for jd in jds:
+            jd_dict = dict(jd)
+            score = calculate_match_score(resume_dict, jd_dict)
+            matches.append({
+                'jd': jd_dict,
+                'jd_id': jd['id'],
+                'jd_title': jd['title'],
+                'match_percentage': score['match_percentage'],
+                'matched_count': score['matched_count'],
+                'total_jd_requirements': score['total_jd_requirements'],
+                'matched_skills': score.get('matched_skills', []),
+                'missing_skills': score.get('missing_skills', [])
+            })
+
+        matches.sort(key=lambda x: x['match_percentage'], reverse=True)
+        top_matches = matches[:3]
+
+    # Prepare export data
+    export_data = {
+        'resume': {
+            'full_name': resume_dict.get('full_name'),
+            'title': resume_dict.get('title'),
+            'email': resume_dict.get('email'),
+            'phone': resume_dict.get('phone'),
+            'location': resume_dict.get('location'),
+            'skills': resume_dict.get('skills'),
+            'experience': resume_dict.get('experience'),
+            'education': resume_dict.get('education')
+        },
+        'top_3_matching_jds': []
+    }
+
+    for match in top_matches:
+        jd_data = {
+            'rank': len(export_data['top_3_matching_jds']) + 1,
+            'jd_id': match['jd_id'],
+            'title': match['jd_title'],
+            'category': match['jd'].get('category'),
+            'role': match['jd'].get('role'),
+            'match_percentage': match['match_percentage'],
+            'skills_matched': f"{match['matched_count']}/{match['total_jd_requirements']}",
+            'matched_skills': match.get('matched_skills', []),
+            'missing_skills': match.get('missing_skills', []),
+            'details': {
+                'responsibilities': match['jd'].get('responsibilities'),
+                'requirements': match['jd'].get('requirements'),
+                'skills': match['jd'].get('skills'),
+                'keywords': match['jd'].get('keywords')
+            }
+        }
+        export_data['top_3_matching_jds'].append(jd_data)
+
+    filename = f"{resume_dict.get('full_name', 'resume').replace(' ', '_')}_top_3_matches.json"
+    return send_file(
+        BytesIO(json.dumps(export_data, indent=2).encode()),
+        mimetype='application/json',
+        as_attachment=True,
+        download_name=filename
+    )
+
+
+@app.route("/profile/<int:resume_id>/export-top-matches-pdf")
+def export_top_matches_pdf(resume_id):
+    """Export top 3 matching JDs with resume as PDF."""
+    with db_conn() as conn:
+        resume = conn.execute("SELECT * FROM resume WHERE id = %s", (resume_id,)).fetchone()
+        if not resume:
+            return "Profile not found", 404
+
+        # Calculate top 3 matching JDs
+        jds = conn.execute("SELECT * FROM job_description ORDER BY created_at DESC").fetchall()
+        resume_dict = dict(resume)
+
+        matches = []
+        for jd in jds:
+            jd_dict = dict(jd)
+            score = calculate_match_score(resume_dict, jd_dict)
+            matches.append({
+                'jd': jd_dict,
+                'jd_id': jd['id'],
+                'jd_title': jd['title'],
+                'match_percentage': score['match_percentage'],
+                'matched_count': score['matched_count'],
+                'total_jd_requirements': score['total_jd_requirements']
+            })
+
+        matches.sort(key=lambda x: x['match_percentage'], reverse=True)
+        top_matches = matches[:3]
+
+    # Generate PDF
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter,
+                          topMargin=0.5*inch, bottomMargin=0.5*inch,
+                          leftMargin=0.75*inch, rightMargin=0.75*inch)
+    story = []
+    styles = getSampleStyleSheet()
+
+    # Resume Header
+    title_style = ParagraphStyle(
+        'CustomTitle',
+        parent=styles['Heading1'],
+        fontSize=22,
+        textColor='#1e293b',
+        spaceAfter=4,
+        alignment=TA_CENTER,
+        fontName='Helvetica-Bold'
+    )
+    story.append(Paragraph(f"Resume: {resume_dict.get('full_name', 'Resume')}", title_style))
+
+    if resume_dict.get('title'):
+        subtitle_style = ParagraphStyle(
+            'Subtitle',
+            parent=styles['Normal'],
+            fontSize=11,
+            textColor='#64748b',
+            spaceAfter=16,
+            alignment=TA_CENTER
+        )
+        story.append(Paragraph(resume_dict.get('title'), subtitle_style))
+
+    # Contact info
+    contact_parts = []
+    if resume_dict.get('email'):
+        contact_parts.append(resume_dict['email'])
+    if resume_dict.get('phone'):
+        contact_parts.append(resume_dict['phone'])
+    if resume_dict.get('location'):
+        contact_parts.append(resume_dict['location'])
+
+    if contact_parts:
+        contact_style = ParagraphStyle(
+            'Contact',
+            parent=styles['Normal'],
+            fontSize=9,
+            textColor='#475569',
+            spaceAfter=20,
+            alignment=TA_CENTER
+        )
+        story.append(Paragraph(' | '.join(contact_parts), contact_style))
+
+    story.append(Spacer(1, 0.3*inch))
+
+    # Top 3 Matches
+    top3_style = ParagraphStyle(
+        'Top3Title',
+        parent=styles['Heading2'],
+        fontSize=16,
+        textColor='#1e293b',
+        spaceAfter=12,
+        spaceBefore=6,
+        fontName='Helvetica-Bold'
+    )
+    story.append(Paragraph('TOP 3 MATCHING JOB DESCRIPTIONS', top3_style))
+
+    section_style = ParagraphStyle(
+        'SectionHeading',
+        parent=styles['Heading3'],
+        fontSize=11,
+        textColor='#1e293b',
+        spaceAfter=6,
+        spaceBefore=8,
+        fontName='Helvetica-Bold'
+    )
+
+    body_style = ParagraphStyle(
+        'Body',
+        parent=styles['Normal'],
+        fontSize=8.5,
+        spaceAfter=6,
+        alignment=TA_LEFT
+    )
+
+    for idx, match in enumerate(top_matches, 1):
+        jd = match['jd']
+        # Match header
+        match_header = f"#{idx} - {jd.get('title', 'Job Description')} ({match['match_percentage']}% match)"
+        story.append(Paragraph(match_header, section_style))
+
+        # Match stats
+        stats_text = f"<b>Skills Matched:</b> {match['matched_count']}/{match['total_jd_requirements']}"
+        story.append(Paragraph(stats_text, body_style))
+
+        if jd.get('category'):
+            story.append(Paragraph(f"<b>Category:</b> {jd['category']}", body_style))
+
+        story.append(Spacer(1, 0.1*inch))
+
+        # Responsibilities
+        if jd.get('responsibilities'):
+            story.append(Paragraph('<b>Responsibilities:</b>', body_style))
+            resp_text = jd['responsibilities'].replace('\n', ' ')[:300] + "..."
+            story.append(Paragraph(resp_text, body_style))
+
+        # Required Skills
+        if jd.get('skills'):
+            story.append(Paragraph('<b>Required Skills:</b>', body_style))
+            skills_list = [s.strip() for s in jd['skills'].split('\n') if s.strip()][:5]
+            skills_text = ', '.join(skills_list)
+            story.append(Paragraph(skills_text, body_style))
+
+        story.append(Spacer(1, 0.15*inch))
+
+    # Build PDF
+    doc.build(story)
+    buffer.seek(0)
+
+    filename = f"{resume_dict.get('full_name', 'resume').replace(' ', '_')}_top_3_matches.pdf"
+    return send_file(
+        buffer,
+        mimetype='application/pdf',
+        as_attachment=True,
+        download_name=filename
+    )
+
+
 @app.route("/profile/slug/<slug>")
 def public_profile(slug):
     with db_conn() as conn:
