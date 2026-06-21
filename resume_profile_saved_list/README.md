@@ -6,8 +6,10 @@ A Flask web app for uploading, parsing, and managing candidate resume profiles. 
 
 - **Resume Upload** — Upload PDF and DOCX files; raw originals are preserved
 - **Auto-Parsing** — Extracts name, email, phone, LinkedIn, location, summary, skills, experience, education, certifications, and projects
-- **Resume Intelligence (AI parsing)** — Optional "llm" parse mode uses a local [Ollama](https://ollama.com) model to extract identity fields and sections, instead of the regex-based Quick Parse
-- **2-Column Layout Support** — Handles multi-column resume formats using word-level bounding boxes
+- **Resume Intelligence (AI parsing)** — Uses a local [Ollama](https://ollama.com) model (e.g., `resume-expert`, `llama3.2`) to intelligently extract data, with special handling for 2-column layouts
+- **2-Column Layout Support** — Intelligently handles multi-column resume formats by using Ollama to clean up mixed sections
+- **Smart Section Cleanup** — Removes personal info fields mixed into education/experience sections from PDF extraction artifacts
+- **Export Options** — Download resume as PDF or extract data as JSON
 - **Optional OCR** — Falls back to EasyOCR for image-based or scanned PDFs
 - **Profile Management** — View, edit, and delete parsed profiles; public URLs via slugs
 - **Skill Normalization** — Skills are tokenized into a separate `resume_skill` table for filtering
@@ -48,11 +50,21 @@ source .venv/bin/activate   # Windows: .venv\Scripts\activate
 
 ### 2. Install dependencies
 
+Install all dependencies from `requirements.txt`:
+
 ```bash
-pip install flask psycopg2-binary PyPDF2 pdfplumber pymupdf python-docx python-dotenv werkzeug
+pip install -r requirements.txt
 ```
 
-For optional OCR support (scanned / image-based PDFs):
+This includes:
+- Flask web framework
+- PostgreSQL driver (psycopg2)
+- PDF processing (PyPDF2, pdfplumber, PyMuPDF)
+- Document support (python-docx)
+- PDF generation (reportlab)
+- Configuration (python-dotenv)
+
+**Optional** — For OCR support on scanned/image-based PDFs:
 
 ```bash
 pip install easyocr
@@ -64,40 +76,44 @@ Python package is required for it.
 ### 3. (Optional) Set up Ollama for AI parsing
 
 The "Resume Intelligence" parse mode runs a local LLM through [Ollama](https://ollama.com).
-Quick Parse (the regex-based parser) works without it — this step is only needed if you
-want the AI parse mode.
+Quick Parse (the regex-based parser) works without it — this step is only needed if you want the AI-powered features.
 
-1. Install Ollama (see <https://ollama.com/download>).
-2. Start the Ollama server (it usually runs automatically after install):
+1. Install Ollama from <https://ollama.com/download>
+2. Start the Ollama server:
 
    ```bash
    ollama serve
    ```
 
-3. Pull the default model:
+3. Pull a model (choose one based on your hardware):
 
    ```bash
-   ollama pull llama3.2:1b
+   # Recommended for resume parsing (if available):
+   ollama pull resume-expert
+   
+   # Or use a general-purpose model:
+   ollama pull llama3.2:latest
+   ollama pull llama2:13b
    ```
 
-By default the app talks to Ollama at `http://localhost:11434` using the `llama3.2:1b`
-model. Override these via the `OLLAMA_*` environment variables (see below).
+By default the app talks to Ollama at `http://localhost:11434` using the `resume-expert:latest`
+model (or `llama3.2:latest` if not available). Override these via the `OLLAMA_*` environment variables.
 
 ### 4. Configure the database connection
 
-Create a `.env` file in the project root:
+A `.env` file is provided with defaults. Edit it if needed:
 
 ```env
 DATABASE_URL=postgresql://postgres:postgres@localhost:5432/resume_profiles
 SECRET_KEY=your-secret-key-here
 
-# Optional — only used by the AI ("Resume Intelligence") parse mode
+# AI parsing settings (only used by "Resume Intelligence" mode)
 OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_TEXT_MODEL=llama3.2:1b
+OLLAMA_TEXT_MODEL=resume-expert:latest
 OLLAMA_TEXT_TIMEOUT=60
 ```
 
-The app defaults to `postgresql://postgres:postgres@localhost:5432/resume_profiles` if `DATABASE_URL` is not set.
+**Note:** If you pulled a different Ollama model, update `OLLAMA_TEXT_MODEL` accordingly (e.g., `llama3.2:latest`)
 
 ### 5. Create the database
 
@@ -129,7 +145,24 @@ psql -U postgres -d resume_profiles -f populate.sql
 python app.py
 ```
 
-The app starts on `http://127.0.0.1:5000` in debug mode.
+The app starts on `http://127.0.0.1:5001` in debug mode.
+
+## New in Latest Version
+
+### Export & Download Features
+- **Download as PDF** — Generate a formatted PDF from parsed resume data
+- **Extract as JSON** — Export all resume data as a JSON file for portability/automation
+
+### Improved Parsing for 2-Column PDFs
+- Intelligent section separation using Ollama
+- Removes mixed-in personal information fields
+- Properly extracts education details from complex layouts
+- Cleans up LinkedIn URL fragments
+
+### Better Data Integrity
+- Smart cleanup of extracted resume sections
+- Handles wrapped URLs in multi-column layouts
+- Removes personal info labels from education/experience sections
 
 ## Project Structure
 
@@ -182,7 +215,7 @@ The app starts on `http://127.0.0.1:5000` in debug mode.
 | `DATABASE_URL` | `postgresql://postgres:postgres@localhost:5432/resume_profiles` | PostgreSQL connection string |
 | `SECRET_KEY` | `resume-profile-secret-key` | Flask session secret |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server URL (AI parse mode) |
-| `OLLAMA_TEXT_MODEL` | `llama3.2:1b` | Ollama model used for resume parsing |
+| `OLLAMA_TEXT_MODEL` | `resume-expert:latest` | Ollama model used for resume parsing (falls back to `llama3.2:latest` if unavailable) |
 | `OLLAMA_TEXT_TIMEOUT` | `60` | Per-request Ollama timeout (seconds) |
 
 ## Database Schema

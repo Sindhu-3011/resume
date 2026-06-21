@@ -46,9 +46,20 @@ You should see `(venv)` at the start of your terminal prompt when activated.
 
 ## Step 3: Install Python Dependencies
 
+With your virtual environment activated, install all dependencies from `requirements.txt`:
+
 ```bash
-pip install flask psycopg2-binary PyPDF2 pdfplumber pymupdf python-docx python-dotenv werkzeug
+pip install -r requirements.txt
 ```
+
+This installs:
+- Flask (web framework)
+- PostgreSQL driver (psycopg2)
+- PDF libraries (PyPDF2, pdfplumber, PyMuPDF)
+- Document support (python-docx)
+- PDF generation (reportlab)
+- Environment config (python-dotenv)
+- And other dependencies
 
 **Optional** — For OCR support on scanned PDFs:
 ```bash
@@ -127,15 +138,20 @@ This will run Ollama on `http://localhost:11434`
 
 ### 5c. Download a Model
 
-In a **new terminal**, pull one or more models:
+In a **new terminal**, pull one of these models:
 
 ```bash
-# Small & fast (recommended for most use cases):
+# Recommended for resume parsing (fine-tuned for this use case):
+ollama pull resume-expert
+
+# Or use a general-purpose model (requires more VRAM):
 ollama pull llama3.2:latest
 
 # Larger & more accurate (if you have the disk space):
 ollama pull deepseek-r1:8b
 ```
+
+**Note:** The `resume-expert` model is optimized for resume parsing and recommended if available. If not available, `llama3.2:latest` or `llama2:13b` work well.
 
 ### 5d. Verify Models Are Ready
 
@@ -149,20 +165,23 @@ You should see JSON listing all installed models.
 
 ## Step 6: (Optional) Create Environment Configuration
 
-If you want to customize settings, create a `.env` file in the project root:
+A `.env` file is already provided with defaults, but you can customize it if needed:
 
 ```env
 # Database connection (use these defaults if you followed step 4)
 DATABASE_URL=postgresql://postgres:postgres@localhost:5432/resume_profiles
 
-# Flask secret key (for sessions)
+# Flask secret key (for sessions) - change this to a random string
 SECRET_KEY=your-secret-key-here
 
-# Ollama configuration (use these defaults)
+# Ollama configuration
 OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_TEXT_MODEL=llama3.2:latest
+# Use 'resume-expert' if available, otherwise 'llama3.2:latest'
+OLLAMA_TEXT_MODEL=resume-expert:latest
 OLLAMA_TEXT_TIMEOUT=60
 ```
+
+**Important:** If you don't have the `resume-expert` model, update `OLLAMA_TEXT_MODEL` to use whichever model you downloaded (e.g., `llama3.2:latest`)
 
 ---
 
