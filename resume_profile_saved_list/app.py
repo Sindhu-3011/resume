@@ -1,5 +1,11 @@
-from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, send_from_directory, abort
+from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, send_from_directory, abort, send_file
 import psycopg2
+from io import BytesIO
+from reportlab.lib.pagesizes import letter, A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
+from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_JUSTIFY
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -1664,14 +1670,15 @@ def _ollama_chat(prompt, *, as_json, num_predict):
 def _split_resume_chunks(text):
     """Cut clean resume text into {field: section_text} pieces at heading lines.
 
-    A line is a heading when it maps to a known section (via canonical_section_name
-    or _HEADING_FIELD).  Everything until the next heading is that section's content.
-    No field values are parsed here — just boundaries.
+    Handles 2-column PDFs by scanning for all section headings first, then extracting
+    content between them by position rather than linear order. This prevents columns
+    from getting scrambled (e.g. "KEY SKILLS" appearing after "WORK EXPERIENCE").
     """
-    chunks = {}
-    current = None
-    buf = []
-    for line in text.split("\n"):
+    lines = text.split("\n")
+
+    # First pass: identify all section headings and their line numbers
+    headings = []  # [(line_num, field_name), ...]
+    for i, line in enumerate(lines):
         s = line.strip()
         if not s:
             continue
@@ -1679,15 +1686,32 @@ def _split_resume_chunks(text):
         field = canonical_section_name(s) or _HEADING_FIELD.get(key)
         # Treat as a heading only if it's short (real headings are 1-3 words).
         if field and len(s.split()) <= 3:
-            if current and buf:
-                chunks.setdefault(current, []).append("\n".join(buf))
-            current, buf = field, []
-            continue
-        if current:
-            buf.append(s)
-    if current and buf:
-        chunks.setdefault(current, []).append("\n".join(buf))
-    return {k: "\n".join(v).strip() for k, v in chunks.items()}
+            headings.append((i, field))
+
+    # Second pass: extract content between heading positions
+    chunks = {}
+    for idx, (line_num, field) in enumerate(headings):
+        # Start from the line after the heading
+        start = line_num + 1
+        # End at the next heading (or end of text)
+        end = headings[idx + 1][0] if idx + 1 < len(headings) else len(lines)
+
+        # Collect non-empty lines in this range
+        content_lines = []
+        for line in lines[start:end]:
+            s = line.strip()
+            if s:
+                content_lines.append(s)
+
+        if content_lines:
+            content = "\n".join(content_lines).strip()
+            # Handle duplicate section headings by appending content
+            if field in chunks:
+                chunks[field] = chunks[field] + "\n" + content
+            else:
+                chunks[field] = content
+
+    return chunks
 
 
 def parse_resume_with_llm_text(path):
@@ -1730,12 +1754,125 @@ def parse_resume_with_llm_text(path):
     # ── 2. Contact fields — deterministic, 100% reliable (not the heuristic engine) ─
     result["email"] = _extract_email(raw_text)
     result["phone"] = _extract_phone(raw_text)
-    m = re.search(r"(?:https?://)?(?:www\.)?linkedin\.com/in/([A-Za-z0-9\-_%]+)", raw_text, re.I)
-    if m:
-        result["linkedin"] = "https://www.linkedin.com/in/" + m.group(1)
 
-    # ── 3. Content sections — cut at heading lines, kept verbatim (faithful) ──────
-    chunks = _split_resume_chunks(raw_text)
+    # Extract LinkedIn URL, handling wrapped URLs (newlines in the middle)
+    # First, normalize whitespace in URLs (convert newlines to nothing within URLs)
+    normalized_text = re.sub(
+        r'(linkedin\.com/in/[a-z0-9\-_%]*)\s*\n\s*([a-z0-9])',
+        r'\1\2',
+        raw_text,
+        flags=re.I
+    )
+    m = re.search(
+        r"(?:https?://)?(?:www\.)?linkedin\.com/in/([A-Za-z0-9\-_%/?=&#]+)",
+        normalized_text,
+        re.I
+    )
+    if m:
+        url_part = m.group(1)
+        # Remove trailing query params that might have been captured incorrectly
+        url_part = re.sub(r'[?&#].*$', lambda x: x.group(0) if 'skipRedirect' in x.group(0) else '', url_part)
+        result["linkedin"] = "https://www.linkedin.com/in/" + url_part
+
+    # ── 3. Content sections — use robust regex-based section finder for better handling ──
+    # The simple line-by-line chunker (_split_resume_chunks) fails on 2-column PDFs where
+    # sections can be interleaved. The find_sections() function has more robust logic for
+    # detecting section boundaries using the full SECTION_ALIASES and handles edge cases.
+    lines = raw_text.split('\n')
+    chunks = find_sections(lines)
+
+    # ── 4. Post-process: 2-column PDFs interleave skills with experience bullets
+    # Use Ollama to extract just the skill list from the messy section.
+    if chunks.get("skills"):
+        skills_text = chunks["skills"]
+
+        # Use Ollama to extract the actual skill list (it can pick them out of the mess)
+        try:
+            skill_list_json = _ollama_chat(
+                "Extract ONLY the technical skill names from this messy resume section. "
+                "Return a JSON list with the extracted skills. Ignore numbered bullets (experience items). "
+                'Return ONLY JSON: {"skills":["skill1","skill2",...]}.\n\n'
+                "SECTION:\n" + skills_text,
+                as_json=True, num_predict=200,
+            )
+            logger.info(f"Ollama skill extraction result: {skill_list_json}")
+
+            if skill_list_json and skill_list_json.get("skills"):
+                chunks["skills"] = '\n'.join(skill_list_json["skills"])
+                logger.info(f"Updated skills section from {len(skills_text)} chars to {len(chunks['skills'])} chars")
+            else:
+                logger.warning(f"Ollama skill extraction returned empty or invalid JSON: {skill_list_json}")
+        except Exception as e:
+            logger.warning(f"Ollama skill extraction failed: {e}. Keeping original skills section.")
+
+        # Extract numbered bullets (1., 2., etc.) as experience if not already there
+        experience_bullets = []
+        for line in skills_text.split('\n'):
+            line_stripped = line.strip()
+            if re.match(r'^\d{1,2}\.\s+', line_stripped):
+                experience_bullets.append(line_stripped)
+
+        if experience_bullets:
+            experience_text = '\n'.join(experience_bullets)
+            if chunks.get("experience"):
+                chunks["experience"] = chunks["experience"] + '\n' + experience_text
+            else:
+                chunks["experience"] = experience_text
+
+    # ── 5. Clean up experience section — remove LinkedIn URLs and contact info
+    if chunks.get("experience"):
+        exp_text = chunks["experience"]
+        # Remove complete LinkedIn URLs
+        exp_text = re.sub(
+            r'https?://(?:www\.)?linkedin\.com/in/[^\s\n]*(?:\s*\n\s*[a-zA-Z0-9\-_%/@?=&#]*)?',
+            '',
+            exp_text,
+            flags=re.I
+        )
+        # Remove orphaned LinkedIn URL fragments (e.g., "karnam-29a6b416a/?skipRedirect=true")
+        # These are fragments from wrapped URLs in PDFs
+        exp_text = re.sub(
+            r'^[a-z]+\-[a-z0-9]+/?[^\n]*(?:skipRedirect|linkedin)[^\n]*\n?',
+            '',
+            exp_text,
+            flags=re.MULTILINE | re.I
+        )
+        # Remove any remaining orphaned protocol prefixes
+        exp_text = re.sub(r'^\s*https?://\s*\n', '', exp_text, flags=re.MULTILINE)
+        chunks["experience"] = exp_text.strip()
+
+    # ── 6. Clean up education section — use Ollama to extract just education details
+    # 2-column PDFs have personal info on left, education on right. Interleaved extraction is messy.
+    # Use Ollama to extract just the degrees and institutions from the mixed content.
+    if chunks.get("education"):
+        edu_text = chunks["education"]
+
+        # Use Ollama to extract just education information
+        try:
+            edu_json = _ollama_chat(
+                "Extract ONLY the educational qualifications (degrees and institutions) from this mixed text. "
+                "Ignore personal info fields like Email, Mobile, Phone, Total work experience, Social Link, etc. "
+                'Return ONLY JSON: {"education":"degree1 from institute1, degree2 from institute2, ..."}.\n\n'
+                "TEXT:\n" + edu_text,
+                as_json=True, num_predict=150,
+            )
+
+            if edu_json and edu_json.get("education"):
+                chunks["education"] = edu_json["education"]
+                logger.info(f"Updated education section via Ollama")
+            else:
+                # Fallback to regex cleanup if Ollama extraction fails
+                logger.warning("Ollama education extraction returned empty, using regex cleanup")
+                edu_text = re.sub(r'Email\s+', '', edu_text, flags=re.I)
+                edu_text = re.sub(r'Mobile\s+', '', edu_text, flags=re.I)
+                edu_text = re.sub(r'\+?\(?\d{1,4}\)?[\s\-.]?\d{3,}[\s\-.]?\d{3,}[\s\-.]?\d{0,4}', '', edu_text)
+                edu_text = re.sub(r'^(?:Total work experience|Social Link|City|Country|Languages?|Hobbies?)[^\n]*\n?', '', edu_text, flags=re.MULTILINE | re.I)
+                edu_text = re.sub(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', '', edu_text)
+                edu_text = re.sub(r'\n\s*\n+', '\n', edu_text)
+                chunks["education"] = edu_text.strip()
+        except Exception as e:
+            logger.warning(f"Education cleanup via Ollama failed: {e}")
+
     for field in ("summary", "skills", "experience", "education", "certifications", "projects"):
         if chunks.get(field):
             result[field] = chunks[field]
@@ -1951,6 +2088,169 @@ def public_profile(slug):
     if not resume:
         return "Profile not found", 404
     return render_template("profile.html", resume=resume)
+
+
+def generate_resume_pdf(resume):
+    """Generate a PDF from resume data using reportlab."""
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter,
+                          topMargin=0.5*inch, bottomMargin=0.5*inch,
+                          leftMargin=0.75*inch, rightMargin=0.75*inch)
+    story = []
+    styles = getSampleStyleSheet()
+
+    # Header with name and title
+    title_style = ParagraphStyle(
+        'CustomTitle',
+        parent=styles['Heading1'],
+        fontSize=24,
+        textColor='#1e293b',
+        spaceAfter=2,
+        alignment=TA_CENTER,
+        fontName='Helvetica-Bold'
+    )
+    story.append(Paragraph(resume.get('full_name', 'Resume'), title_style))
+
+    if resume.get('title'):
+        subtitle_style = ParagraphStyle(
+            'Subtitle',
+            parent=styles['Normal'],
+            fontSize=12,
+            textColor='#64748b',
+            spaceAfter=12,
+            alignment=TA_CENTER
+        )
+        story.append(Paragraph(resume.get('title'), subtitle_style))
+
+    # Contact Info
+    contact_parts = []
+    if resume.get('email'):
+        contact_parts.append(resume['email'])
+    if resume.get('phone'):
+        contact_parts.append(resume['phone'])
+    if resume.get('location'):
+        contact_parts.append(resume['location'])
+
+    if contact_parts:
+        contact_style = ParagraphStyle(
+            'Contact',
+            parent=styles['Normal'],
+            fontSize=9,
+            textColor='#475569',
+            spaceAfter=16,
+            alignment=TA_CENTER
+        )
+        story.append(Paragraph(' | '.join(contact_parts), contact_style))
+
+    # Section styling
+    section_style = ParagraphStyle(
+        'SectionHeading',
+        parent=styles['Heading2'],
+        fontSize=12,
+        textColor='#1e293b',
+        spaceAfter=8,
+        spaceBefore=8,
+        fontName='Helvetica-Bold',
+        borderColor='#e2e8f0',
+        borderWidth=0,
+        borderPadding=0,
+    )
+
+    # Summary
+    if resume.get('summary'):
+        story.append(Paragraph('PROFESSIONAL SUMMARY', section_style))
+        body_style = ParagraphStyle(
+            'Body',
+            parent=styles['Normal'],
+            fontSize=9,
+            alignment=TA_JUSTIFY,
+            spaceAfter=12
+        )
+        story.append(Paragraph(resume['summary'], body_style))
+
+    # Skills
+    if resume.get('skills'):
+        story.append(Paragraph('TECHNICAL SKILLS', section_style))
+        skills_list = [s.strip() for s in resume['skills'].split('\n') if s.strip()]
+        skills_text = ' • '.join(skills_list[:20])  # Limit to 20 skills
+        story.append(Paragraph(skills_text, ParagraphStyle(
+            'Skills', parent=styles['Normal'], fontSize=9, spaceAfter=12
+        )))
+
+    # Experience
+    if resume.get('experience'):
+        story.append(Paragraph('WORK EXPERIENCE', section_style))
+        exp_text = resume['experience'].replace('\n', '<br/>')
+        story.append(Paragraph(exp_text, ParagraphStyle(
+            'Experience', parent=styles['Normal'], fontSize=9, spaceAfter=12
+        )))
+
+    # Education
+    if resume.get('education'):
+        story.append(Paragraph('EDUCATION', section_style))
+        edu_text = resume['education'].replace('\n', '<br/>')
+        story.append(Paragraph(edu_text, ParagraphStyle(
+            'Education', parent=styles['Normal'], fontSize=9, spaceAfter=12
+        )))
+
+    # Projects
+    if resume.get('projects'):
+        story.append(Paragraph('PROJECTS', section_style))
+        proj_text = resume['projects'].replace('\n', '<br/>')
+        story.append(Paragraph(proj_text, ParagraphStyle(
+            'Projects', parent=styles['Normal'], fontSize=9, spaceAfter=12
+        )))
+
+    # Build PDF
+    doc.build(story)
+    buffer.seek(0)
+    return buffer
+
+
+@app.route("/profile/<int:resume_id>/download-pdf")
+def download_resume_pdf(resume_id):
+    """Download resume as PDF."""
+    with db_conn() as conn:
+        resume = conn.execute("SELECT * FROM resume WHERE id = %s", (resume_id,)).fetchone()
+
+    if not resume:
+        return "Profile not found", 404
+
+    resume_dict = dict(resume)
+    pdf_buffer = generate_resume_pdf(resume_dict)
+
+    filename = f"{resume_dict.get('full_name', 'Resume').replace(' ', '_')}.pdf"
+    return send_file(
+        pdf_buffer,
+        mimetype='application/pdf',
+        as_attachment=True,
+        download_name=filename
+    )
+
+
+@app.route("/profile/<int:resume_id>/extract")
+def extract_resume_data(resume_id):
+    """Extract resume data as JSON."""
+    with db_conn() as conn:
+        resume = conn.execute("SELECT * FROM resume WHERE id = %s", (resume_id,)).fetchone()
+
+    if not resume:
+        return jsonify({"error": "Profile not found"}), 404
+
+    resume_dict = dict(resume)
+    # Remove sensitive/internal fields
+    resume_dict.pop('id', None)
+    resume_dict.pop('created_at', None)
+    resume_dict.pop('updated_at', None)
+
+    filename = f"{resume_dict.get('full_name', 'resume').replace(' ', '_')}_extracted.json"
+
+    return send_file(
+        BytesIO(json.dumps(resume_dict, indent=2).encode()),
+        mimetype='application/json',
+        as_attachment=True,
+        download_name=filename
+    )
 
 
 @app.route("/profile/<int:resume_id>/delete", methods=["POST"])

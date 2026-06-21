@@ -30,7 +30,9 @@
         <a class="button secondary" href="{{ url_for('profile_list') }}">← Back</a>
         <a class="button secondary" href="{{ url_for('edit_resume', resume_id=resume.id) }}">Edit</a>
         <a class="button" style="background:#7c3aed;" href="{{ url_for('compare_select_jd', resume_id=resume.id) }}">&#128202; Compare Resume</a>
-        {% if resume.resume_file %}<a class="button" href="{{ url_for('uploaded_file', filename=resume.resume_file) }}" target="_blank" rel="noopener">Download Resume</a>{% endif %}
+        <a class="button" style="background:#10b981;" href="{{ url_for('download_resume_pdf', resume_id=resume.id) }}">📄 Download PDF</a>
+        <a class="button" style="background:#3b82f6;" href="{{ url_for('extract_resume_data', resume_id=resume.id) }}">⬇ Extract JSON</a>
+        {% if resume.resume_file %}<a class="button" href="{{ url_for('uploaded_file', filename=resume.resume_file) }}" target="_blank" rel="noopener">View Original</a>{% endif %}
         <form method="post" action="{{ url_for('delete_resume', resume_id=resume.id) }}" style="display:inline" onsubmit="return confirm('Delete this profile? This cannot be undone.')">
             <button type="submit" class="button danger">Delete</button>
         </form>
