@@ -454,14 +454,8 @@
             return;
         }
 
-        if (ext === "pdf") {
-            pendingFile = file;
-            pmFilename.textContent = file.name;
-            overlay.classList.add("open");
-        } else {
-            /* DOCX — skip modal, always use standard parser */
-            doParse(file, "0");
-        }
+        /* Always use Resume Intelligence (AI) parsing for all files */
+        doParse(file, "llm");
     });
 
     btnLLMText.addEventListener("click", function() {
