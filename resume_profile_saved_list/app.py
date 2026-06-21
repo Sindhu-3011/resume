@@ -3335,6 +3335,142 @@ def jd_detail(jd_id):
     return render_template("jd_detail.html", jd=dict(jd), resumes=list(resumes))
 
 
+@app.route("/jd/<int:jd_id>/download-pdf")
+def download_jd_pdf(jd_id):
+    """Download JD as PDF."""
+    with db_conn() as conn:
+        ensure_jd_table(conn)
+        jd = conn.execute(
+            "SELECT * FROM job_description WHERE id = %s", (jd_id,)
+        ).fetchone()
+
+    if not jd:
+        return "Job Description not found", 404
+
+    jd_dict = dict(jd)
+
+    # Generate PDF
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter,
+                          topMargin=0.5*inch, bottomMargin=0.5*inch,
+                          leftMargin=0.75*inch, rightMargin=0.75*inch)
+    story = []
+    styles = getSampleStyleSheet()
+
+    # Title
+    title_style = ParagraphStyle(
+        'CustomTitle',
+        parent=styles['Heading1'],
+        fontSize=24,
+        textColor='#1e293b',
+        spaceAfter=4,
+        alignment=TA_CENTER,
+        fontName='Helvetica-Bold'
+    )
+    story.append(Paragraph(jd_dict.get('title', 'Job Description'), title_style))
+
+    # Category & Role
+    if jd_dict.get('category') or jd_dict.get('role'):
+        meta_parts = []
+        if jd_dict.get('category'):
+            meta_parts.append(f"Category: {jd_dict['category']}")
+        if jd_dict.get('role'):
+            meta_parts.append(f"Role: {jd_dict['role']}")
+        meta_style = ParagraphStyle(
+            'Meta',
+            parent=styles['Normal'],
+            fontSize=10,
+            textColor='#64748b',
+            spaceAfter=16,
+            alignment=TA_CENTER
+        )
+        story.append(Paragraph(' | '.join(meta_parts), meta_style))
+
+    # Section styling
+    section_style = ParagraphStyle(
+        'SectionHeading',
+        parent=styles['Heading2'],
+        fontSize=12,
+        textColor='#1e293b',
+        spaceAfter=8,
+        spaceBefore=8,
+        fontName='Helvetica-Bold'
+    )
+
+    body_style = ParagraphStyle(
+        'Body',
+        parent=styles['Normal'],
+        fontSize=9,
+        alignment=TA_JUSTIFY,
+        spaceAfter=12
+    )
+
+    # Responsibilities
+    if jd_dict.get('responsibilities'):
+        story.append(Paragraph('RESPONSIBILITIES', section_style))
+        resp_text = jd_dict['responsibilities'].replace('\n', '<br/>')
+        story.append(Paragraph(resp_text, body_style))
+
+    # Requirements
+    if jd_dict.get('requirements'):
+        story.append(Paragraph('REQUIREMENTS / QUALIFICATIONS', section_style))
+        req_text = jd_dict['requirements'].replace('\n', '<br/>')
+        story.append(Paragraph(req_text, body_style))
+
+    # Skills
+    if jd_dict.get('skills'):
+        story.append(Paragraph('REQUIRED SKILLS', section_style))
+        skills_list = [s.strip() for s in jd_dict['skills'].split('\n') if s.strip()]
+        skills_text = ' • '.join(skills_list)
+        story.append(Paragraph(skills_text, body_style))
+
+    # Keywords
+    if jd_dict.get('keywords'):
+        story.append(Paragraph('KEYWORDS', section_style))
+        story.append(Paragraph(jd_dict['keywords'], body_style))
+
+    # Build PDF
+    doc.build(story)
+    buffer.seek(0)
+
+    filename = f"{jd_dict.get('title', 'JD').replace(' ', '_')}.pdf"
+    return send_file(
+        buffer,
+        mimetype='application/pdf',
+        as_attachment=True,
+        download_name=filename
+    )
+
+
+@app.route("/jd/<int:jd_id>/extract")
+def extract_jd_data(jd_id):
+    """Extract JD data as JSON."""
+    with db_conn() as conn:
+        ensure_jd_table(conn)
+        jd = conn.execute(
+            "SELECT * FROM job_description WHERE id = %s", (jd_id,)
+        ).fetchone()
+
+    if not jd:
+        return jsonify({"error": "Job Description not found"}), 404
+
+    jd_dict = dict(jd)
+    # Remove internal fields
+    jd_dict.pop('id', None)
+    jd_dict.pop('created_at', None)
+    jd_dict.pop('updated_at', None)
+    jd_dict.pop('jd_file', None)
+
+    filename = f"{jd_dict.get('title', 'jd').replace(' ', '_')}_details.json"
+
+    return send_file(
+        BytesIO(json.dumps(jd_dict, indent=2).encode()),
+        mimetype='application/json',
+        as_attachment=True,
+        download_name=filename
+    )
+
+
 @app.route("/jd/<int:jd_id>/edit", methods=["GET", "POST"])
 def jd_edit(jd_id):
     with db_conn() as conn:
