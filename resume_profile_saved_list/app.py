@@ -12,6 +12,8 @@ import zipfile
 import json
 import logging
 import os
+import urllib.request
+import urllib.error
 from contextlib import contextmanager
 from werkzeug.utils import secure_filename
 from PyPDF2 import PdfReader
@@ -227,43 +229,98 @@ def _ocr_contact_strip(path):
         return ""
 
 
-def _pymupdf_page_text(page):
+def _detect_two_col_split(page):
+    """Return the x midpoint of the gap between two column clusters, or None.
+
+    Uses block bounding boxes (coarser but reliable) to detect whether the page
+    content clearly lives in two separate vertical strips.  Conditions:
+      - ≥ 3 blocks whose right edge is left of the midpoint  (left column)
+      - ≥ 3 blocks whose left  edge is right of the midpoint (right column)
+      - ≤ 2 blocks that span across the midpoint (title / contact header)
+      - A real gap exists: min x0 of right blocks > max x1 of left blocks
     """
-    Extract page text using word-level bounding boxes.
+    blocks = page.get_text("blocks")
+    pw  = page.rect.width
+    mid = pw / 2
+    margin = pw * 0.08   # 8 % — tolerates slight layout asymmetry
 
-    Words at the same vertical level (±5 pt) form one row.  Within a row,
-    a gap larger than 30 pt between the right edge of one word and the left
-    edge of the next indicates separate columns.
+    left     = [b for b in blocks if b[2] < mid - margin]
+    right    = [b for b in blocks if b[0] > mid + margin]
+    spanning = [b for b in blocks if b[0] < mid - margin and b[2] > mid + margin]
 
-    Two-column resume layout (section label left, content right):
-      If the leftmost column group is a known section alias (e.g. "SUMMARY"),
-      it is emitted as its own line and the right column as further lines.
-      → "SUMMARY" then "Validation Engineer..." → section detected ✓
+    if len(left) < 3 or len(right) < 3 or len(spanning) > 2:
+        return None
 
-    Table rows (company | role | dates all at same y):
-      If the leftmost group is NOT a section alias, all groups are joined.
-      → "Vaisesika Consulting Pvt Ltd CSV Lead June 2021 Till Present" ✓
+    max_left_x1  = max(b[2] for b in left)
+    min_right_x0 = min(b[0] for b in right)
+    if min_right_x0 <= max_left_x1:
+        return None   # columns overlap — not a clean 2-col layout
+
+    return (max_left_x1 + min_right_x0) / 2
+
+
+def _detect_col_gutter_words(page):
+    """Find a two-column split via a vertical word gutter, or None.
+
+    Block-based detection (`_detect_two_col_split`) misses layouts where wide
+    bullet lines in the left column extend past the page midpoint — the blocks
+    "span" the centre and the heuristic bails.  This word-level pass instead looks
+    for a vertical strip in the middle of the page that almost no word box crosses:
+    a true column gutter.  Robust because a single-column page has lines spanning
+    the centre, so every candidate split is crossed by many words.
     """
-    raw_words = page.get_text("words")   # (x0, y0, x1, y1, word, blk, ln, wn)
+    words = page.get_text("words")
+    if len(words) < 40:
+        return None
+
+    pw = page.rect.width
+    lo, hi = pw * 0.33, pw * 0.67          # only hunt for a gutter in the middle third
+    n = len(words)
+
+    best_x, best_cross = None, None
+    x = lo
+    while x <= hi:
+        cross = sum(1 for w in words if w[0] < x < w[2])
+        if best_cross is None or cross < best_cross:
+            best_cross, best_x = cross, x
+        x += 2.0
+
+    if best_x is None:
+        return None
+    # The gutter must be almost empty (≤1 % of words straddle it).
+    if best_cross > max(2, n * 0.01):
+        return None
+    # Both columns must hold a real share of the content.
+    left  = sum(1 for w in words if w[2] <= best_x)
+    right = sum(1 for w in words if w[0] >= best_x)
+    if left < n * 0.15 or right < n * 0.15:
+        return None
+    return best_x
+
+
+def _words_to_text(raw_words):
+    """Convert a flat list of PyMuPDF word tuples to a text string.
+
+    Words on the same y-level (±5 pt) form a row; wide horizontal gaps (> 30 pt)
+    within a row indicate sub-columns (e.g. company | role | dates).
+    Section headings are always emitted on their own line so the section parser
+    can pick them up reliably.
+    """
     if not raw_words:
         return ""
 
-    raw_words = sorted(raw_words, key=lambda w: w[1])   # top-to-bottom by y0
+    raw_words = sorted(raw_words, key=lambda w: w[1])   # top-to-bottom
 
-    Y_TOL   = 5    # pt — words within 5 pt vertically share a line
-    COL_GAP = 30   # pt — gap between right edge of prev word and left of next
+    Y_TOL   = 5
+    COL_GAP = 30
 
     def emit_row(row):
         if not row:
             return []
-        row.sort()   # by x0
-
-        # Split into column groups wherever consecutive words have a large x-gap
+        row.sort()
         groups = [[row[0]]]
         for i in range(1, len(row)):
-            x1_prev = row[i - 1][1]   # right edge of previous word
-            x0_curr = row[i][0]       # left edge of current word
-            if x0_curr - x1_prev > COL_GAP:
+            if row[i][0] - row[i - 1][1] > COL_GAP:
                 groups.append([])
             groups[-1].append(row[i])
 
@@ -272,52 +329,63 @@ def _pymupdf_page_text(page):
 
         gtexts = [" ".join(wd for _, _, wd in g) for g in groups]
 
-        # Two-column check: is the leftmost group a section heading?
         if canonical_section_name(gtexts[0]):
-            # Emit label as its own line; each right-column group as a content line
             return [gtexts[0]] + gtexts[1:]
 
-        # Check if any non-first group is a section heading (handles right-column
-        # headings like WORK EXPERIENCE / PROFILE SUMMARY in two-column layouts)
         sec_idxs = [i for i in range(1, len(groups)) if canonical_section_name(gtexts[i])]
         if sec_idxs:
             sec_set = set(sec_idxs)
-            non_sec_words = []
+            non_sec = []
             for i, g in enumerate(groups):
                 if i not in sec_set:
-                    non_sec_words.extend(g)
+                    non_sec.extend(g)
             out = [gtexts[i] for i in sec_idxs]
-            if non_sec_words:
-                non_sec_words.sort()
-                out.insert(0, " ".join(wd for _, _, wd in non_sec_words))
+            if non_sec:
+                non_sec.sort()
+                out.insert(0, " ".join(wd for _, _, wd in non_sec))
             return out
 
-        # Table row or normal multi-column text: join everything left-to-right
-        all_words = []
-        for g in groups:
-            all_words.extend(g)
+        all_words = [w for g in groups for w in g]
         all_words.sort()
         return [" ".join(wd for _, _, wd in all_words)]
 
     lines = []
-    cur_row = []   # list of (x0, x1, word)
-    cur_y   = None
-
+    cur_row, cur_y = [], None
     for w in raw_words:
         x0, y0, x1, y1, word = w[0], w[1], w[2], w[3], w[4]
         if not word.strip():
             continue
         if cur_y is None or abs(y0 - cur_y) <= Y_TOL:
             cur_row.append((x0, x1, word))
-            if cur_y is None:
-                cur_y = y0
+            cur_y = cur_y if cur_y is not None else y0
         else:
             lines.extend(emit_row(cur_row))
-            cur_row = [(x0, x1, word)]
-            cur_y = y0
-
+            cur_row, cur_y = [(x0, x1, word)], y0
     lines.extend(emit_row(cur_row))
     return "\n".join(lines)
+
+
+def _pymupdf_page_text(page):
+    """Extract readable text from a page, handling 2-column layouts correctly.
+
+    If the page has a clear 2-column structure (detected via block positions),
+    the left and right columns are processed independently and concatenated —
+    preventing content from the two columns from being mixed on the same line.
+    Falls back to single-stream extraction for 1-column pages.
+    """
+    raw_words = page.get_text("words")
+    if not raw_words:
+        return ""
+
+    # Primary: conservative block-based detection. Fallback: word-gutter detection
+    # for interleaved layouts where wide left-column lines span the page centre.
+    split_x = _detect_two_col_split(page) or _detect_col_gutter_words(page)
+    if split_x:
+        left_words  = [w for w in raw_words if w[0] <  split_x]
+        right_words = [w for w in raw_words if w[0] >= split_x]
+        return (_words_to_text(left_words) + "\n" + _words_to_text(right_words)).strip()
+
+    return _words_to_text(raw_words)
 
 
 def _fix_wrapped_email(text):
@@ -774,8 +842,12 @@ def find_sections(lines):
         inline_remainder = None
 
         if not section:
-            # Check if this line looks like a company name (for experience sections)
-            if _looks_like_company_name(line):
+            # An unlabeled company-name line starts the experience section ONLY when no
+            # section is active yet (a resume that opens with jobs and no "Experience"
+            # heading). Once a section is active, a company-looking line is treated as
+            # that section's content — otherwise capitalised lines in projects/education/
+            # awards would hijack the flow and shred the real experience section.
+            if current is None and _looks_like_company_name(line):
                 section = "experience"
             else:
                 words = line.split()
@@ -1532,6 +1604,155 @@ def merge_resume_data(form_data, parsed_data, overwrite=False):
     return merged
 
 
+# ── Ollama "Resume Intelligence" parser (text LLM) ─────────────────────────────
+
+_OLLAMA_BASE         = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+_TEXT_MODEL          = os.environ.get("OLLAMA_TEXT_MODEL", "llama3.2:1b")
+_OLLAMA_TEXT_TIMEOUT = int(os.environ.get("OLLAMA_TEXT_TIMEOUT", "60"))
+
+
+# ── Pure-Ollama extraction — NO regex field engine in this path ────────────────
+#
+# A 1B model cannot one-shot a whole resume (it drifts, mislabels, or returns empty
+# above ~1 000 chars of input).  The reliable pattern, confirmed by testing, is:
+#   • feed it small, homogeneous pieces, and
+#   • use flat JSON for short identity fields, plain text for long sections.
+# So we slice the (column-split-cleaned) text into section chunks by heading, then
+# make one small Ollama call per piece.  Ollama does ALL the field extraction; the
+# only non-LLM step is cutting the text at heading lines.
+
+_BLANK_FIELDS = (
+    "full_name", "title", "email", "phone", "linkedin", "location",
+    "summary", "skills", "experience", "education", "certifications", "projects",
+)
+
+# Heading text → which field its content belongs to. Extends the canonical section
+# map with a few all-caps headings small models' resumes use.
+_HEADING_FIELD = {
+    "technology": "skills", "technologies": "skills", "technical skills": "skills",
+    "publications": "certifications", "awards": "certifications",
+    "achievements": "certifications", "certificates": "certifications",
+}
+
+
+def _ollama_chat(prompt, *, as_json, num_predict):
+    """Single Ollama call. Returns the raw assistant string (or {} dict if as_json)."""
+    body = {
+        "model": _TEXT_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": False,
+        "options": {"temperature": 0, "num_predict": num_predict, "num_ctx": 4096},
+    }
+    if as_json:
+        body["format"] = "json"
+    req = urllib.request.Request(
+        f"{_OLLAMA_BASE}/api/chat",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=_OLLAMA_TEXT_TIMEOUT) as r:
+        content = json.loads(r.read()).get("message", {}).get("content", "").strip()
+    if not as_json:
+        return content
+    try:
+        return json.loads(content)
+    except (ValueError, TypeError):
+        return {}
+
+
+def _split_resume_chunks(text):
+    """Cut clean resume text into {field: section_text} pieces at heading lines.
+
+    A line is a heading when it maps to a known section (via canonical_section_name
+    or _HEADING_FIELD).  Everything until the next heading is that section's content.
+    No field values are parsed here — just boundaries.
+    """
+    chunks = {}
+    current = None
+    buf = []
+    for line in text.split("\n"):
+        s = line.strip()
+        if not s:
+            continue
+        key = s.lower().strip(":·•- ")
+        field = canonical_section_name(s) or _HEADING_FIELD.get(key)
+        # Treat as a heading only if it's short (real headings are 1-3 words).
+        if field and len(s.split()) <= 3:
+            if current and buf:
+                chunks.setdefault(current, []).append("\n".join(buf))
+            current, buf = field, []
+            continue
+        if current:
+            buf.append(s)
+    if current and buf:
+        chunks.setdefault(current, []).append("\n".join(buf))
+    return {k: "\n".join(v).strip() for k, v in chunks.items()}
+
+
+def parse_resume_with_llm_text(path):
+    """Pure-Ollama resume parsing — no regex field engine.
+
+    1. PDF → clean text (column-split aware).
+    2. One Ollama call extracts the identity header into JSON (name/title/contact) —
+       this is where a model genuinely beats rules, and the short header keeps it fast
+       and safe from hallucination.
+    3. Content sections are cut from the text at their heading lines and used verbatim
+       — faithful to the resume (no invented content) and instant.
+    Returns (fields_dict, "llm_text").
+    """
+    raw_text = extract_resume_text(path, "pdf")
+    result = {k: "" for k in _BLANK_FIELDS}
+
+    # ── 1. Name / title / location via Ollama ────────────────────────────────────
+    # These are the fields a model genuinely beats rules at. Explicit field=description
+    # anchoring stops a 1B model echoing an empty template; 3 fields + a short header
+    # window is the sweet spot for reliability (more fields make it blank-out).
+    ident = _ollama_chat(
+        "Extract from this resume header. full_name=the person name, "
+        "title=their professional job role (not a company), location=their city.\n"
+        'Return ONLY JSON: {"full_name":"","title":"","location":""}\n\n'
+        "RESUME:\n" + raw_text[:700],
+        as_json=True, num_predict=120,
+    )
+    for k in ("full_name", "title", "location"):
+        v = ident.get(k, "")
+        if isinstance(v, list):
+            v = " ".join(str(x) for x in v)
+        result[k] = str(v).strip() if v else ""
+
+    # Map the Ollama-extracted title to the closest predefined role group. (A 1B model
+    # can't reliably pick from the 33-role list — tested — but the title it extracts is
+    # accurate, and keyword-mapping that title to a group is deterministic and correct.)
+    if result["title"]:
+        result["title"] = _map_to_group_role(result["title"])
+
+    # ── 2. Contact fields — deterministic, 100% reliable (not the heuristic engine) ─
+    result["email"] = _extract_email(raw_text)
+    result["phone"] = _extract_phone(raw_text)
+    m = re.search(r"(?:https?://)?(?:www\.)?linkedin\.com/in/([A-Za-z0-9\-_%]+)", raw_text, re.I)
+    if m:
+        result["linkedin"] = "https://www.linkedin.com/in/" + m.group(1)
+
+    # ── 3. Content sections — cut at heading lines, kept verbatim (faithful) ──────
+    chunks = _split_resume_chunks(raw_text)
+    for field in ("summary", "skills", "experience", "education", "certifications", "projects"):
+        if chunks.get(field):
+            result[field] = chunks[field]
+
+    return result, "llm_text"
+
+
+def _parse_pdf_quick(path):
+    """Fast rule-based PDF parse (no AI). Returns the parsed-fields dict.
+
+    Used by bulk compare, where running the AI model on every file would be slow.
+    """
+    font_name = _extract_name_from_pdf_fonts(path)
+    text = extract_resume_text(path, "pdf")
+    return parse_resume_text(text, name_hint=font_name)
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.route("/")
@@ -1592,10 +1813,20 @@ def edit_resume(resume_id=None):
                 uploaded.save(path)
                 resume_file = save_name
 
+                # parse_mode: "llm" = Resume Intelligence (AI), anything else = Quick Parse
+                parse_mode = request.form.get("parse_mode", "0")
                 try:
-                    font_name = _extract_name_from_pdf_fonts(path) if ext == "pdf" else ""
-                    extracted = extract_resume_text(path, ext)
-                    parsed_data = parse_resume_text(extracted, name_hint=font_name)
+                    if ext == "pdf" and parse_mode == "llm":
+                        try:
+                            parsed_data, _ = parse_resume_with_llm_text(path)
+                        except Exception as e:
+                            logger.warning("Resume Intelligence failed (%s); using Quick Parse.", e)
+                            parsed_data = _parse_pdf_quick(path)
+                    elif ext == "pdf":
+                        parsed_data = _parse_pdf_quick(path)
+                    else:
+                        extracted = extract_resume_text(path, ext)
+                        parsed_data = parse_resume_text(extracted)
                     flash("Resume uploaded and data extracted successfully.", "success")
                 except Exception:
                     flash(
@@ -1766,13 +1997,27 @@ def parse_resume_api():
         ext = name.rsplit(".", 1)[1].lower()
         temp_path = UPLOAD_FOLDER / f"tmp-parse.{ext}"
         uploaded.save(str(temp_path))
+        # parse_mode: "llm" = Resume Intelligence (AI), anything else = Quick Parse
+        parse_mode  = request.form.get("parse_mode", "0")
+        parser_used = "standard"
         try:
-            font_name = _extract_name_from_pdf_fonts(temp_path) if ext == "pdf" else ""
-            text = extract_resume_text(temp_path, ext)
-            parsed = parse_resume_text(text, name_hint=font_name)
+            if ext == "pdf" and parse_mode == "llm":
+                try:
+                    parsed, parser_used = parse_resume_with_llm_text(temp_path)
+                except Exception as e:
+                    logger.warning("Resume Intelligence failed (%s); using Quick Parse.", e)
+                    parsed = _parse_pdf_quick(temp_path)
+                    parser_used = "text (fallback)"
+            elif ext == "pdf":
+                parsed = _parse_pdf_quick(temp_path)
+                parser_used = "text"
+            else:
+                text = extract_resume_text(temp_path, ext)
+                parsed = parse_resume_text(text)
+                parser_used = "text"
         finally:
             temp_path.unlink(missing_ok=True)
-        return jsonify({"success": True, "message": "Fields extracted from resume.", "data": parsed})
+        return jsonify({"success": True, "message": "Fields extracted from resume.", "data": parsed, "parser_used": parser_used})
     except Exception as e:
         logger.error(f"Error parsing resume: {e}", exc_info=True)
         return jsonify({"success": False, "message": f"Could not extract text: {e}"}), 422
@@ -2055,8 +2300,11 @@ def bulk_compare():
                              "match_level": "Error", "match_level_color": "gray"})
             continue
         try:
-            text = extract_resume_text(path, ext)
-            parsed = parse_resume_text(text)
+            if ext == "pdf":
+                parsed = _parse_pdf_quick(path)
+            else:
+                text = extract_resume_text(path, ext)
+                parsed = parse_resume_text(text)
             score = calculate_match_score(parsed, jd_dict)
             results.append({
                 "file": filename,

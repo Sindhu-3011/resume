@@ -37,11 +37,13 @@
             <label class="button" style="cursor:pointer; margin-top:12px;">
                 &#128194; Choose File
                 <input id="resume_file" name="resume_file" type="file" accept=".pdf,.docx" style="display:none;">
+                <input type="hidden" id="parse_mode" name="parse_mode" value="0">
             </label>
             <p id="upload-filename" class="upload-filename"></p>
         </div>
 
         <div id="parse_status" class="parse-status" role="status" aria-live="polite"></div>
+
 
         {% if resume.resume_file %}
         <div class="current-file-info">
@@ -212,14 +214,166 @@
 
 </form>
 
+<style>
+#parser-modal-overlay {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,.45);
+    z-index: 1000;
+    align-items: center;
+    justify-content: center;
+}
+#parser-modal-overlay.open { display: flex; }
+#parser-modal {
+    background: var(--bg-card, #fff);
+    border-radius: 16px;
+    padding: 32px 28px 24px;
+    max-width: 480px;
+    width: 94%;
+    box-shadow: 0 20px 60px rgba(0,0,0,.18);
+}
+#parser-modal h3 { margin: 0 0 6px; font-size: 1.15rem; }
+#parser-modal p.pm-sub { margin: 0 0 22px; color: var(--tx-muted, #64748b); font-size: .875rem; }
+.pm-options { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.pm-opt {
+    border: 2px solid var(--border, #e2e8f0);
+    border-radius: 12px;
+    padding: 18px 14px 14px;
+    cursor: pointer;
+    text-align: center;
+    transition: border-color .15s, box-shadow .15s;
+    background: none;
+    font-family: inherit;
+}
+.pm-opt:hover { border-color: var(--clr-accent, #6366f1); box-shadow: 0 0 0 3px rgba(99,102,241,.12); }
+.pm-opt.pm-llmtext { background: linear-gradient(135deg,#d1fae5,#e0f2fe); border-color: #6ee7b7; }
+.pm-opt.pm-llmtext:hover { border-color: #10b981; }
+.pm-opt-icon { font-size: 2rem; margin-bottom: 8px; }
+.pm-opt-title { font-weight: 700; font-size: .92rem; display: block; margin-bottom: 4px; }
+.pm-opt-desc { font-size: .78rem; color: var(--tx-muted, #64748b); line-height: 1.4; }
+.pm-cancel { margin-top: 16px; text-align: center; }
+.pm-cancel button { background: none; border: none; color: var(--tx-muted,#64748b); font-size: .82rem; cursor: pointer; text-decoration: underline; }
+
+/* ── Resume Intelligence loading modal ─────────────────────────── */
+#ai-loading-overlay {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(15,23,42,.55);
+    backdrop-filter: blur(2px);
+    z-index: 1100;
+    align-items: center;
+    justify-content: center;
+}
+#ai-loading-overlay.open { display: flex; }
+#ai-loading-card {
+    background: var(--bg-card, #fff);
+    border-radius: 18px;
+    padding: 36px 34px 30px;
+    max-width: 420px;
+    width: 92%;
+    text-align: center;
+    box-shadow: 0 24px 70px rgba(0,0,0,.28);
+}
+.ai-spinner {
+    width: 54px; height: 54px;
+    margin: 0 auto 20px;
+    border: 5px solid #e2e8f0;
+    border-top-color: #6366f1;
+    border-radius: 50%;
+    animation: ai-spin .9s linear infinite;
+}
+@keyframes ai-spin { to { transform: rotate(360deg); } }
+#ai-loading-card h3 { margin: 0 0 6px; font-size: 1.1rem; }
+#ai-loading-card p { margin: 0 0 20px; color: var(--tx-muted,#64748b); font-size: .85rem; line-height: 1.45; }
+.ai-load-track { background: #e2e8f0; border-radius: 8px; height: 10px; overflow: hidden; }
+#ai-load-bar { height: 100%; width: 0%; background: linear-gradient(90deg,#10b981,#6366f1); transition: width .25s linear; }
+</style>
+
+<!-- Parser choice modal -->
+<div id="parser-modal-overlay">
+    <div id="parser-modal">
+        <h3>How should we read this resume?</h3>
+        <p class="pm-sub">Choose a parsing method for <strong id="pm-filename"></strong></p>
+        <div class="pm-options">
+            <button class="pm-opt pm-llmtext" id="pm-btn-llmtext" type="button">
+                <div class="pm-opt-icon">&#129504;</div>
+                <span class="pm-opt-title">Resume Intelligence</span>
+                <span class="pm-opt-desc">AI reads the resume and extracts fields — best accuracy, takes a few seconds</span>
+            </button>
+            <button class="pm-opt" id="pm-btn-standard" type="button">
+                <div class="pm-opt-icon">&#128196;</div>
+                <span class="pm-opt-title">Quick Parse</span>
+                <span class="pm-opt-desc">Fast rule-based extraction — instant, no AI, works for most standard resumes</span>
+            </button>
+        </div>
+        <div class="pm-cancel">
+            <button id="pm-btn-cancel" type="button">Cancel — choose a different file</button>
+        </div>
+    </div>
+</div>
+
+<!-- Resume Intelligence loading modal (blocks the screen while the AI parses) -->
+<div id="ai-loading-overlay">
+    <div id="ai-loading-card">
+        <div class="ai-spinner"></div>
+        <h3>&#129504; Resume Intelligence</h3>
+        <p id="ai-load-msg">Reading your resume and extracting fields&#8230;<br>This usually takes a few seconds.</p>
+        <div class="ai-load-track">
+            <div id="ai-load-bar"></div>
+        </div>
+    </div>
+</div>
+
 <script>
 (function () {
     /* ── Resume parse on file select ──────────────────────── */
-    var fileInput  = document.getElementById("resume_file");
-    var statusBox  = document.getElementById("parse_status");
-    var parseUrl   = "{{ url_for('parse_resume_api') }}";
-    var fields     = ["full_name","title","email","phone","linkedin","location","summary","skills","experience","education","certifications","projects"];
-    var fileNameEl = document.getElementById("upload-filename");
+    var fileInput      = document.getElementById("resume_file");
+    var parseModeInput = document.getElementById("parse_mode");
+    var statusBox      = document.getElementById("parse_status");
+    var parseUrl       = "{{ url_for('parse_resume_api') }}";
+    var fields         = ["full_name","title","email","phone","linkedin","location","summary","skills","experience","education","certifications","projects"];
+    var fileNameEl     = document.getElementById("upload-filename");
+
+    /* modal elements */
+    var overlay      = document.getElementById("parser-modal-overlay");
+    var pmFilename   = document.getElementById("pm-filename");
+    var btnLLMText   = document.getElementById("pm-btn-llmtext");
+    var btnStandard  = document.getElementById("pm-btn-standard");
+    var btnCancel    = document.getElementById("pm-btn-cancel");
+
+    var pendingFile = null;
+
+    /* ── Resume Intelligence (AI) loading modal ──────────────── */
+    var _progressTimer  = null;
+    var AI_BUDGET_MS = 60000; // mirrors OLLAMA_TEXT_TIMEOUT in .env
+    var aiOverlay = document.getElementById("ai-loading-overlay");
+    var aiBar     = document.getElementById("ai-load-bar");
+
+    function startProgressBar() {
+        if (!aiOverlay) return;
+        aiOverlay.classList.add("open");
+        aiBar.style.width = "0%";
+        var start = Date.now();
+        _progressTimer = setInterval(function () {
+            var pct = Math.min(92, ((Date.now() - start) / AI_BUDGET_MS) * 92);
+            aiBar.style.width = pct.toFixed(1) + "%";
+        }, 250);
+    }
+
+    function stopProgressBar(success) {
+        if (_progressTimer) { clearInterval(_progressTimer); _progressTimer = null; }
+        if (aiBar) aiBar.style.width = success ? "100%" : "0%";
+        setTimeout(function () { if (aiOverlay) aiOverlay.classList.remove("open"); }, 500);
+    }
+    /* ─────────────────────────────────────────────────────────── */
+
+    var PARSER_LABELS = {
+        "llm_text":            "Resume Intelligence (AI)",
+        "text (llm fallback)": "Quick Parse (Resume Intelligence was unavailable)",
+        "text (fallback)":     "Quick Parse (Resume Intelligence was unavailable)",
+        "text":                "Quick Parse",
+        "standard":            "Quick Parse"
+    };
 
     function setStatus(msg, type) {
         statusBox.textContent = msg || "";
@@ -243,26 +397,25 @@
         return count;
     }
 
-    fileInput.addEventListener("change", function() {
-        var file = fileInput.files && fileInput.files[0];
-        if (!file) return;
-
-        // Show filename
+    // mode: "llm" = Resume Intelligence (AI), "0" = Quick Parse (rule-based)
+    function doParse(file, mode) {
         if (fileNameEl) fileNameEl.textContent = "Selected: " + file.name;
+        var isAI = mode === "llm";
+        var modeLabel = isAI ? "Resume Intelligence" : "Quick Parse";
+        setStatus("Parsing with " + modeLabel + "…", "loading");
 
-        var ext = file.name.split(".").pop().toLowerCase();
-        if (["pdf", "docx"].indexOf(ext) === -1) {
-            setStatus("Please choose a PDF or DOCX file only.", "error");
-            return;
-        }
+        if (isAI) startProgressBar();
+
+        parseModeInput.value = mode;
 
         var formData = new FormData();
         formData.append("resume_file", file);
-        setStatus("Reading resume and updating fields...", "loading");
+        formData.append("parse_mode", mode);
 
         var xhr = new XMLHttpRequest();
         xhr.open("POST", parseUrl, true);
         xhr.onload = function() {
+            if (isAI) stopProgressBar(xhr.status === 200);
             if (xhr.status === 0) { setStatus("Could not reach the server. Is Flask running?", "error"); return; }
             var result;
             try { result = JSON.parse(xhr.responseText); } catch(e) {
@@ -270,15 +423,64 @@
             }
             if (!result.success) { setStatus(result.message || "Could not extract resume details.", "error"); return; }
             var count = fillFields(result.data || {});
+            if (window.syncGroupSelect) window.syncGroupSelect();   // re-select group dropdown from the filled title
+            var parserLabel = PARSER_LABELS[result.parser_used] || modeLabel;
             setStatus(
                 count > 0
-                    ? "✓ " + count + " field(s) updated from resume. Review and click Save Profile."
+                    ? "✓ " + count + " field(s) updated using " + parserLabel + ". Review and click Save Profile."
                     : "Resume was read, but no matching values were found.",
                 count > 0 ? "success" : "error"
             );
         };
-        xhr.onerror = function() { setStatus("Network error. Is Flask running on port 5000?", "error"); };
+        xhr.onerror = function() {
+            if (isAI) stopProgressBar(false);
+            setStatus("Network error. Is Flask running on port 5000?", "error");
+        };
         xhr.send(formData);
+    }
+
+    function closeModal() {
+        overlay.classList.remove("open");
+        pendingFile = null;
+    }
+
+    fileInput.addEventListener("change", function() {
+        var file = fileInput.files && fileInput.files[0];
+        if (!file) return;
+
+        var ext = file.name.split(".").pop().toLowerCase();
+        if (["pdf", "docx"].indexOf(ext) === -1) {
+            setStatus("Please choose a PDF or DOCX file only.", "error");
+            return;
+        }
+
+        if (ext === "pdf") {
+            pendingFile = file;
+            pmFilename.textContent = file.name;
+            overlay.classList.add("open");
+        } else {
+            /* DOCX — skip modal, always use standard parser */
+            doParse(file, "0");
+        }
+    });
+
+    btnLLMText.addEventListener("click", function() {
+        var f = pendingFile; closeModal(); if (f) doParse(f, "llm");
+    });
+    btnStandard.addEventListener("click", function() {
+        var f = pendingFile; closeModal(); if (f) doParse(f, "0");
+    });
+
+    btnCancel.addEventListener("click", function() {
+        closeModal();
+        fileInput.value = "";
+        if (fileNameEl) fileNameEl.textContent = "";
+        setStatus("", "");
+    });
+
+    /* Close on backdrop click */
+    overlay.addEventListener("click", function(e) {
+        if (e.target === overlay) { btnCancel.click(); }
     });
 
     /* ── Groups dropdown ─────────────────────────────────── */
@@ -307,12 +509,25 @@
         }
     });
 
-    var currentTitle = title.value.trim();
-    if (currentTitle) {
+    // Select the group dropdown option that matches the current title. Exposed on
+    // window so the AJAX parse handler can re-sync the dropdown after auto-filling
+    // the title (the form requires a group, and parsing sets a mapped role group).
+    window.syncGroupSelect = function () {
+        var t = (title.value || "").trim().toLowerCase();
+        var matched = false;
         for (var i = 0; i < sel.options.length; i++) {
-            if (sel.options[i].value === currentTitle) { sel.selectedIndex = i; break; }
+            if (sel.options[i].value.toLowerCase() === t) {
+                sel.selectedIndex = i;
+                matched = true;
+                break;
+            }
         }
-    }
+        if (matched) {
+            sel.classList.remove("field-error");
+            if (errMsg) errMsg.style.display = "none";
+        }
+    };
+    window.syncGroupSelect();
 })();
 </script>
 {% endblock %}
