@@ -31,8 +31,6 @@
         <a class="button secondary" href="{{ url_for('edit_resume', resume_id=resume.id) }}">Edit</a>
         <a class="button" style="background:#7c3aed;" href="{{ url_for('compare_select_jd', resume_id=resume.id) }}">&#128202; Compare Resume</a>
         <a class="button" style="background:#10b981;" href="{{ url_for('download_resume_pdf', resume_id=resume.id) }}">📄 Download PDF</a>
-        <a class="button" style="background:#3b82f6;" href="{{ url_for('extract_resume_data', resume_id=resume.id) }}">⬇ Extract JSON</a>
-        {% if resume.resume_file %}<a class="button" href="{{ url_for('uploaded_file', filename=resume.resume_file) }}" target="_blank" rel="noopener">View Original</a>{% endif %}
         <form method="post" action="{{ url_for('delete_resume', resume_id=resume.id) }}" style="display:inline" onsubmit="return confirm('Delete this profile? This cannot be undone.')">
             <button type="submit" class="button danger">Delete</button>
         </form>
@@ -48,8 +46,7 @@
             <h2 style="font-size: 28px; font-weight: 900; margin: 0;">Top 3 Matching Roles</h2>
         </div>
         <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-            <a class="button" style="background:#10b981; padding:8px 14px; font-size:0.85rem;" href="{{ url_for('export_top_matches_pdf', resume_id=resume.id) }}">📄 Export PDF</a>
-            <a class="button" style="background:#3b82f6; padding:8px 14px; font-size:0.85rem;" href="{{ url_for('export_top_matches', resume_id=resume.id) }}">⬇ Export JSON</a>
+            <a class="button" style="background:#10b981; padding:8px 14px; font-size:0.85rem;" href="{{ url_for('export_rich_profile_pdf', resume_id=resume.id) }}">📄 Export PDF</a>
         </div>
     </div>
 

@@ -70,6 +70,10 @@
                 <input type="checkbox" id="select-all-chk" style="width:auto;cursor:pointer;">
                 Select All
             </label>
+            <button class="button danger" id="delete-all-btn" type="button"
+                    style="padding:6px 14px;font-size:0.8rem;">
+                &#128465; Delete All
+            </button>
             <button class="button" id="compare-sel-btn" type="button"
                     style="display:none;padding:6px 14px;font-size:0.8rem;">
                 &#9878; Compare Selected (<span id="sel-count">0</span>)
@@ -159,7 +163,7 @@
             <label>Job Description to compare against</label>
             <select id="cmp-jd-select" class="form-select">
                 <option value="">— Select a JD —</option>
-                {% for cat in ['Validation Roles', 'IT Roles'] %}
+                {% for cat in ['Regulatory Affairs', 'Validation Roles', 'IT Roles'] %}
                     {% set cat_jds = jds | selectattr('category', 'equalto', cat) | list %}
                     {% if cat_jds %}
                     <optgroup label="{{ cat }}">
@@ -560,9 +564,90 @@
             html += '</tbody></table></div>';
         }
 
+        // Add Export PDF button below results
+        html += '<div style="margin-top:16px;text-align:right;">' +
+            '<button class="button" id="export-cmp-pdf-btn" type="button" ' +
+            'style="background:#10b981;padding:8px 18px;font-size:0.85rem;">' +
+            '&#128196; Export PDF Report</button></div>';
         cmpResults.innerHTML = html;
         cmpResults.style.display = 'block';
         cmpResults.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+
+        // Wire Export PDF button
+        var expBtn = document.getElementById('export-cmp-pdf-btn');
+        if (expBtn) {
+            expBtn.addEventListener('click', function () {
+                expBtn.disabled = true;
+                expBtn.textContent = 'Generating PDF…';
+                var xhr2 = new XMLHttpRequest();
+                xhr2.open('POST', '/api/export-compare-pdf', true);
+                xhr2.setRequestHeader('Content-Type', 'application/json');
+                xhr2.responseType = 'blob';
+                xhr2.onload = function () {
+                    expBtn.disabled = false;
+                    expBtn.textContent = '📄 Export PDF Report';
+                    if (xhr2.status === 200) {
+                        var blob = xhr2.response;
+                        var url = URL.createObjectURL(blob);
+                        var a = document.createElement('a');
+                        a.href = url;
+                        a.download = 'compare_report.pdf';
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                        URL.revokeObjectURL(url);
+                    } else {
+                        alert('Failed to generate PDF. Please try again.');
+                    }
+                };
+                xhr2.onerror = function () {
+                    expBtn.disabled = false;
+                    expBtn.textContent = '📄 Export PDF Report';
+                    alert('Network error.');
+                };
+                // Send current compare results data
+                xhr2.send(JSON.stringify({ results: res.results || [], jd_title: res.jd_title || '' }));
+            });
+        }
+    }
+
+    /* ── Delete All ────────────────────────────────────────────── */
+    var deleteAllBtn = document.getElementById('delete-all-btn');
+    if (deleteAllBtn) {
+        deleteAllBtn.addEventListener('click', function () {
+            var tbody = document.getElementById('files-tbody');
+            var count = tbody ? tbody.querySelectorAll('tr').length : 0;
+            if (!confirm('Delete ALL ' + count + ' file(s)? This cannot be undone.')) return;
+            deleteAllBtn.disabled = true;
+            deleteAllBtn.textContent = 'Deleting…';
+            var xhr = new XMLHttpRequest();
+            xhr.open('POST', '/api/delete-all-uploads', true);
+            xhr.onload = function () {
+                var res; try { res = JSON.parse(xhr.responseText); } catch(e) { res = null; }
+                if (res && res.success) {
+                    if (tbody) {
+                        tbody.innerHTML = '';
+                        var wrap = tbody.closest('.dash-table-wrap');
+                        if (wrap) wrap.innerHTML = '<div class="empty-state" id="empty-state"><p style="font-size:3rem;margin-bottom:16px;">&#128193;</p><h2>No files uploaded yet</h2><p class="muted">Use the upload zone above to add PDF, DOCX or ZIP files.</p></div>';
+                    }
+                    var countEl = document.getElementById('files-count');
+                    if (countEl) countEl.textContent = '0 file(s) stored';
+                    deleteAllBtn.style.display = 'none';
+                    var selAll = document.getElementById('select-all-chk');
+                    if (selAll) selAll.closest('label').style.display = 'none';
+                } else {
+                    deleteAllBtn.disabled = false;
+                    deleteAllBtn.textContent = '🗑 Delete All';
+                    alert('Could not delete all files. Please try again.');
+                }
+            };
+            xhr.onerror = function () {
+                deleteAllBtn.disabled = false;
+                deleteAllBtn.textContent = '🗑 Delete All';
+                alert('Network error.');
+            };
+            xhr.send();
+        });
     }
 
     // Initial checkbox state

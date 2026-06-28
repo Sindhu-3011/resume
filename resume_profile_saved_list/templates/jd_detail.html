@@ -21,8 +21,7 @@
         <a class="button secondary" href="{{ url_for('jd_management') }}">← All JDs</a>
         <a class="button secondary" href="{{ url_for('jd_edit', jd_id=jd.id) }}">Edit</a>
         <a class="button" style="background:#10b981;" href="{{ url_for('download_jd_pdf', jd_id=jd.id) }}">📄 Download PDF</a>
-        <a class="button" style="background:#3b82f6;" href="{{ url_for('extract_jd_data', jd_id=jd.id) }}">⬇ Extract JSON</a>
-        <form method="post" action="{{ url_for('jd_delete', jd_id=jd.id) }}" style="display:inline"
+<form method="post" action="{{ url_for('jd_delete', jd_id=jd.id) }}" style="display:inline"
               onsubmit="return confirm('Delete this JD?')">
             <button type="submit" class="button danger">Delete</button>
         </form>

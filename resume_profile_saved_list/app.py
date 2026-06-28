@@ -5,7 +5,7 @@ from reportlab.lib.pagesizes import letter, A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
-from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_JUSTIFY
+from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_JUSTIFY, TA_RIGHT
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -78,6 +78,12 @@ SECTION_ALIASES = {
         "about", "about me", "overview", "executive summary", "career profile",
         "professional profile", "personal profile", "career summary",
         "professional overview", "career overview",
+        # Additional variants seen in different resume formats
+        "professional synopsis", "career synopsis", "synopsis",
+        "introduction", "professional statement", "personal statement",
+        "brief profile", "candidate profile",
+        "professional background summary", "career snapshot",
+        "profile overview", "about myself",
     ],
     "skills": [
         "skills", "technical skills", "core competencies", "key skills", "skill set",
@@ -86,6 +92,14 @@ SECTION_ALIASES = {
         "skills and competencies", "skills and technologies", "tools technologies",
         "applications summary", "application summary", "applications", "tools used",
         "tools and applications", "technical tools", "software tools", "tools and software",
+        # Additional variants
+        "it skills", "core skills", "skill summary", "skills overview",
+        "technical skill set", "domain expertise", "area of expertise",
+        "functional skills", "professional competencies", "expertise areas",
+        "key technical skills", "technology skills", "tools and skills",
+        "skills and frameworks", "technical proficiencies", "professional skills",
+        "domain skills", "skills and expertise",
+        "technical knowledge", "knowledge and skills",
     ],
     "experience": [
         "experience", "work experience", "professional experience", "employment history",
@@ -94,16 +108,35 @@ SECTION_ALIASES = {
         "work experience details", "experience summary", "employment details",
         "professional history", "career experience", "professional work experience",
         "work experience summary", "key experiences",
+        # Additional variants
+        "internship", "internships", "industrial training",
+        "work details", "career details", "employment record",
+        "professional record", "experience details", "career overview details",
+        "professional engagements", "roles and responsibilities",
+        "current experience", "past experience",
     ],
     "education": [
         "education", "academic background", "qualifications", "academic qualification",
         "academics", "educational background", "academic credentials",
         "educational qualifications", "academic details",
+        # Additional variants
+        "educational details", "academic qualifications", "education details",
+        "qualification details", "academic history", "academic information",
+        "educational information", "scholastic details", "scholastic background",
+        "educational profile", "education and training",
     ],
     "certifications": [
         "certifications", "certificates", "certification", "training", "trainings",
         "courses", "licenses", "professional development", "professional certifications",
         "awards and certifications", "achievements", "awards", "awards certifications",
+        # Additional variants
+        "certification and training", "certifications and training",
+        "training and certifications", "professional training",
+        "courses and certifications", "professional courses", "online courses",
+        "workshops", "training and development", "professional accomplishments",
+        "accomplishments", "honors", "honours", "academic achievements",
+        "professional achievements", "recognition", "accolades",
+        "certifications and awards", "awards and achievements",
     ],
     "projects": [
         "projects", "key projects", "project experience", "assignments",
@@ -113,6 +146,11 @@ SECTION_ALIASES = {
         "organizational details", "relevant project organizational details",
         "project and organizational details", "project organizational details roles and responsibilities",
         "client details", "relevant projects",
+        # Additional variants
+        "project summary", "projects summary", "project overview",
+        "major projects", "project work", "projects worked",
+        "key projects worked", "significant projects", "project details summary",
+        "live projects", "work projects", "project descriptions",
     ],
 }
 
@@ -301,6 +339,21 @@ def _detect_col_gutter_words(page):
     right = sum(1 for w in words if w[0] >= best_x)
     if left < n * 0.15 or right < n * 0.15:
         return None
+
+    # Final guard: in a true 2-column layout each line lives mostly in one
+    # column.  On a single-column page the "gutter" is just a ragged
+    # right-margin gap — most lines still have words on BOTH sides.
+    # If >25 % of y-level buckets have words on both sides, reject the split.
+    _y_tol = 6.0
+    _y_sides = {}
+    for w in words:
+        b = round(w[1] / _y_tol)
+        prev = _y_sides.get(b, [False, False])
+        _y_sides[b] = [prev[0] or w[2] <= best_x, prev[1] or w[0] >= best_x]
+    _dual = sum(1 for v in _y_sides.values() if v[0] and v[1])
+    if _dual > 0.25 * len(_y_sides):
+        return None
+
     return best_x
 
 
@@ -371,6 +424,132 @@ def _words_to_text(raw_words):
     return "\n".join(lines)
 
 
+def _pdfplumber_two_col_text(path):
+    """Extract text from a sidebar-style 2-column PDF using pdfplumber crops.
+
+    For each page:
+      1. Collect all word bounding boxes via extract_words().
+      2. Find the X position in the 20-65% range where the fewest word boxes
+         cross — this is the column gutter.
+      3. Crop the page at that X, extract each side independently.
+      4. Concatenate left-column text then right-column text so section
+         headings (KEY SKILLS on left, WORK EXPERIENCE on right) appear in the
+         correct order for find_sections().
+
+    Returns the combined multi-page string, or None if pdfplumber is
+    unavailable, the file is not a PDF, or no 2-column layout is detected.
+    """
+    if not HAS_PDFPLUMBER:
+        return None
+    try:
+        import pdfplumber
+        pages_text = []
+        with pdfplumber.open(str(path)) as pdf:
+            for page in pdf.pages:
+                # extract_words() with no extra kwargs — compatible with all versions
+                try:
+                    words = page.extract_words()
+                except Exception:
+                    pages_text.append(page.extract_text() or "")
+                    continue
+
+                if not words or len(words) < 15:
+                    pages_text.append(page.extract_text() or "")
+                    continue
+
+                pw = float(page.width)
+                ph = float(page.height)
+                n  = len(words)
+
+                # Scan x from 20 % to 65 % of page width for the column gutter
+                lo, hi = pw * 0.20, pw * 0.65
+                best_x, best_cross = None, n + 1
+                x = lo
+                while x <= hi:
+                    cross = sum(
+                        1 for w in words
+                        if float(w.get('x0', 0)) < x < float(w.get('x1', 0))
+                    )
+                    if cross < best_cross:
+                        best_cross, best_x = cross, x
+                    x += 2.0
+
+                # Allow up to 5% of words to straddle the gutter (handles slight overlap)
+                if best_x is None or best_cross > max(4, n * 0.05):
+                    pages_text.append(page.extract_text() or "")
+                    continue
+
+                # Right column must be substantial (>=8%). Left can be as thin as 3%
+                # because on page 2+ of sidebar PDFs the sidebar shrinks to just a few
+                # personal-detail lines while the main content fills the right column.
+                left_n  = sum(1 for w in words if float(w.get('x1', 0)) <= best_x)
+                right_n = sum(1 for w in words if float(w.get('x0', 0)) >= best_x)
+                if left_n < n * 0.03 or right_n < n * 0.08:
+                    pages_text.append(page.extract_text() or "")
+                    continue
+
+                # Final guard: in a true 2-column layout each y-level has words on
+                # one side only. On a single-column page most lines span both sides
+                # (ragged right margin). If >25% of y-buckets are dual-side → single column.
+                _y_tol = 6.0
+                _y_sides = {}
+                for w in words:
+                    b = round(float(w.get('top', 0)) / _y_tol)
+                    prev = _y_sides.get(b, [False, False])
+                    _y_sides[b] = [prev[0] or float(w.get('x1', 0)) <= best_x,
+                                   prev[1] or float(w.get('x0', 0)) >= best_x]
+                _dual = sum(1 for v in _y_sides.values() if v[0] and v[1])
+                if _y_sides and _dual > 0.25 * len(_y_sides):
+                    pages_text.append(page.extract_text() or "")
+                    continue
+
+                # Crop each column and extract text in reading order
+                try:
+                    left_text  = (page.crop((0,       0, best_x, ph)).extract_text() or "").strip()
+                    right_text = (page.crop((best_x,  0, pw,     ph)).extract_text() or "").strip()
+                except Exception:
+                    pages_text.append(page.extract_text() or "")
+                    continue
+
+                logger.info(f"pdfplumber 2-col split at x={best_x:.1f} "
+                            f"(left={left_n} words, right={right_n} words)")
+
+                # If the left column contains only sidebar-metadata headings (personal
+                # details, hobbies, languages, extra-curricular) and no valuable resume
+                # sections, emit ONLY the right column. This prevents continuation content
+                # on the right (WE bullets, PROJECTS) from being broken by left-column
+                # skip-headings that reset find_sections() state to None.
+                _SIDEBAR_ONLY_RE = re.compile(
+                    r'^(?:other personal details|personal information|personal details|'
+                    r'hobbies?|interests?|extra\s*curricular|declaration|references|languages?)',
+                    re.I
+                )
+                _VALUABLE_SECTION_RE = re.compile(
+                    r'\b(?:skills|experience|education|projects|certifications|summary|profile)\b',
+                    re.I
+                )
+                left_first_line = left_text.split('\n')[0].strip() if left_text else ""
+                _left_is_sidebar_only = (
+                    bool(_SIDEBAR_ONLY_RE.match(left_first_line))
+                    and not _VALUABLE_SECTION_RE.search(left_text)
+                )
+
+                if _left_is_sidebar_only:
+                    # Drop the left-column sidebar: its section headings (HOBBIES, LANGUAGES,
+                    # etc.) would corrupt section state and cause right-column continuation
+                    # content to be discarded by find_sections().
+                    logger.info(f"Page left column is sidebar-only — emitting right column only")
+                    pages_text.append(right_text)
+                else:
+                    pages_text.append(left_text + "\n" + right_text)
+
+        combined = "\n".join(pages_text).strip()
+        return combined if combined else None
+    except Exception as e:
+        logger.debug(f"_pdfplumber_two_col_text failed: {e}")
+        return None
+
+
 def _pymupdf_page_text(page):
     """Extract readable text from a page, handling 2-column layouts correctly.
 
@@ -395,9 +574,10 @@ def _pymupdf_page_text(page):
 
 
 def _fix_wrapped_email(text):
-    """Join emails that the PDF wrapped mid-TLD across two lines.
+    """Join emails that the PDF wrapped mid-TLD or mid-local-part across two lines.
 
-    e.g.  "sindhusundaramoorthy30@gmail.c"  +  "om"  →  "…@gmail.com"
+    Case 1 (post-@ split):  "sindhusundaramoorthy30@gmail.c"  +  "om"
+    Case 2 (pre-@ split):   "manibharathi601rav"  +  "i@gmail.com"
     """
     lines = text.split("\n")
     result = []
@@ -406,12 +586,19 @@ def _fix_wrapped_email(text):
         line = lines[i]
         if i + 1 < len(lines) and "@" in line:
             next_line = lines[i + 1].strip()
-            # Next line is 1-4 plain letters — likely a truncated TLD suffix
+            # Case 1: current line ends with partial TLD (≤2 chars), next line is TLD suffix
             if re.match(r"^[a-zA-Z]{1,4}$", next_line):
-                # Current line ends with a partial domain: @host.xy  (TLD ≤ 2 chars)
                 if re.search(r"@[A-Za-z0-9.\-]+\.[A-Za-z]{1,2}$", line):
                     line = line.rstrip() + next_line
-                    i += 1   # consume the continuation line
+                    i += 1
+        elif i + 1 < len(lines) and "@" not in line:
+            next_line = lines[i + 1].strip()
+            # Case 2: next line starts with a short prefix (≤5 chars) then @domain.tld
+            # and current line ends with 5+ alphanum chars (looks like partial local part)
+            m = re.match(r"^([A-Za-z0-9]{1,5})(@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})", next_line)
+            if m and re.search(r"[A-Za-z0-9]{5,}$", line):
+                line = line.rstrip() + next_line
+                i += 1
         result.append(line)
         i += 1
     return "\n".join(result)
@@ -691,6 +878,24 @@ def extract_text_from_docx(path):
         from docx.oxml.ns import qn
         from docx.table import Table as DocxTable
         from docx.text.paragraph import Paragraph as DocxParagraph
+
+        # Read document section headers first — some templates put name/contact info there
+        try:
+            for section in doc.sections:
+                for hdr in (section.header, section.first_page_header, section.even_page_header):
+                    if hdr is not None:
+                        for para in hdr.paragraphs:
+                            t = para.text.strip()
+                            if t:
+                                parts.append(t)
+                        for tbl in hdr.tables:
+                            for row in tbl.rows:
+                                row_text = " | ".join(c.text.strip() for c in row.cells if c.text.strip())
+                                if row_text:
+                                    parts.append(row_text)
+        except Exception:
+            pass  # Headers are optional — skip silently if unavailable
+
         for child in doc.element.body:
             if child.tag == qn("w:p"):
                 para = DocxParagraph(child, doc)
@@ -703,14 +908,31 @@ def extract_text_from_docx(path):
                     if row_text:
                         parts.append(row_text)
 
+        body_text = "\n".join(parts).strip()
+
         # If the standard body extraction yielded nothing, the file likely uses
         # a floating text-box canvas layout — try the canvas extractor.
-        if not "".join(parts).strip():
+        if not body_text:
             logger.info("No body text found; trying canvas/text-box extraction")
             canvas_text = _extract_canvas_docx(doc.element.body)
             if canvas_text.strip():
                 logger.info(f"Canvas extraction yielded {len(canvas_text)} chars")
                 return canvas_text
+        else:
+            # Even when body text exists, supplement with canvas text boxes — some
+            # templates have a sidebar (skills, contact) in floating boxes not in body.
+            try:
+                canvas_text = _extract_canvas_docx(doc.element.body)
+                if canvas_text.strip():
+                    # Add only lines that are not already present in the body
+                    existing = set(l.strip().lower() for l in parts if l.strip())
+                    for canvas_line in canvas_text.split('\n'):
+                        cl = canvas_line.strip()
+                        if cl and cl.lower() not in existing:
+                            parts.append(cl)
+                            existing.add(cl.lower())
+            except Exception:
+                pass
 
         logger.info(f"Successfully extracted {len(parts)} parts from DOCX")
         return "\n".join(parts)
@@ -814,7 +1036,8 @@ def find_sections(lines):
         "websites portfolios and profiles", "websites and profiles",
         "websites portfolios", "and profiles",
         "additional information", "other information", "extra curricular",
-        "achievements", "soft skills",
+        "soft skills",
+        # NOTE: "achievements" is intentionally NOT here — it maps to certifications
     }
     _SKIP_STARTSWITH = {
         "websites portfolios and profiles", "websites and profiles",
@@ -871,6 +1094,23 @@ def find_sections(lines):
                         break
 
         if section:
+            # Guard: a single Title-case word (e.g. "Qualifications") that immediately
+            # follows an incomplete line (no terminal punctuation) is a wrapped continuation
+            # of that line — NOT a new section heading. E.g. the bullet "…and Software\n
+            # Qualifications." wraps across lines but both chunks belong to the same section.
+            # ALL-CAPS words (e.g. "EDUCATION") are always genuine headings; skip the guard.
+            if (len(words_raw) == 1 and current and bucket
+                    and not words_raw[0].rstrip('.,;:!?').isupper()):
+                # Look past any trailing empty lines to the last substantive bucket line.
+                # An empty line between wrapped content (e.g. PDF page rendering gaps)
+                # must not prevent the guard from seeing the prior non-empty line.
+                _prev = next(
+                    (bl.rstrip() for bl in reversed(bucket) if bl.strip()),
+                    ""
+                )
+                if _prev and _prev[-1] not in '.!?;:':
+                    bucket.append(line)
+                    continue
             if section == current:
                 # "Summary" appearing mid-summary (e.g. wrapped "Validation Summary Report.")
                 # — ignore it so the current section doesn't restart and lose its content.
@@ -884,7 +1124,11 @@ def find_sections(lines):
             continue
 
         if current:
-            bucket.append(line)
+            # Drop bare page-number lines (1–3 digit standalone numbers from PDF
+            # page breaks, e.g. "1" between two halves of a skills list, "3" at the
+            # end of the last page). Legitimate content never appears as a bare digit.
+            if not re.match(r'^\s*\d{1,3}\s*$', line):
+                bucket.append(line)
 
     if current and bucket:
         sections[current] = "\n".join(bucket).strip()
@@ -1173,6 +1417,7 @@ _ROLE_MAPPING = [
     ({"developer"},                        set(),                                               "Software Developer"),
     ({"project"},                          {"manager"},                                         "Project Manager"),
     ({"design", "control"},               set(),                                               "Design Control Consultant"),
+    ({"document", "control"},             set(),                                               "Design Control Consultant"),
 ]
 
 
@@ -1299,6 +1544,17 @@ def parse_resume_text(text, name_hint=None):
     )
     if linkedin_match:
         parsed["linkedin"] = "https://www.linkedin.com/in/" + linkedin_match.group(1)
+    else:
+        # Bare handle format: "LinkedIn: john-doe" or "LinkedIn ID: john-doe-123abc"
+        _bare_match = re.search(
+            r'(?:linkedin|linked\s*in)(?:\s*id|\s*profile|\s*handle)?[\s:]+([a-zA-Z0-9][a-zA-Z0-9\-_%]{2,})',
+            text, re.I,
+        )
+        if _bare_match:
+            _handle = _bare_match.group(1).strip('-').strip()
+            # Must look like a handle (not a common word)
+            if len(_handle) >= 3 and not re.match(r'^(profile|handle|id|url|link|page|account)$', _handle, re.I):
+                parsed["linkedin"] = "https://www.linkedin.com/in/" + _handle
 
     # Remove all LinkedIn URLs and fragments from text
     text = re.sub(r'https?://[^\s]*linkedin\.com[^\s]*', '', text, flags=re.I)
@@ -1389,14 +1645,27 @@ def parse_resume_text(text, name_hint=None):
                 break
 
     if not parsed["location"]:
+        _loc_city_re = re.compile(
+            r"\b(india|karnataka|bangalore|bengaluru|chennai|hyderabad|pune|mumbai|delhi|"
+            r"noida|gurgaon|gurugram|coimbatore|trivandrum|kochi|jaipur|ahmedabad|kolkata|"
+            r"ludhiana|chandigarh)\b", re.I
+        )
         for line in lines[:20]:
-            if re.search(
-                r"\b(india|karnataka|bangalore|bengaluru|chennai|hyderabad|pune|mumbai|delhi|"
-                r"noida|gurgaon|gurugram|coimbatore|trivandrum|kochi|jaipur|ahmedabad|kolkata|"
-                r"ludhiana|chandigarh)\b",
-                line, re.I,
-            ):
-                parsed["location"] = line[:180]
+            if _loc_city_re.search(line):
+                # Split on pipe/bullet separators first; take only the segment
+                # that contains the city keyword — avoids grabbing "Open to
+                # Relocation", "LinkedIn:", years-of-experience text, etc.
+                _segs = re.split(r'\s*[|•·]\s*', line)
+                _city_seg = next((s for s in _segs if _loc_city_re.search(s)), line)
+                # Strip email, phone, and icon characters from the city segment
+                loc_line = re.sub(r'[\w.+-]+@[\w.-]+\.[a-z]{2,}', '', _city_seg, flags=re.I)
+                loc_line = re.sub(r'[\+\(]?[\d\s\-\(\)]{7,}', '', loc_line)
+                loc_line = re.sub(r'[^\x20-\x7E]', ' ', loc_line)
+                loc_line = re.sub(r'[,;]+', ',', loc_line)
+                loc_line = re.sub(r',\s*,', ',', loc_line)
+                loc_line = ', '.join(p.strip() for p in loc_line.split(',') if p.strip())
+                if loc_line and len(loc_line) > 2:
+                    parsed["location"] = loc_line[:180]
                 break
 
     parsed.update(find_sections(lines))
@@ -1489,6 +1758,27 @@ def parse_resume_text(text, name_hint=None):
     _intro = _extract_intro_paragraph(lines)
     if _intro and not parsed.get("summary"):
         parsed["summary"] = _intro
+
+    # Fallback: if summary is still empty, do a direct line-by-line scan for a
+    # "Profile Summary" or "Professional Summary" heading and collect what follows.
+    # This covers PDFs where the heading's special formatting (decorative chars,
+    # 2-column extraction order, etc.) prevented the section parser from capturing it.
+    if not parsed.get("summary"):
+        _in_ps, _ps_lines = False, []
+        for _ln in lines:
+            _key = re.sub(r"[^a-zA-Z ]", " ", _ln).lower()
+            _key = re.sub(r"\s+", " ", _key).strip()
+            if _key in ("profile summary", "professional summary"):
+                _in_ps = True
+                continue
+            if _in_ps:
+                _sec = canonical_section_name(_ln)
+                if _sec and _sec != "summary":
+                    break
+                if _ln.strip():
+                    _ps_lines.append(_ln.strip())
+        if _ps_lines:
+            parsed["summary"] = "\n".join(_ps_lines)
 
     if parsed.get("skills"):
         _url_line_pat = re.compile(
@@ -1612,9 +1902,9 @@ def merge_resume_data(form_data, parsed_data, overwrite=False):
 
 # ── Ollama "Resume Intelligence" parser (text LLM) ─────────────────────────────
 
-_OLLAMA_BASE         = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-_TEXT_MODEL          = os.environ.get("OLLAMA_TEXT_MODEL", "llama3.2:1b")
-_OLLAMA_TEXT_TIMEOUT = int(os.environ.get("OLLAMA_TEXT_TIMEOUT", "60"))
+_OLLAMA_BASE         = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+_TEXT_MODEL          = os.environ.get("OLLAMA_TEXT_MODEL", "resume-parser")
+_OLLAMA_TEXT_TIMEOUT = int(os.environ.get("OLLAMA_TEXT_TIMEOUT", "300"))
 
 
 # ── Pure-Ollama extraction — NO regex field engine in this path ────────────────
@@ -1641,18 +1931,20 @@ _HEADING_FIELD = {
 }
 
 
-def _ollama_chat(prompt, *, as_json, num_predict):
+def _ollama_chat(prompt, *, as_json, num_predict, num_ctx=8192):
     """Single Ollama call. Returns the raw assistant string (or {} dict if as_json)."""
     body = {
         "model": _TEXT_MODEL,
         "messages": [{"role": "user", "content": prompt}],
         "stream": False,
-        "options": {"temperature": 0, "num_predict": num_predict, "num_ctx": 4096},
+        "options": {"temperature": 0, "num_predict": num_predict, "num_ctx": num_ctx},
     }
     if as_json:
         body["format"] = "json"
+    url = f"{_OLLAMA_BASE}/api/chat"
+    logger.info(f"Ollama call → {url} model={_TEXT_MODEL}")
     req = urllib.request.Request(
-        f"{_OLLAMA_BASE}/api/chat",
+        url,
         data=json.dumps(body).encode(),
         headers={"Content-Type": "application/json"},
         method="POST",
@@ -1685,7 +1977,11 @@ def _split_resume_chunks(text):
         key = s.lower().strip(":·•- ")
         field = canonical_section_name(s) or _HEADING_FIELD.get(key)
         # Treat as a heading only if it's short (real headings are 1-3 words).
-        if field and len(s.split()) <= 3:
+        # Count only words that contain at least one letter so decorative tokens
+        # like "────", "===", "•" etc. do not inflate the word count and cause
+        # headings such as "── PROFILE SUMMARY ──" to be silently skipped.
+        _alpha_word_count = sum(1 for w in s.split() if any(c.isalpha() for c in w))
+        if field and _alpha_word_count <= 3:
             headings.append((i, field))
 
     # Second pass: extract content between heading positions
@@ -1726,156 +2022,170 @@ def parse_resume_with_llm_text(path):
     Returns (fields_dict, "llm_text").
     """
     raw_text = extract_resume_text(path, "pdf")
-    result = {k: "" for k in _BLANK_FIELDS}
 
-    # ── 1. Name / title / location via Ollama ────────────────────────────────────
-    # These are the fields a model genuinely beats rules at. Explicit field=description
-    # anchoring stops a 1B model echoing an empty template; 3 fields + a short header
-    # window is the sweet spot for reliability (more fields make it blank-out).
-    ident = _ollama_chat(
-        "Extract from this resume header. full_name=the person name, "
-        "title=their professional job role (not a company), location=their city.\n"
-        'Return ONLY JSON: {"full_name":"","title":"","location":""}\n\n'
-        "RESUME:\n" + raw_text[:700],
-        as_json=True, num_predict=120,
+    # For sidebar-style 2-column PDFs the pymupdf word-order extractor interleaves
+    # left-column content (KEY SKILLS) with right-column content (WORK EXPERIENCE)
+    # when the gutter is too close to the page edge for the block-based detector.
+    # Try the pdfplumber crop-based extractor which reads each column independently.
+    if str(path).lower().endswith(".pdf"):
+        two_col = _pdfplumber_two_col_text(path)
+        if two_col and len(two_col.strip()) >= len(raw_text.strip()) * 0.5:
+            raw_text = two_col
+
+    # Strip standalone page numbers (e.g. "\n1\n", "\n 2 \n", "\n3" at end)
+    raw_text = re.sub(r'\n[ \t]*\d{1,3}[ \t]*(?=\n|$)', '', raw_text)
+
+    # ── 1. Base parse via fast regex (instant) ───────────────────────────────────
+    font_name = _extract_name_from_pdf_fonts(path)
+    result = parse_resume_text(raw_text, name_hint=font_name)
+
+    # Clear name/title if quick_parse grabbed a degree string instead of real values
+    _degree_abbr_re = re.compile(
+        r'^(M\.?\s?Sc\.?|B\.?\s?Sc\.?|M\.?\s?B\.?\s?A\.?|Ph\.?\s?D\.?'
+        r'|M\.?\s?Tech\.?|B\.?\s?Tech\.?|B\.?\s?E\.?|D\.?\s?Pharm\.?|B\.?\s?Pharm\.?)$',
+        re.IGNORECASE
     )
-    for k in ("full_name", "title", "location"):
-        v = ident.get(k, "")
-        if isinstance(v, list):
-            v = " ".join(str(x) for x in v)
-        result[k] = str(v).strip() if v else ""
-
-    # Map the Ollama-extracted title to the closest predefined role group. (A 1B model
-    # can't reliably pick from the 33-role list — tested — but the title it extracts is
-    # accurate, and keyword-mapping that title to a group is deterministic and correct.)
-    if result["title"]:
-        result["title"] = _map_to_group_role(result["title"])
-
-    # ── 2. Contact fields — deterministic, 100% reliable (not the heuristic engine) ─
-    result["email"] = _extract_email(raw_text)
-    result["phone"] = _extract_phone(raw_text)
-
-    # Extract LinkedIn URL, handling wrapped URLs (newlines in the middle)
-    # First, normalize whitespace in URLs (convert newlines to nothing within URLs)
-    normalized_text = re.sub(
-        r'(linkedin\.com/in/[a-z0-9\-_%]*)\s*\n\s*([a-z0-9])',
-        r'\1\2',
-        raw_text,
-        flags=re.I
+    _degree_phrase_re = re.compile(
+        r'\b(master|bachelor|m\.?sc|b\.?sc|m\.?tech|b\.?tech|diploma|'
+        r'certificate|analytical chemistry|pharmacy|life science)\b',
+        re.IGNORECASE
     )
-    m = re.search(
-        r"(?:https?://)?(?:www\.)?linkedin\.com/in/([A-Za-z0-9\-_%/?=&#]+)",
-        normalized_text,
-        re.I
+    _name = result.get("full_name", "").strip()
+    if not _name or _degree_abbr_re.match(_name):
+        logger.info(f"Name '{_name}' looks like a degree — clearing for AI fallback")
+        result["full_name"] = ""
+    _title = result.get("title", "").strip()
+    if _degree_phrase_re.search(_title):
+        logger.info(f"Title '{_title}' looks like a degree — clearing for AI fallback")
+        result["title"] = ""
+
+    # ── 2. Verbatim section extraction ─────────────────────────────────────────────
+    # Exact keywords only. CRITICAL: filter out word-wrap false matches by requiring
+    # a blank line (double \n) before any heading — "Software \nQualifications" is a
+    # wrapped sentence, not a section heading; real headings always follow a blank line.
+    _EXACT_HEADINGS = [
+        "PROFESSIONAL EXPERIENCE", "WORK EXPERIENCE", "EMPLOYMENT HISTORY",
+        "PROFESSIONAL SUMMARY", "PROFILE SUMMARY", "APPLICATIONS SUMMARY",
+        "AREAS OF EXPERTISE", "TECHNICAL SKILLS", "CORE COMPETENCIES", "KEY SKILLS",
+        "ACADEMIC BACKGROUND", "ACADEMIC QUALIFICATIONS",
+        "SUMMARY", "EXPERIENCE", "EMPLOYMENT", "SKILLS", "EDUCATION",
+        "QUALIFICATIONS", "CERTIFICATIONS", "PROJECTS", "ACHIEVEMENTS",
+        "AWARDS", "REFERENCES",
+    ]
+    _section_heading_re = re.compile(
+        r'(?:^|(?<=\n))\s*('
+        + '|'.join(re.escape(k) for k in _EXACT_HEADINGS)
+        + r')[:\s]*(?=\n|$)',
+        re.IGNORECASE
     )
-    if m:
-        url_part = m.group(1)
-        # Remove trailing query params that might have been captured incorrectly
-        url_part = re.sub(r'[?&#].*$', lambda x: x.group(0) if 'skipRedirect' in x.group(0) else '', url_part)
-        result["linkedin"] = "https://www.linkedin.com/in/" + url_part
 
-    # ── 3. Content sections — use robust regex-based section finder for better handling ──
-    # The simple line-by-line chunker (_split_resume_chunks) fails on 2-column PDFs where
-    # sections can be interleaved. The find_sections() function has more robust logic for
-    # detecting section boundaries using the full SECTION_ALIASES and handles edge cases.
-    lines = raw_text.split('\n')
-    chunks = find_sections(lines)
+    def _heading_field(h):
+        u = h.strip().upper()
+        if u in ("SUMMARY", "PROFILE SUMMARY", "PROFESSIONAL SUMMARY"):
+            return "summary"
+        if u in ("EXPERIENCE", "PROFESSIONAL EXPERIENCE", "WORK EXPERIENCE",
+                 "EMPLOYMENT HISTORY", "EMPLOYMENT"):
+            return "experience"
+        if u in ("SKILLS", "TECHNICAL SKILLS", "KEY SKILLS", "CORE COMPETENCIES",
+                 "AREAS OF EXPERTISE", "APPLICATIONS SUMMARY"):
+            return "skills"
+        if u in ("EDUCATION", "QUALIFICATIONS", "ACADEMIC BACKGROUND",
+                 "ACADEMIC QUALIFICATIONS"):
+            return "education"
+        return None
 
-    # ── 4. Post-process: 2-column PDFs interleave skills with experience bullets
-    # Use Ollama to extract just the skill list from the messy section.
-    if chunks.get("skills"):
-        skills_text = chunks["skills"]
+    # Validate headings: must be ALL CAPS (letter characters only).
+    # This filters word-wrapped sentence continuations like "...Software\nQualifications"
+    # (mixed case) while accepting real headings like "PROFILE SUMMARY", "EXPERIENCE".
+    # Title-case headings are accepted as fallback if preceded by a blank line.
+    def _preceded_by_blank_line(pos):
+        if pos <= 1:
+            return True
+        line_end = pos - 1
+        line_start = raw_text.rfind('\n', 0, line_end)
+        prev_line = raw_text[line_start + 1:line_end] if line_start != -1 else raw_text[:line_end]
+        return not prev_line.strip()
 
-        # Use Ollama to extract the actual skill list (it can pick them out of the mess)
+    candidates = [(m.start(), m.group(1).strip()) for m in _section_heading_re.finditer(raw_text)]
+    headings = []
+    for pos, hd in candidates:
+        letters = re.sub(r'[^a-zA-Z]', '', hd)
+        is_all_caps = bool(letters) and letters == letters.upper()
+        if is_all_caps or _preceded_by_blank_line(pos):
+            headings.append((pos, hd))
+        else:
+            logger.debug(f"Skipped '{hd}' at {pos}: mixed-case and no blank line before")
+    logger.info(f"Validated headings: {[h for _, h in headings[:12]]}")
+
+    verbatim = {}
+    for i, (pos, heading) in enumerate(headings):
+        field = _heading_field(heading)
+        if not field or field in verbatim:
+            continue
+        nl_pos = raw_text.find("\n", pos)
+        content_start = nl_pos + 1 if nl_pos != -1 else pos + len(heading)
+        content_end = headings[i + 1][0] if i + 1 < len(headings) else len(raw_text)
+        text = raw_text[content_start:content_end].strip()
+        if text:
+            verbatim[field] = text
+            logger.info(f"Verbatim '{field}' ({len(text)} chars) from '{heading}'")
+
+    for field, text in verbatim.items():
+        result[field] = text
+
+    # ── 3. AI fallback — fires only when a field is still empty ─────────────────
+    # Name uses AI (small, fast call). Email/phone are regex-only (always reliable).
+    _AI_FALLBACK = {
+        "full_name": (
+            "What is the full name of the person in this resume? "
+            "Return ONLY the name, nothing else.\n\nRESUME HEADER:\n",
+            raw_text[:600], False, 20, 512,
+        ),
+        "title": (
+            "What is the professional job title of the person in this resume? "
+            "Return ONLY the job title (e.g. 'Senior Validation Analyst'). "
+            "Do not return a degree or education qualification.\n\nRESUME HEADER:\n",
+            raw_text[:800], False, 25, 512,
+        ),
+        "summary": (
+            "Extract the professional summary section verbatim from this resume. "
+            "Do not paraphrase.\n\nRESUME:\n",
+            raw_text[:3000], False, 600, 2048,
+        ),
+        "experience": (
+            "Extract the work experience section from this resume. "
+            "Include all jobs with company, title, dates, and responsibilities.\n\nRESUME:\n",
+            raw_text, False, 800, 2048,
+        ),
+        "skills": (
+            "Extract all skills and tools from this resume. "
+            'Return ONLY JSON: {"skills":["s1","s2",...]}.\n\nRESUME:\n',
+            raw_text[:3000], True, 400, 1024,
+        ),
+        "education": (
+            "Extract the education section verbatim from this resume.\n\nRESUME:\n",
+            raw_text, False, 300, 1024,
+        ),
+    }
+
+    for field, (prompt, ctx_text, as_json, num_predict, num_ctx) in _AI_FALLBACK.items():
+        if result.get(field):
+            continue  # already filled — skip AI
+        logger.info(f"AI fallback for '{field}'")
         try:
-            skill_list_json = _ollama_chat(
-                "Extract ONLY the technical skill names from this messy resume section. "
-                "Return a JSON list with the extracted skills. Ignore numbered bullets (experience items). "
-                'Return ONLY JSON: {"skills":["skill1","skill2",...]}.\n\n'
-                "SECTION:\n" + skills_text,
-                as_json=True, num_predict=200,
-            )
-            logger.info(f"Ollama skill extraction result: {skill_list_json}")
-
-            if skill_list_json and skill_list_json.get("skills"):
-                chunks["skills"] = '\n'.join(skill_list_json["skills"])
-                logger.info(f"Updated skills section from {len(skills_text)} chars to {len(chunks['skills'])} chars")
+            raw = _ollama_chat(prompt + ctx_text, as_json=as_json,
+                               num_predict=num_predict, num_ctx=num_ctx)
+            if as_json:
+                items = raw.get("skills", []) if isinstance(raw, dict) else []
+                if items:
+                    result[field] = "\n".join(str(s) for s in items if str(s).strip())
             else:
-                logger.warning(f"Ollama skill extraction returned empty or invalid JSON: {skill_list_json}")
+                if raw and raw.strip():
+                    result[field] = raw.strip()
+            if result.get(field):
+                logger.info(f"AI filled '{field}' ({len(result[field])} chars)")
         except Exception as e:
-            logger.warning(f"Ollama skill extraction failed: {e}. Keeping original skills section.")
-
-        # Extract numbered bullets (1., 2., etc.) as experience if not already there
-        experience_bullets = []
-        for line in skills_text.split('\n'):
-            line_stripped = line.strip()
-            if re.match(r'^\d{1,2}\.\s+', line_stripped):
-                experience_bullets.append(line_stripped)
-
-        if experience_bullets:
-            experience_text = '\n'.join(experience_bullets)
-            if chunks.get("experience"):
-                chunks["experience"] = chunks["experience"] + '\n' + experience_text
-            else:
-                chunks["experience"] = experience_text
-
-    # ── 5. Clean up experience section — remove LinkedIn URLs and contact info
-    if chunks.get("experience"):
-        exp_text = chunks["experience"]
-        # Remove complete LinkedIn URLs
-        exp_text = re.sub(
-            r'https?://(?:www\.)?linkedin\.com/in/[^\s\n]*(?:\s*\n\s*[a-zA-Z0-9\-_%/@?=&#]*)?',
-            '',
-            exp_text,
-            flags=re.I
-        )
-        # Remove orphaned LinkedIn URL fragments (e.g., "karnam-29a6b416a/?skipRedirect=true")
-        # These are fragments from wrapped URLs in PDFs
-        exp_text = re.sub(
-            r'^[a-z]+\-[a-z0-9]+/?[^\n]*(?:skipRedirect|linkedin)[^\n]*\n?',
-            '',
-            exp_text,
-            flags=re.MULTILINE | re.I
-        )
-        # Remove any remaining orphaned protocol prefixes
-        exp_text = re.sub(r'^\s*https?://\s*\n', '', exp_text, flags=re.MULTILINE)
-        chunks["experience"] = exp_text.strip()
-
-    # ── 6. Clean up education section — use Ollama to extract just education details
-    # 2-column PDFs have personal info on left, education on right. Interleaved extraction is messy.
-    # Use Ollama to extract just the degrees and institutions from the mixed content.
-    if chunks.get("education"):
-        edu_text = chunks["education"]
-
-        # Use Ollama to extract just education information
-        try:
-            edu_json = _ollama_chat(
-                "Extract ONLY the educational qualifications (degrees and institutions) from this mixed text. "
-                "Ignore personal info fields like Email, Mobile, Phone, Total work experience, Social Link, etc. "
-                'Return ONLY JSON: {"education":"degree1 from institute1, degree2 from institute2, ..."}.\n\n'
-                "TEXT:\n" + edu_text,
-                as_json=True, num_predict=150,
-            )
-
-            if edu_json and edu_json.get("education"):
-                chunks["education"] = edu_json["education"]
-                logger.info(f"Updated education section via Ollama")
-            else:
-                # Fallback to regex cleanup if Ollama extraction fails
-                logger.warning("Ollama education extraction returned empty, using regex cleanup")
-                edu_text = re.sub(r'Email\s+', '', edu_text, flags=re.I)
-                edu_text = re.sub(r'Mobile\s+', '', edu_text, flags=re.I)
-                edu_text = re.sub(r'\+?\(?\d{1,4}\)?[\s\-.]?\d{3,}[\s\-.]?\d{3,}[\s\-.]?\d{0,4}', '', edu_text)
-                edu_text = re.sub(r'^(?:Total work experience|Social Link|City|Country|Languages?|Hobbies?)[^\n]*\n?', '', edu_text, flags=re.MULTILINE | re.I)
-                edu_text = re.sub(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', '', edu_text)
-                edu_text = re.sub(r'\n\s*\n+', '\n', edu_text)
-                chunks["education"] = edu_text.strip()
-        except Exception as e:
-            logger.warning(f"Education cleanup via Ollama failed: {e}")
-
-    for field in ("summary", "skills", "experience", "education", "certifications", "projects"):
-        if chunks.get(field):
-            result[field] = chunks[field]
+            logger.warning(f"AI fallback '{field}' failed: {e}", exc_info=True)
 
     return result, "llm_text"
 
@@ -1951,13 +2261,14 @@ def edit_resume(resume_id=None):
                 resume_file = save_name
 
                 # parse_mode: "llm" = Resume Intelligence (AI), anything else = Quick Parse
-                parse_mode = request.form.get("parse_mode", "0")
+                parse_mode = request.form.get("parse_mode", "llm")
                 try:
                     if ext == "pdf" and parse_mode == "llm":
+                        logger.info(f"Using Resume Intelligence (AI) path for {path}")
                         try:
                             parsed_data, _ = parse_resume_with_llm_text(path)
                         except Exception as e:
-                            logger.warning("Resume Intelligence failed (%s); using Quick Parse.", e)
+                            logger.warning("Resume Intelligence failed (%s); using Quick Parse.", e, exc_info=True)
                             parsed_data = _parse_pdf_quick(path)
                     elif ext == "pdf":
                         parsed_data = _parse_pdf_quick(path)
@@ -2309,6 +2620,450 @@ def export_top_matches_pdf(resume_id):
     )
 
 
+@app.route("/profile/<int:resume_id>/export-rich-pdf")
+def export_rich_profile_pdf(resume_id):
+    """Export a professional assessment PDF: overview table + per-JD breakdown."""
+    from reportlab.platypus import Table, TableStyle, HRFlowable, PageBreak
+    from reportlab.lib import colors as rl_colors
+
+    with db_conn() as conn:
+        resume = conn.execute("SELECT * FROM resume WHERE id = %s", (resume_id,)).fetchone()
+        if not resume:
+            return "Profile not found", 404
+        jds = conn.execute("SELECT * FROM job_description ORDER BY created_at DESC").fetchall()
+
+    resume_dict = dict(resume)
+    matches = []
+    for jd in jds:
+        jd_dict = dict(jd)
+        score = calculate_match_score(resume_dict, jd_dict)
+        score['jd'] = jd_dict
+        score['jd_title']    = str(jd_dict.get('title') or 'Unknown')
+        score['jd_category'] = str(jd_dict.get('category') or '')
+        matches.append(score)
+    matches.sort(key=lambda x: x['match_percentage'], reverse=True)
+    top_matches = matches[:3]
+
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4,
+                            topMargin=0.5*inch, bottomMargin=0.5*inch,
+                            leftMargin=0.75*inch, rightMargin=0.75*inch)
+
+    C_DARK    = rl_colors.HexColor('#1e293b')
+    C_INDIGO  = rl_colors.HexColor('#4f46e5')
+    C_GREEN   = rl_colors.HexColor('#10b981')
+    C_ORANGE  = rl_colors.HexColor('#f59e0b')
+    C_DORANG  = rl_colors.HexColor('#d97706')
+    C_RED     = rl_colors.HexColor('#ef4444')
+    C_MUTED   = rl_colors.HexColor('#64748b')
+    C_BGBLUE  = rl_colors.HexColor('#eef2ff')
+    C_BGGRN   = rl_colors.HexColor('#d1fae5')
+    C_BGRED   = rl_colors.HexColor('#fee2e2')
+    C_BGORG   = rl_colors.HexColor('#fef3c7')
+    C_BGINDIG = rl_colors.HexColor('#ede9fe')
+    C_WHITE   = rl_colors.white
+    C_HDR     = rl_colors.HexColor('#1e293b')
+    C_LINE    = rl_colors.HexColor('#3b82f6')
+
+    def _scol(p):
+        return C_GREEN if p >= 80 else C_INDIGO if p >= 60 else C_ORANGE if p >= 40 else C_RED
+
+    def _slbl(p):
+        if p >= 80: return 'Strong Match'
+        if p >= 60: return 'Good Match'
+        if p >= 40: return 'Partial Match'
+        return 'Low Match'
+
+    def _ps(nm, **kw):
+        return ParagraphStyle(nm, **kw)
+
+    W = A4[0] - 1.5 * inch
+    story = []
+
+    # ── PAGE 1: HEADER BAR ────────────────────────────────────────────────────
+    hdr_bar = Table(
+        [[Paragraph('CANDIDATE ASSESSMENT REPORT',
+                    _ps('RP_HdrBar', fontName='Helvetica-Bold', fontSize=13,
+                        textColor=C_WHITE, alignment=TA_CENTER))]],
+        colWidths=[W]
+    )
+    hdr_bar.setStyle(TableStyle([
+        ('BACKGROUND',    (0, 0), (-1, -1), C_HDR),
+        ('TOPPADDING',    (0, 0), (-1, -1), 12),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 12),
+        ('LEFTPADDING',   (0, 0), (-1, -1), 10),
+        ('RIGHTPADDING',  (0, 0), (-1, -1), 10),
+    ]))
+    story.append(hdr_bar)
+    story.append(Spacer(1, 0.18 * inch))
+
+    cname  = str(resume_dict.get('full_name') or 'Candidate')
+    ctitle = str(resume_dict.get('title') or '')
+    cemail = str(resume_dict.get('email') or '')
+    cphone = str(resume_dict.get('phone') or '')
+    cloc   = str(resume_dict.get('location') or '')
+    contact_parts = [x for x in [cemail, cphone, cloc] if x]
+
+    story.append(Paragraph(cname,
+                            _ps('RP_Name', fontName='Helvetica-Bold', fontSize=26,
+                                textColor=C_DARK, leading=32, alignment=TA_CENTER)))
+    if ctitle:
+        story.append(Paragraph(ctitle,
+                                _ps('RP_Title', fontName='Helvetica', fontSize=13,
+                                    textColor=C_MUTED, leading=18, alignment=TA_CENTER,
+                                    spaceAfter=2)))
+    if contact_parts:
+        story.append(Paragraph(' | '.join(contact_parts),
+                                _ps('RP_Contact', fontName='Helvetica', fontSize=9,
+                                    textColor=C_MUTED, leading=14, alignment=TA_CENTER,
+                                    spaceAfter=6)))
+    story.append(Spacer(1, 0.08 * inch))
+    story.append(HRFlowable(width=W, thickness=2, color=C_LINE, spaceAfter=14))
+
+    # ── OVERVIEW TABLE ────────────────────────────────────────────────────────
+    story.append(Paragraph('TOP 3 MATCHING ROLES — OVERVIEW',
+                            _ps('RP_OvSec', fontName='Helvetica-Bold', fontSize=12,
+                                textColor=C_INDIGO, spaceAfter=8)))
+
+    ov_hc = _ps('RP_OvHC', fontName='Helvetica-Bold', fontSize=9,
+                textColor=C_WHITE, alignment=TA_CENTER)
+    ov_hl = _ps('RP_OvHL', fontName='Helvetica-Bold', fontSize=9, textColor=C_WHITE)
+    ov_data = [[
+        Paragraph('Rank',        ov_hc),
+        Paragraph('Job Role',    ov_hl),
+        Paragraph('Category',    ov_hl),
+        Paragraph('Match Score', ov_hc),
+        Paragraph('Matched',     ov_hc),
+        Paragraph('Missing',     ov_hc),
+    ]]
+    for ri, m in enumerate(top_matches, 1):
+        p      = m['match_percentage']
+        sc     = _scol(p)
+        mc     = int(m['matched_count'])
+        ms_cnt = int(m['missing_count'])
+        ov_data.append([
+            Paragraph(f'#{ri}',
+                      _ps(f'RP_OvRk{ri}', fontName='Helvetica-Bold',
+                          fontSize=10, textColor=C_DARK, alignment=TA_CENTER)),
+            Paragraph(str(m['jd_title']),
+                      _ps(f'RP_OvT{ri}', fontName='Helvetica', fontSize=9,
+                          textColor=C_DARK, leading=12)),
+            Paragraph(str(m['jd_category']),
+                      _ps(f'RP_OvC{ri}', fontName='Helvetica', fontSize=9,
+                          textColor=C_MUTED, leading=12)),
+            Paragraph(f'{p}%  ({_slbl(p)})',
+                      _ps(f'RP_OvSc{ri}', fontName='Helvetica-Bold',
+                          fontSize=9, textColor=sc, alignment=TA_CENTER)),
+            Paragraph(str(mc),
+                      _ps(f'RP_OvMc{ri}', fontName='Helvetica-Bold',
+                          fontSize=9, textColor=C_GREEN, alignment=TA_CENTER)),
+            Paragraph(str(ms_cnt),
+                      _ps(f'RP_OvMs{ri}', fontName='Helvetica-Bold',
+                          fontSize=9, textColor=C_RED, alignment=TA_CENTER)),
+        ])
+
+    ov_cols  = [0.08*W, 0.28*W, 0.22*W, 0.24*W, 0.09*W, 0.09*W]
+    ov_style = [
+        ('BACKGROUND',    (0, 0), (-1, 0),  C_DARK),
+        ('TOPPADDING',    (0, 0), (-1, -1), 7),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 7),
+        ('LEFTPADDING',   (0, 0), (-1, -1), 7),
+        ('RIGHTPADDING',  (0, 0), (-1, -1), 7),
+        ('GRID',          (0, 0), (-1, -1), 0.5, rl_colors.HexColor('#e2e8f0')),
+        ('VALIGN',        (0, 0), (-1, -1), 'MIDDLE'),
+    ]
+    for ri in range(1, len(ov_data)):
+        ov_style.append(('BACKGROUND', (0, ri), (-1, ri),
+                         C_WHITE if ri % 2 == 1 else rl_colors.HexColor('#f8fafc')))
+    ov_tbl = Table(ov_data, colWidths=ov_cols)
+    ov_tbl.setStyle(TableStyle(ov_style))
+    story.append(ov_tbl)
+    story.append(Spacer(1, 0.2 * inch))
+
+    # ── CANDIDATE KEY SKILLS ──────────────────────────────────────────────────
+    skills_raw = str(resume_dict.get('skills') or '')
+    skill_list = [s.strip() for s in skills_raw.split('\n') if s.strip()]
+
+    if skill_list:
+        story.append(Paragraph('Candidate Key Skills',
+                                _ps('RP_SkSec', fontName='Helvetica-Bold', fontSize=12,
+                                    textColor=C_DARK, spaceAfter=8)))
+        tag_sty   = _ps('RP_SkTag', fontName='Helvetica', fontSize=8.5,
+                        textColor=C_DARK, leading=13, alignment=TA_CENTER)
+        empty_tag = Paragraph('', tag_sty)
+        tag_rows  = []
+        row       = []
+        for i, sk in enumerate(skill_list):
+            row.append(Paragraph(str(sk), tag_sty))
+            if len(row) == 4 or i == len(skill_list) - 1:
+                while len(row) < 4:
+                    row.append(empty_tag)
+                tag_rows.append(row)
+                row = []
+        if tag_rows:
+            sk_tbl = Table(tag_rows, colWidths=[W / 4] * 4)
+            sk_tbl.setStyle(TableStyle([
+                ('BACKGROUND',    (0, 0), (-1, -1), C_BGBLUE),
+                ('TOPPADDING',    (0, 0), (-1, -1), 6),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+                ('LEFTPADDING',   (0, 0), (-1, -1), 6),
+                ('RIGHTPADDING',  (0, 0), (-1, -1), 6),
+                ('GRID',          (0, 0), (-1, -1), 0.5, rl_colors.HexColor('#c7d2fe')),
+                ('VALIGN',        (0, 0), (-1, -1), 'MIDDLE'),
+            ]))
+            story.append(sk_tbl)
+
+    # ── HELPER: tag grid (4-column) ───────────────────────────────────────────
+    def _tag_grid(items, tag_bg, text_col, border_col, pfx):
+        safe = list(items) if items else []
+        if not safe:
+            return None
+        t_sty  = _ps(f'RP_TG{pfx}', fontName='Helvetica', fontSize=8.5,
+                     textColor=text_col, leading=13, alignment=TA_CENTER)
+        empty  = Paragraph('', t_sty)
+        rows   = []
+        row    = []
+        for i, sk in enumerate(safe):
+            row.append(Paragraph(str(sk), t_sty))
+            if len(row) == 4 or i == len(safe) - 1:
+                while len(row) < 4:
+                    row.append(empty)
+                rows.append(row)
+                row = []
+        tbl = Table(rows, colWidths=[W / 4] * 4)
+        tbl.setStyle(TableStyle([
+            ('BACKGROUND',    (0, 0), (-1, -1), tag_bg),
+            ('TOPPADDING',    (0, 0), (-1, -1), 5),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
+            ('LEFTPADDING',   (0, 0), (-1, -1), 6),
+            ('RIGHTPADDING',  (0, 0), (-1, -1), 6),
+            ('GRID',          (0, 0), (-1, -1), 0.5, border_col),
+            ('VALIGN',        (0, 0), (-1, -1), 'MIDDLE'),
+        ]))
+        return tbl
+
+    # ── HELPER: skills list (nested single-column Table) ─────────────────────
+    def _skill_inner(items, label, label_col, text_col, marker, pfx):
+        safe = list(items) if items else []
+        rows = [[Paragraph(label,
+                           _ps(f'RP_SL{pfx}', fontName='Helvetica-Bold', fontSize=9,
+                               textColor=label_col, leading=13, spaceAfter=2))]]
+        if safe:
+            item_sty = _ps(f'RP_SI{pfx}', fontName='Helvetica', fontSize=8.5,
+                           textColor=text_col, leading=13, leftIndent=4)
+            for sk in safe[:20]:
+                rows.append([Paragraph(f'{marker} {str(sk)}', item_sty)])
+            if len(safe) > 20:
+                rows.append([Paragraph(
+                    f'+ {len(safe) - 20} more',
+                    _ps(f'RP_SM{pfx}', fontName='Helvetica', fontSize=8,
+                        textColor=C_MUTED, leading=11, leftIndent=4)
+                )])
+        else:
+            rows.append([Paragraph('None',
+                                   _ps(f'RP_SN{pfx}', fontName='Helvetica', fontSize=8.5,
+                                       textColor=C_MUTED, leading=12, leftIndent=4))])
+        inner = Table(rows, colWidths=[W * 0.5 - 28])
+        inner.setStyle(TableStyle([
+            ('TOPPADDING',    (0, 0), (-1, -1), 3),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+            ('LEFTPADDING',   (0, 0), (-1, -1), 0),
+            ('RIGHTPADDING',  (0, 0), (-1, -1), 0),
+        ]))
+        return inner
+
+    # ── PER-JD DETAILED SECTIONS ──────────────────────────────────────────────
+    RANKS = ['#1', '#2', '#3']
+
+    for idx, m in enumerate(top_matches):
+        p           = m['match_percentage']
+        sc          = _scol(p)
+        jdt         = str(m['jd_title'])
+        sp          = int(m.get('skills_match_percentage', 0))
+        ep          = int(m.get('experience_match_percentage', 0))
+        exp_note    = str(m.get('experience_note') or '')
+        res_yrs     = m.get('resume_years_estimated')
+        strong      = list(m.get('strong_areas') or [])
+        weak        = list(m.get('weak_areas') or [])
+        matched     = list(m.get('matched_skills') or [])
+        missing     = list(m.get('missing_skills') or [])
+        match_count = int(m['matched_count'])
+        total       = int(m['total_jd_requirements'])
+        miss_count  = int(m['missing_count'])
+
+        story.append(PageBreak())
+
+        # JD banner: colored rank badge | title | % + label
+        banner = Table([[
+            Paragraph(RANKS[idx],
+                      _ps(f'RP_Rk{idx}', fontName='Helvetica-Bold', fontSize=18,
+                          textColor=C_WHITE, alignment=TA_CENTER, leading=22)),
+            Paragraph(jdt,
+                      _ps(f'RP_JdT{idx}', fontName='Helvetica-Bold', fontSize=13,
+                          textColor=C_DARK, leading=18)),
+            Paragraph(f'<b>{p}%</b><br/><font size="9">{_slbl(p)}</font>',
+                      _ps(f'RP_JdP{idx}', fontName='Helvetica-Bold', fontSize=22,
+                          textColor=sc, alignment=TA_RIGHT, leading=26)),
+        ]], colWidths=[0.12 * W, 0.60 * W, 0.28 * W])
+        banner.setStyle(TableStyle([
+            ('BACKGROUND',    (0, 0), (0, 0),   sc),
+            ('BACKGROUND',    (1, 0), (-1, -1), C_WHITE),
+            ('TOPPADDING',    (0, 0), (-1, -1), 12),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 12),
+            ('LEFTPADDING',   (0, 0), (0, 0),   6),
+            ('LEFTPADDING',   (1, 0), (1, 0),   14),
+            ('LEFTPADDING',   (2, 0), (2, 0),   8),
+            ('RIGHTPADDING',  (0, 0), (-1, -1), 10),
+            ('VALIGN',        (0, 0), (-1, -1), 'MIDDLE'),
+            ('BOX',           (0, 0), (-1, -1), 1.5, sc),
+        ]))
+        story.append(banner)
+        story.append(Spacer(1, 0.15 * inch))
+
+        # Match Score Breakdown table
+        story.append(Paragraph('Match Score Breakdown',
+                                _ps(f'RP_MBH{idx}', fontName='Helvetica-Bold', fontSize=11,
+                                    textColor=C_DARK, spaceAfter=6)))
+        mb_wh  = _ps(f'RP_MBW{idx}',  fontName='Helvetica-Bold', fontSize=9, textColor=C_WHITE)
+        mb_whc = _ps(f'RP_MBWC{idx}', fontName='Helvetica-Bold', fontSize=9,
+                     textColor=C_WHITE, alignment=TA_CENTER)
+        mb_met = _ps(f'RP_MBM{idx}', fontName='Helvetica', fontSize=9, textColor=C_DARK)
+        mb_det = _ps(f'RP_MBD{idx}', fontName='Helvetica', fontSize=9, textColor=C_MUTED)
+        exp_det = exp_note[:90] if exp_note else 'N/A'
+
+        mb_data = [
+            [Paragraph('Metric', mb_wh),  Paragraph('Score', mb_whc),
+             Paragraph('Detail', mb_wh)],
+            [Paragraph('Overall Match', mb_met),
+             Paragraph(f'{p}%', _ps(f'RP_MBOv{idx}', fontName='Helvetica-Bold', fontSize=9,
+                       textColor=sc, alignment=TA_CENTER)),
+             Paragraph(f'{match_count} of {total} requirements met', mb_det)],
+            [Paragraph('Skills Match', mb_met),
+             Paragraph(f'{sp}%', _ps(f'RP_MBSk{idx}', fontName='Helvetica-Bold', fontSize=9,
+                       textColor=C_DARK, alignment=TA_CENTER)),
+             Paragraph(f'{match_count} skills matched', mb_det)],
+            [Paragraph('Experience Match', mb_met),
+             Paragraph(f'{ep}%', _ps(f'RP_MBEx{idx}', fontName='Helvetica-Bold', fontSize=9,
+                       textColor=C_DARK, alignment=TA_CENTER)),
+             Paragraph(exp_det, mb_det)],
+        ]
+        mb_style = [
+            ('BACKGROUND',    (0, 0), (-1, 0),  C_DARK),
+            ('TOPPADDING',    (0, 0), (-1, -1), 6),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+            ('LEFTPADDING',   (0, 0), (-1, -1), 8),
+            ('RIGHTPADDING',  (0, 0), (-1, -1), 8),
+            ('GRID',          (0, 0), (-1, -1), 0.5, rl_colors.HexColor('#e2e8f0')),
+            ('VALIGN',        (0, 0), (-1, -1), 'MIDDLE'),
+        ]
+        for ri in range(1, len(mb_data)):
+            mb_style.append(('BACKGROUND', (0, ri), (-1, ri),
+                             C_WHITE if ri % 2 == 1 else rl_colors.HexColor('#f8fafc')))
+        mb_tbl = Table(mb_data, colWidths=[0.28 * W, 0.14 * W, 0.58 * W])
+        mb_tbl.setStyle(TableStyle(mb_style))
+        story.append(mb_tbl)
+        story.append(Spacer(1, 0.15 * inch))
+
+        # Matched / Missing skills side by side
+        ms = Table([[
+            _skill_inner(matched, f'Matched Skills ({match_count})',
+                         C_GREEN, C_GREEN, '•', f'{idx}a'),
+            _skill_inner(missing, f'Missing / Gap Skills ({miss_count})',
+                         C_RED, C_RED, '×', f'{idx}b'),
+        ]], colWidths=[W * 0.5, W * 0.5])
+        ms.setStyle(TableStyle([
+            ('BACKGROUND',    (0, 0), (0, 0), C_BGGRN),
+            ('BACKGROUND',    (1, 0), (1, 0), C_BGRED),
+            ('TOPPADDING',    (0, 0), (-1, -1), 10),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 10),
+            ('LEFTPADDING',   (0, 0), (-1, -1), 14),
+            ('RIGHTPADDING',  (0, 0), (-1, -1), 14),
+            ('VALIGN',        (0, 0), (-1, -1), 'TOP'),
+            ('LINEAFTER',     (0, 0), (0, 0),   1, rl_colors.HexColor('#d1d5db')),
+        ]))
+        story.append(ms)
+        story.append(Spacer(1, 0.14 * inch))
+
+        # Strong Areas
+        if strong:
+            story.append(Paragraph('Strong Areas',
+                                    _ps(f'RP_StrH{idx}', fontName='Helvetica-Bold', fontSize=11,
+                                        textColor=C_INDIGO, spaceAfter=6)))
+            tbl = _tag_grid(strong, C_BGINDIG, C_INDIGO,
+                            rl_colors.HexColor('#ddd6fe'), f'{idx}str')
+            if tbl:
+                story.append(tbl)
+            story.append(Spacer(1, 0.12 * inch))
+
+        # Skill Gaps
+        if weak:
+            story.append(Paragraph('Skill Gaps to Address',
+                                    _ps(f'RP_GapH{idx}', fontName='Helvetica-Bold', fontSize=11,
+                                        textColor=C_ORANGE, spaceAfter=6)))
+            tbl = _tag_grid(weak, C_BGORG, C_DORANG,
+                            rl_colors.HexColor('#fcd34d'), f'{idx}gap')
+            if tbl:
+                story.append(tbl)
+            story.append(Spacer(1, 0.12 * inch))
+
+        # Experience Assessment
+        story.append(Paragraph('Experience Assessment',
+                                _ps(f'RP_ExpH{idx}', fontName='Helvetica-Bold', fontSize=11,
+                                    textColor=C_DARK, spaceAfter=6)))
+        if exp_note:
+            story.append(Paragraph(exp_note,
+                                    _ps(f'RP_ExpN{idx}', fontName='Helvetica', fontSize=9,
+                                        textColor=C_MUTED, leading=14, spaceAfter=4)))
+        if res_yrs is not None:
+            yr_row = Table([[
+                Paragraph('Resume Shows',
+                           _ps(f'RP_YrL{idx}', fontName='Helvetica-Bold',
+                               fontSize=9, textColor=C_DARK)),
+                Paragraph(f'~{res_yrs} year(s)',
+                           _ps(f'RP_YrV{idx}', fontName='Helvetica-Bold',
+                               fontSize=9, textColor=C_ORANGE)),
+            ]], colWidths=[0.25 * W, 0.35 * W])
+            yr_row.setStyle(TableStyle([
+                ('TOPPADDING',    (0, 0), (-1, -1), 3),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+                ('LEFTPADDING',   (0, 0), (-1, -1), 0),
+                ('RIGHTPADDING',  (0, 0), (-1, -1), 0),
+                ('VALIGN',        (0, 0), (-1, -1), 'MIDDLE'),
+            ]))
+            story.append(yr_row)
+        story.append(Spacer(1, 0.12 * inch))
+
+        # Recommendations
+        story.append(Paragraph('Recommendations',
+                                _ps(f'RP_RecH{idx}', fontName='Helvetica-Bold', fontSize=11,
+                                    textColor=C_DARK, spaceAfter=6)))
+        if p >= 80:
+            rec1 = 'Strong match — candidate meets most requirements.'
+        elif p >= 60:
+            rec1 = 'Good match — candidate meets key requirements with some gaps.'
+        elif p >= 40:
+            rec1 = 'Partial match — may require upskilling in the gap areas listed above.'
+        else:
+            rec1 = 'Low match — significant gaps to address before applying.'
+        story.append(Paragraph(f'• {rec1}',
+                                _ps(f'RP_Rec1{idx}', fontName='Helvetica', fontSize=9,
+                                    textColor=C_DARK, leading=14, spaceAfter=4)))
+        if weak:
+            top_gaps = ', '.join(str(g) for g in weak[:4])
+            if len(weak) > 4:
+                top_gaps += '...'
+            story.append(Paragraph(f'• Key areas to strengthen: {top_gaps}',
+                                    _ps(f'RP_Rec2{idx}', fontName='Helvetica', fontSize=9,
+                                        textColor=C_DARK, leading=14)))
+        story.append(Spacer(1, 0.2 * inch))
+
+    doc.build(story)
+    buffer.seek(0)
+    safe = (resume_dict.get('full_name') or 'candidate').replace(' ', '_')
+    return send_file(buffer, mimetype='application/pdf',
+                     as_attachment=True, download_name=f'{safe}_assessment_report.pdf')
+
+
 @app.route("/profile/slug/<slug>")
 def public_profile(slug):
     with db_conn() as conn:
@@ -2526,14 +3281,15 @@ def parse_resume_api():
         temp_path = UPLOAD_FOLDER / f"tmp-parse.{ext}"
         uploaded.save(str(temp_path))
         # parse_mode: "llm" = Resume Intelligence (AI), anything else = Quick Parse
-        parse_mode  = request.form.get("parse_mode", "0")
+        parse_mode  = request.form.get("parse_mode", "llm")
         parser_used = "standard"
+        logger.info(f"API parse-resume: parse_mode={parse_mode}, ext={ext}")
         try:
             if ext == "pdf" and parse_mode == "llm":
                 try:
                     parsed, parser_used = parse_resume_with_llm_text(temp_path)
                 except Exception as e:
-                    logger.warning("Resume Intelligence failed (%s); using Quick Parse.", e)
+                    logger.warning("Resume Intelligence failed (%s); using Quick Parse.", e, exc_info=True)
                     parsed = _parse_pdf_quick(temp_path)
                     parser_used = "text (fallback)"
             elif ext == "pdf":
@@ -2562,11 +3318,18 @@ def resume_api():
 
 # ── New: Role Definitions ─────────────────────────────────────────────────────
 
+REGULATORY_ROLES = [
+    "Design Control Consultant",
+    "IFU Technical Writer",
+    "IFU Team Lead",
+    "Product Registration Specialist",
+    "Labeling Specialist",
+]
+
 VALIDATION_ROLES = [
     "CSV Analyst", "CSV Lead", "Validation Engineer", "Validation Lead",
     "CQV Engineer", "CQV Lead", "Automation Engineer", "Automation Lead",
     "Tosca Engineer", "Tosca Lead", "Test Engineer", "Test Lead",
-    "Design Control Consultant",
 ]
 
 IT_ROLES = [
@@ -2579,6 +3342,7 @@ IT_ROLES = [
 ]
 
 ALL_JD_ROLES = {
+    "Regulatory Affairs": REGULATORY_ROLES,
     "Validation Roles": VALIDATION_ROLES,
     "IT Roles": IT_ROLES,
 }
@@ -2789,6 +3553,201 @@ def delete_raw_upload(filename):
     return jsonify({"success": False, "message": "File not found"}), 404
 
 
+@app.route("/api/delete-all-uploads", methods=["POST"])
+def delete_all_uploads():
+    """Delete every raw uploaded file and clear metadata."""
+    deleted = 0
+    if RAW_UPLOAD_FOLDER.exists():
+        for p in list(RAW_UPLOAD_FOLDER.iterdir()):
+            if p.is_file() and p.name != '_meta.json':
+                p.unlink()
+                deleted += 1
+    _save_raw_meta({})
+    return jsonify({"success": True, "deleted": deleted})
+
+
+@app.route("/api/export-compare-pdf", methods=["POST"])
+def export_compare_pdf():
+    """Generate a PDF from bulk-compare results for download."""
+    from reportlab.platypus import Table, TableStyle, HRFlowable
+    from reportlab.lib import colors as rl_colors
+
+    data = request.get_json(silent=True) or {}
+    results = data.get('results', [])
+    jd_title = data.get('jd_title', 'Job Description')
+
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4,
+                            topMargin=0.5*inch, bottomMargin=0.5*inch,
+                            leftMargin=0.65*inch, rightMargin=0.65*inch)
+
+    COL_DARK   = rl_colors.HexColor('#1e293b')
+    COL_ACCENT = rl_colors.HexColor('#6366f1')
+    COL_GREEN  = rl_colors.HexColor('#10b981')
+    COL_RED    = rl_colors.HexColor('#ef4444')
+    COL_ORANGE = rl_colors.HexColor('#f59e0b')
+    COL_MUTED  = rl_colors.HexColor('#64748b')
+    COL_WHITE  = rl_colors.white
+    COL_HDR    = rl_colors.HexColor('#312e81')
+
+    def sc(pct):
+        if pct >= 80: return COL_GREEN
+        if pct >= 60: return COL_ACCENT
+        if pct >= 40: return COL_ORANGE
+        return COL_RED
+
+    def lvl(pct):
+        if pct >= 80: return 'Strong Match'
+        if pct >= 60: return 'Good Match'
+        if pct >= 40: return 'Partial Match'
+        return 'Low Match'
+
+    story = []
+    W = A4[0] - 1.3*inch
+
+    # Header
+    hdr_tbl = Table([[
+        Paragraph(f'Compare Report', ParagraphStyle('H', fontName='Helvetica-Bold',
+                  fontSize=20, textColor=COL_WHITE, leading=24)),
+        Paragraph(f'vs {jd_title}', ParagraphStyle('H2', fontName='Helvetica',
+                  fontSize=10, textColor=rl_colors.HexColor('#c7d2fe'), leading=14)),
+    ]], colWidths=[W*0.55, W*0.45])
+    hdr_tbl.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,-1), COL_HDR),
+        ('TOPPADDING', (0,0), (-1,-1), 18),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 18),
+        ('LEFTPADDING', (0,0), (-1,-1), 20),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+    ]))
+    story.append(hdr_tbl)
+    story.append(Spacer(1, 0.2*inch))
+
+    if not results:
+        story.append(Paragraph('No results to display.', ParagraphStyle('N', fontName='Helvetica', fontSize=11)))
+    else:
+        # Summary table
+        hdr_row = [
+            Paragraph('#', ParagraphStyle('TH', fontName='Helvetica-Bold', fontSize=8.5,
+                      textColor=COL_WHITE, alignment=TA_CENTER)),
+            Paragraph('Candidate', ParagraphStyle('TH', fontName='Helvetica-Bold', fontSize=8.5,
+                      textColor=COL_WHITE)),
+            Paragraph('Title', ParagraphStyle('TH', fontName='Helvetica-Bold', fontSize=8.5,
+                      textColor=COL_WHITE)),
+            Paragraph('Score', ParagraphStyle('TH', fontName='Helvetica-Bold', fontSize=8.5,
+                      textColor=COL_WHITE, alignment=TA_CENTER)),
+            Paragraph('Matched', ParagraphStyle('TH', fontName='Helvetica-Bold', fontSize=8.5,
+                      textColor=COL_WHITE, alignment=TA_CENTER)),
+            Paragraph('Level', ParagraphStyle('TH', fontName='Helvetica-Bold', fontSize=8.5,
+                      textColor=COL_WHITE, alignment=TA_CENTER)),
+        ]
+        tbl_data = [hdr_row]
+        row_colors = []
+        for i, r in enumerate(results):
+            pct = r.get('match_percentage', 0)
+            color = sc(pct)
+            bg = rl_colors.HexColor('#f8fafc') if i % 2 == 0 else COL_WHITE
+            row_colors.append(bg)
+            matched_str = ', '.join(r.get('matched_skills', [])[:5])
+            if len(r.get('matched_skills', [])) > 5:
+                matched_str += f" +{len(r['matched_skills'])-5}"
+            tbl_data.append([
+                Paragraph(str(i+1), ParagraphStyle('TD', fontName='Helvetica-Bold', fontSize=9,
+                          textColor=color, alignment=TA_CENTER)),
+                Paragraph(r.get('candidate_name', r.get('file', '—')),
+                          ParagraphStyle('TD2', fontName='Helvetica-Bold', fontSize=8.5,
+                                         textColor=COL_DARK)),
+                Paragraph(r.get('title', '—'),
+                          ParagraphStyle('TD3', fontName='Helvetica', fontSize=8,
+                                         textColor=COL_MUTED)),
+                Paragraph(f'{pct}%', ParagraphStyle('TD4', fontName='Helvetica-Bold', fontSize=11,
+                          textColor=color, alignment=TA_CENTER)),
+                Paragraph(f"{r.get('matched_count',0)}/{r.get('total_jd_requirements',0)}",
+                          ParagraphStyle('TD5', fontName='Helvetica', fontSize=8.5,
+                                         textColor=COL_MUTED, alignment=TA_CENTER)),
+                Paragraph(lvl(pct), ParagraphStyle('TD6', fontName='Helvetica', fontSize=8,
+                          textColor=color, alignment=TA_CENTER)),
+            ])
+
+        col_w = [0.06*W, 0.28*W, 0.22*W, 0.12*W, 0.16*W, 0.16*W]
+        main_tbl = Table(tbl_data, colWidths=col_w, repeatRows=1)
+        ts = [
+            ('BACKGROUND',    (0,0), (-1,0), COL_DARK),
+            ('TOPPADDING',    (0,0), (-1,-1), 7),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 7),
+            ('LEFTPADDING',   (0,0), (-1,-1), 8),
+            ('RIGHTPADDING',  (0,0), (-1,-1), 8),
+            ('GRID',          (0,0), (-1,-1), 0.4, rl_colors.HexColor('#e2e8f0')),
+            ('VALIGN',        (0,0), (-1,-1), 'MIDDLE'),
+        ]
+        for i, bg in enumerate(row_colors):
+            ts.append(('BACKGROUND', (0, i+1), (-1, i+1), bg))
+        main_tbl.setStyle(TableStyle(ts))
+        story.append(main_tbl)
+        story.append(Spacer(1, 0.3*inch))
+
+        # Per-candidate matched/missing detail
+        detail_sec = ParagraphStyle('DS', fontName='Helvetica-Bold', fontSize=11,
+                                    textColor=COL_DARK, spaceBefore=8, spaceAfter=6)
+        story.append(Paragraph('Skills Detail Per Candidate', detail_sec))
+        story.append(HRFlowable(width=W, thickness=0.8,
+                                color=rl_colors.HexColor('#e2e8f0'), spaceAfter=8))
+
+        for r in results:
+            if r.get('error'):
+                continue
+            pct = r.get('match_percentage', 0)
+            color = sc(pct)
+            name = r.get('candidate_name', r.get('file', '?'))
+            matched = r.get('matched_skills', [])
+            missing = r.get('missing_skills', [])
+
+            cand_hdr = Table([[
+                Paragraph(name, ParagraphStyle('CN', fontName='Helvetica-Bold',
+                          fontSize=10, textColor=COL_WHITE, leading=14)),
+                Paragraph(f'{pct}%  {lvl(pct)}',
+                          ParagraphStyle('CPct', fontName='Helvetica-Bold', fontSize=10,
+                                         textColor=COL_WHITE, alignment=TA_CENTER, leading=14)),
+            ]], colWidths=[W*0.65, W*0.35])
+            cand_hdr.setStyle(TableStyle([
+                ('BACKGROUND', (0,0), (-1,-1), color),
+                ('TOPPADDING', (0,0), (-1,-1), 8),
+                ('BOTTOMPADDING', (0,0), (-1,-1), 8),
+                ('LEFTPADDING', (0,0), (-1,-1), 12),
+                ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+            ]))
+            story.append(cand_hdr)
+
+            m_text = ', '.join(matched) if matched else 'None'
+            g_text = ', '.join(missing) if missing else 'None'
+            detail_row = Table([[
+                [Paragraph('Matched Skills', ParagraphStyle('ML', fontName='Helvetica-Bold',
+                            fontSize=8, textColor=COL_GREEN, leading=12, spaceAfter=3)),
+                 Paragraph(m_text, ParagraphStyle('MV', fontName='Helvetica', fontSize=7.5,
+                            textColor=COL_DARK, leading=11))],
+                [Paragraph('Gap / Missing Skills', ParagraphStyle('GL', fontName='Helvetica-Bold',
+                            fontSize=8, textColor=COL_RED, leading=12, spaceAfter=3)),
+                 Paragraph(g_text, ParagraphStyle('GV', fontName='Helvetica', fontSize=7.5,
+                            textColor=COL_DARK, leading=11))],
+            ]], colWidths=[W*0.5, W*0.5])
+            detail_row.setStyle(TableStyle([
+                ('BACKGROUND', (0,0), (0,0), rl_colors.HexColor('#d1fae5')),
+                ('BACKGROUND', (1,0), (1,0), rl_colors.HexColor('#fee2e2')),
+                ('TOPPADDING', (0,0), (-1,-1), 8),
+                ('BOTTOMPADDING', (0,0), (-1,-1), 8),
+                ('LEFTPADDING', (0,0), (-1,-1), 10),
+                ('RIGHTPADDING', (0,0), (-1,-1), 10),
+                ('LINEAFTER', (0,0), (0,0), 0.5, rl_colors.HexColor('#d1d5db')),
+                ('VALIGN', (0,0), (-1,-1), 'TOP'),
+            ]))
+            story.append(detail_row)
+            story.append(Spacer(1, 0.12*inch))
+
+    doc.build(story)
+    buffer.seek(0)
+    return send_file(buffer, mimetype='application/pdf',
+                     as_attachment=True, download_name='compare_report.pdf')
+
+
 @app.route("/api/bulk-compare", methods=["POST"])
 def bulk_compare():
     data = request.get_json(silent=True) or {}
@@ -2925,8 +3884,8 @@ PREDEFINED_JDS = [
     # ── From IFU JD PDF ──────────────────────────────────────────────────────
     {
         "title": "IFU Technical Writer",
-        "role": "Validation Engineer",
-        "category": "Validation Roles",
+        "role": "IFU Technical Writer",
+        "category": "Regulatory Affairs",
         "responsibilities": (
             "Create, revise, and publish high-quality Instructions for Use (IFU)\n"
             "Ensure documentation complies with QSR, ISO, and internal QMS standards\n"
@@ -3074,8 +4033,8 @@ PREDEFINED_JDS = [
     # ── From Product Registration Specialist PDF ──────────────────────────────
     {
         "title": "Product Registration Specialist",
-        "role": "Validation Lead",
-        "category": "Validation Roles",
+        "role": "Product Registration Specialist",
+        "category": "Regulatory Affairs",
         "responsibilities": (
             "Lead global regulatory strategies for product registrations, renewals, and change controls\n"
             "Prepare, review, and submit regulatory dossiers under MDR, IVDR, and regional frameworks\n"
@@ -3312,7 +4271,7 @@ PREDEFINED_JDS = [
     {
         "title": "Design Control Consultant (IVD)",
         "role": "Design Control Consultant",
-        "category": "Validation Roles",
+        "category": "Regulatory Affairs",
         "responsibilities": (
             "Review and strengthen Design Control processes in accordance with FDA 21 CFR Part 820, ISO 13485, and EU IVDR (2017/746)\n"
             "Ensure compliance across all Design and Development lifecycle stages (planning, inputs, outputs, verification, validation, transfer, DHF)\n"
@@ -3343,6 +4302,71 @@ PREDEFINED_JDS = [
             "EU IVDR, DHF, gap assessment, design history file, SOPs, medical devices, QSR, "
             "regulatory compliance, process harmonization, validation, audit ready"
         ),
+    },
+    # ── From IFU Team Lead JD PDF ─────────────────────────────────────────────
+    {
+        "title": "IFU Team Lead",
+        "role": "IFU Team Lead",
+        "category": "Regulatory Affairs",
+        "responsibilities": (
+            "Lead and mentor a team of IFU writers, manuals writers, and label creators\n"
+            "Represent the team in cross-functional projects and management meetings\n"
+            "Drive team activities and deliverables within defined scope, ensuring timelines and quality\n"
+            "Create, revise, and publish high-quality Instructions for Use (IFU) and User Manuals\n"
+            "Ensure compliance with QSR, ISO, IVDD/IVDR, FDA 21 CFR Part 11, ISO 13485\n"
+            "Manage and coordinate translations to ensure accuracy and consistency\n"
+            "Collaborate with global teams: Product Development, Regulatory Affairs, QA, Marketing\n"
+            "Continuously improve documentation standards, templates, and processes\n"
+            "Support quality investigations including deviations, CAPAs, and complaints"
+        ),
+        "requirements": (
+            "Bachelor's or Master's degree in Technical Communication, English, Journalism, or Life Sciences\n"
+            "5-8 years of technical writing experience within life sciences, medical device, or IVD\n"
+            "Proven expertise in developing IFUs, DFUs, product labels, and user manuals\n"
+            "Strong understanding of regulated content development, usability, and risk communication\n"
+            "Experience working with translations and simplified English\n"
+            "Familiarity with visual and multimedia tools (e.g., Adobe Illustrator)\n"
+            "Prior training in QSR; experience with EU IVDR / MDR is a plus\n"
+            "Excellent English speaking, writing, and editing skills"
+        ),
+        "skills": (
+            "IFU\nUser Manuals\nDFU\nTechnical Writing\nTeam Lead\nMentoring\n"
+            "QSR\nISO 13485\nFDA 21 CFR Part 11\nEU IVDR\nEU MDR\nIVDD\n"
+            "Translation Management\nSimplified English\nCMS\nCCMS\nDITA\nXML\n"
+            "Adobe Illustrator\nLabeling\nDocumentation\nCAPA\nDeviation\n"
+            "Medical Device\nIVD\nRegulatory Compliance\nLife Sciences\nStyle Guide"
+        ),
+        "keywords": "IFU Team Lead, IFU writer, technical writing, IVDR, MDR, medical device, regulatory, QMS, labeling, team lead",
+    },
+    # ── From Labeling JD PDF ──────────────────────────────────────────────────
+    {
+        "title": "Labeling Specialist",
+        "role": "Labeling Specialist",
+        "category": "Regulatory Affairs",
+        "responsibilities": (
+            "Create and update labels and box prints in alignment with procedures, regulatory expectations, and market needs\n"
+            "Ensure documentation complies with QSR, ISO, and internal quality and regulatory standards\n"
+            "Maintain adherence to company style guides, templates, and quality management systems (QMS)\n"
+            "Collaborate with Product Development, Regulatory Affairs, Quality Assurance, Marketing, and Global Operations\n"
+            "Drive and manage activities within the assigned area of responsibility\n"
+            "Contribute to continuous improvement of documentation standards and templates\n"
+            "Support Deviation, CAPA, and complaint investigations by providing documentation expertise"
+        ),
+        "requirements": (
+            "University degree in the life science field and/or relevant work experience\n"
+            "Excellent English speaking, writing, and editing skills\n"
+            "2-3 years of label creation experience in life sciences, medical devices, or IVD industry\n"
+            "Familiarity with visual and multimedia tools (e.g., Adobe InDesign, Illustrator)\n"
+            "Proven ability to manage multiple documentation projects in a global, regulated environment\n"
+            "Experience with EU IVDR documentation requirements"
+        ),
+        "skills": (
+            "Labeling\nLabel Design\nBox Print\nAdobe InDesign\nAdobe Illustrator\n"
+            "QSR\nISO\nQMS\nEU IVDR\nEU MDR\nRegulatory Compliance\nDocumentation\n"
+            "Style Guide\nCAPA\nDeviation\nMedical Device\nIVD\nLife Sciences\n"
+            "Technical Writing\nMultilingual\nTranslation\nCross-functional Collaboration"
+        ),
+        "keywords": "labeling, label design, IVD, medical device, IVDR, regulatory, QMS, Adobe InDesign, documentation",
     },
 ]
 
