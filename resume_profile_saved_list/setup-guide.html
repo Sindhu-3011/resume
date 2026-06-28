@@ -687,17 +687,77 @@
           </div>
           <div class="instruction">
             <span class="bullet">c</span>
-            <p>Then create the app's tables:</p>
+            <p>Now create the tables by running the included SQL file. This sets up all the required tables inside the database.</p>
           </div>
           <div class="cmd-block">
             <div class="cmd-label">Command Prompt <button class="copy-btn" onclick="copyCmd(this)">Copy</button></div>
-            <code><span class="prompt">C:\ResumeApp\...&gt; </span>python -c "from app import app, db; app.app_context().push(); db.create_all(); print('Tables created')"</code>
+            <code><span class="prompt">C:\ResumeApp\...&gt; </span>psql -U postgres -d resume_profiles -f create_tables.sql</code>
           </div>
+          <div class="callout tip">
+            <span class="callout-icon">💡</span>
+            <span>It will ask for the PostgreSQL password you set in Step 2. Type it and press Enter (the characters won't show — that is normal).</span>
+          </div>
+
+          <div class="instruction">
+            <span class="bullet">d</span>
+            <p>For reference, here is exactly what the SQL file creates in the database:</p>
+          </div>
+          <div class="cmd-block">
+            <div class="cmd-label">Schema — create_tables.sql <button class="copy-btn" onclick="copyCmd(this)">Copy</button></div>
+            <code><span class="comment">-- Table: stores every resume profile</span>
+CREATE TABLE IF NOT EXISTS resume (
+    id             SERIAL PRIMARY KEY,
+    full_name      TEXT,
+    title          TEXT,
+    email          TEXT,
+    phone          TEXT,
+    linkedin       TEXT DEFAULT '',
+    location       TEXT,
+    summary        TEXT,
+    skills         TEXT,
+    experience     TEXT,
+    education      TEXT,
+    certifications TEXT,
+    projects       TEXT,
+    slug           TEXT,
+    resume_file    TEXT,
+    created_at     TIMESTAMPTZ DEFAULT NOW(),
+    updated_at     TIMESTAMPTZ DEFAULT NOW()
+);
+
+<span class="comment">-- Table: individual skills per resume (for search/filter)</span>
+CREATE TABLE IF NOT EXISTS resume_skill (
+    id         SERIAL PRIMARY KEY,
+    resume_id  INTEGER NOT NULL REFERENCES resume(id) ON DELETE CASCADE,
+    skill      TEXT NOT NULL
+);
+
+<span class="comment">-- Table: job descriptions for matching</span>
+CREATE TABLE IF NOT EXISTS job_description (
+    id               SERIAL PRIMARY KEY,
+    title            VARCHAR(200) NOT NULL,
+    role             VARCHAR(200) DEFAULT '',
+    category         VARCHAR(100) DEFAULT 'General',
+    responsibilities TEXT DEFAULT '',
+    requirements     TEXT DEFAULT '',
+    skills           TEXT DEFAULT '',
+    keywords         TEXT DEFAULT '',
+    jd_file          VARCHAR(500),
+    created_at       TIMESTAMP DEFAULT NOW(),
+    updated_at       TIMESTAMP DEFAULT NOW()
+);
+
+<span class="comment">-- Schema version tracker</span>
+CREATE TABLE IF NOT EXISTS schema_version (
+    v INTEGER NOT NULL
+);</code>
+          </div>
+
           <div class="verify">
             <span class="verify-icon">✅</span>
             <div>
               <strong>Verify it worked</strong>
-              Both commands should print <em>"Database created"</em> and <em>"Tables created"</em>. If you see an error about the database already existing, that is fine — continue to Step 7.
+              The command should print a list of table names including <strong>resume</strong>, <strong>resume_skill</strong>, and <strong>job_description</strong>. If you see an error about the database already existing, that is fine — continue to Step 7.
             </div>
           </div>
         </div>
