@@ -1,0 +1,45 @@
+INFO:werkzeug:[31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on http://127.0.0.1:5001
+INFO:werkzeug:[33mPress CTRL+C to quit[0m
+INFO:werkzeug:127.0.0.1 - - [01/Jul/2026 18:16:32] "[32mGET / HTTP/1.1[0m" 302 -
+INFO:werkzeug:127.0.0.1 - - [01/Jul/2026 18:16:32] "GET /edit HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [01/Jul/2026 18:17:09] "[31m[1mPOST /api/parse-resume HTTP/1.1[0m" 400 -
+INFO:werkzeug:127.0.0.1 - - [01/Jul/2026 18:18:33] "[31m[1mPOST /api/parse-resume HTTP/1.1[0m" 400 -
+INFO:werkzeug:127.0.0.1 - - [01/Jul/2026 18:18:58] "[31m[1mPOST /api/parse-resume HTTP/1.1[0m" 400 -
+INFO:__main__:API parse-resume: parse_mode=llm, ext=pdf
+INFO:__main__:Extracting text from PDF: D:\Development\resume\resume_profile_saved_list\uploads\tmp-parse.pdf
+INFO:__main__:pymupdf extracted 2 pages
+INFO:__main__:Text layer — has_email=False, has_phone=True
+INFO:__main__:Initialising EasyOCR reader (first call only)…
+WARNING:easyocr.easyocr:Using CPU. Note: This module is much faster with a GPU.
+C:\Users\sindhu.sundara\AppData\Roaming\Python\Python314\site-packages\torch\utils\data\dataloader.py:775: UserWarning: 'pin_memory' argument is set as true but no accelerator is found, then device pinned memory won't be used.
+  super().__init__(loader)
+INFO:__main__:OCR contact injected: ['Email: sindhusundaramoorthy3o@gmail.com']
+INFO:__main__:pdfplumber 2-col split at x=141.0 (left=8 words, right=67 words)
+INFO:__main__:Label+content layout — crop-based y-pairing
+INFO:__main__:Validated headings: ['SKILLS', 'EDUCATION']
+INFO:__main__:Verbatim 'skills' (320 chars) from 'SKILLS'
+INFO:__main__:Verbatim 'education' (121 chars) from 'EDUCATION'
+INFO:werkzeug:127.0.0.1 - - [01/Jul/2026 18:19:31] "POST /api/parse-resume HTTP/1.1" 200 -
+INFO:__main__:API parse-resume: parse_mode=llm, ext=pdf
+INFO:__main__:Extracting text from PDF: D:\Development\resume\resume_profile_saved_list\uploads\tmp-parse.pdf
+INFO:__main__:pymupdf extracted 2 pages
+INFO:__main__:Text layer — has_email=False, has_phone=True
+INFO:__main__:OCR contact injected: ['Email: sindhusundaramoorthy3o@gmail.com']
+INFO:__main__:pdfplumber 2-col split at x=141.0 (left=8 words, right=67 words)
+INFO:__main__:Label+content layout — crop-based y-pairing
+INFO:__main__:Validated headings: ['SKILLS', 'EDUCATION']
+INFO:__main__:Verbatim 'skills' (320 chars) from 'SKILLS'
+INFO:__main__:Verbatim 'education' (121 chars) from 'EDUCATION'
+INFO:werkzeug:127.0.0.1 - - [01/Jul/2026 18:19:56] "POST /api/parse-resume HTTP/1.1" 200 -
+INFO:__main__:API parse-resume: parse_mode=llm, ext=pdf
+INFO:__main__:Extracting text from PDF: D:\Development\resume\resume_profile_saved_list\uploads\tmp-parse.pdf
+INFO:__main__:pymupdf extracted 2 pages
+INFO:__main__:Text layer — has_email=False, has_phone=True
+INFO:__main__:OCR contact injected: ['Email: sindhusundaramoorthy3o@gmail.com']
+INFO:__main__:pdfplumber 2-col split at x=141.0 (left=8 words, right=67 words)
+INFO:__main__:Label+content layout — crop-based y-pairing
+INFO:__main__:Validated headings: ['SKILLS', 'EDUCATION']
+INFO:__main__:Verbatim 'skills' (320 chars) from 'SKILLS'
+INFO:__main__:Verbatim 'education' (121 chars) from 'EDUCATION'
+INFO:werkzeug:127.0.0.1 - - [01/Jul/2026 18:20:11] "POST /api/parse-resume HTTP/1.1" 200 -
