@@ -1068,6 +1068,24 @@ def _pdfplumber_two_col_text(path):
                             logger.debug(f"label+content crop-pair failed: {_exc}")
                             pages_text.append(left_text + "\n" + right_text)
                     else:
+                        # Strip the right-column contact/name header (all lines before the
+                        # first section heading) to prevent those fragments from bleeding
+                        # into adjacent left-column section verbatim during extraction.
+                        _rt_lines = right_text.splitlines()
+                        _rt_sec_idx = None
+                        for _si, _sl in enumerate(_rt_lines):
+                            if canonical_section_name(_sl.strip()):
+                                _rt_sec_idx = _si
+                                break
+                        if _rt_sec_idx is not None and _rt_sec_idx > 0:
+                            _right_hdr_block = [l.strip() for l in _rt_lines[:_rt_sec_idx] if l.strip()]
+                            _right_clean = "\n".join(_rt_lines[_rt_sec_idx:])
+                            logger.debug("Right col header stripped: %d lines before '%s'",
+                                         len(_right_hdr_block), _rt_lines[_rt_sec_idx].strip())
+                        else:
+                            _right_hdr_block = []
+                            _right_clean = right_text
+
                         # Content-sidebar layout: left column has sidebar data (personal info +
                         # skills), right column has the main content (name, title, summary…).
                         # Prepend the right column's header lines (name, title — everything
@@ -1082,21 +1100,18 @@ def _pdfplumber_two_col_text(path):
                             (_rl.strip() for _rl in right_text.splitlines() if _rl.strip()), ""
                         )
                         if _looks_like_name(_first_right):
-                            for _rl in right_text.splitlines():
-                                _rl = _rl.strip()
+                            for _rl in _right_hdr_block:
                                 if not _rl:
                                     continue
-                                if canonical_section_name(_rl):  # first section heading → stop
-                                    break
                                 _rh_lines.append(_rl)
                                 if len(_rh_lines) >= 3:  # name, title, optional tagline
                                     break
                         if _rh_lines:
                             pages_text.append(
-                                "\n".join(_rh_lines) + "\n" + left_text + "\n" + right_text
+                                "\n".join(_rh_lines) + "\n" + left_text + "\n" + _right_clean
                             )
                         else:
-                            pages_text.append(left_text + "\n" + right_text)
+                            pages_text.append(left_text + "\n" + _right_clean)
 
         combined = "\n".join(pages_text).strip()
         return combined if combined else None
@@ -3008,7 +3023,8 @@ def parse_resume_with_llm_text(path):
        — faithful to the resume (no invented content) and instant.
     Returns (fields_dict, "llm_text").
     """
-    raw_text = extract_resume_text(path, "pdf")
+    _path_ext = str(path).rsplit(".", 1)[-1].lower() if "." in str(path) else "pdf"
+    raw_text = extract_resume_text(path, _path_ext)
 
     # For sidebar-style 2-column PDFs the pymupdf word-order extractor interleaves
     # left-column content (KEY SKILLS) with right-column content (WORK EXPERIENCE)
@@ -3036,7 +3052,7 @@ def parse_resume_with_llm_text(path):
     raw_text = re.sub(r'\n[ \t]*\d{1,3}[ \t]*(?=\n|$)', '', raw_text)
 
     # ── 1. Base parse via fast regex (instant) ───────────────────────────────────
-    font_name = _extract_name_from_pdf_fonts(path)
+    font_name = _extract_name_from_pdf_fonts(path) if _path_ext == "pdf" else None
     result = parse_resume_text(raw_text, name_hint=font_name)
 
     # Clear name/title if quick_parse grabbed a degree string instead of real values
@@ -3173,9 +3189,12 @@ def parse_resume_with_llm_text(path):
     logger.info(f"Validated headings: {[h for _, h in headings[:12]]}")
 
     _qual_exp_date_re = re.compile(
+        r'(?:'
         r'(?:JAN(?:UARY)?|FEB(?:RUARY)?|MAR(?:CH)?|APR(?:IL)?|MAY|JUN(?:E)?|'
         r'JUL(?:Y)?|AUG(?:UST)?|SEP(?:TEMBER)?|OCT(?:OBER)?|NOV(?:EMBER)?|DEC(?:EMBER)?)'
-        r'\s+\d{4}\s*[-–]',
+        r'\s+\d{4}\s*[-–]'          # MONTH YEAR – (e.g. JAN 2020 –)
+        r'|\d{1,2}/\d{4}\s*[-–]'   # MM/YYYY – (e.g. 06/2018-)
+        r')',
         re.I,
     )
 
@@ -3187,18 +3206,59 @@ def parse_resume_with_llm_text(path):
         content_end = headings[i + 1][0] if i + 1 < len(headings) else len(raw_text)
         text = raw_text[content_start:content_end].strip()
 
-        # "Qualifications" headings are ambiguous — check content first.
-        # If the content has experience date ranges (MONTH YEAR – ...) it's a
-        # job-entry block mis-routed by a label-sidebar page-2 "Qualifications" label.
-        # Append it to experience instead of education.
-        if heading.upper() == "QUALIFICATIONS" and text and _qual_exp_date_re.search(text):
+        # "Qualifications" headings are ambiguous — inspect content before routing.
+        if heading.upper() == "QUALIFICATIONS" and text:
+            if _qual_exp_date_re.search(text):
+                # Has job date ranges → work experience entries mis-labelled by sidebar.
+                if "experience" in verbatim:
+                    verbatim["experience"] += "\n" + text
+                else:
+                    verbatim["experience"] = text
+                logger.info(
+                    "Verbatim 'experience' +%d chars re-routed from 'Qualifications' (date ranges found)",
+                    len(text),
+                )
+                continue
+            else:
+                # No date ranges — check whether it's professional competency bullets
+                # (common in Indian pharma/IT CVs where "Qualifications" lists skills and
+                # achievements that are really a continuation of the professional summary).
+                _q_edu_kw = re.search(
+                    r'\b(university|college|institute|school|bachelor|master|b\.e\b|b\.tech\b|'
+                    r'b\.com\b|m\.tech\b|m\.e\b|mba\b|phd\b|diploma|degree|cgpa|gpa|graduation)\b',
+                    text, re.I,
+                )
+                _q_work_verbs = re.findall(
+                    r'(?:^|\n)[ \t]*[^\w\s]?[ \t]*(?:Expertise|Managed|Performed|Prepared|Preparati|'
+                    r'Worked|Working|Ensure|Contribut|Execut|Conduct|Complet|Monitor|Analys|'
+                    r'Maintained|Develop|Review|Coordinat|Having|Exposure|Responsible|'
+                    r'Handling|Support|Assist|Troubleshoot|Involved)',
+                    text,
+                )
+                if not _q_edu_kw and len(_q_work_verbs) >= 2:
+                    if "summary" in verbatim:
+                        verbatim["summary"] += "\n" + text
+                    else:
+                        verbatim["summary"] = text
+                    logger.info(
+                        "Verbatim 'summary' +%d chars supplemented from 'Qualifications' "
+                        "(professional competency bullets, no dates, no edu keywords)",
+                        len(text),
+                    )
+                    continue
+                # Otherwise: genuine academic qualifications → falls through to education
+
+        # "Projects" / "Project Details" headings in Indian IT CVs often list work
+        # assignments with company names and numeric date ranges (e.g. 06/2018-11/2021).
+        # When detected, append to experience and skip setting projects.
+        if field == "projects" and text and _qual_exp_date_re.search(text):
             if "experience" in verbatim:
                 verbatim["experience"] += "\n" + text
             else:
                 verbatim["experience"] = text
             logger.info(
-                "Verbatim 'experience' +%d chars re-routed from 'Qualifications' (date ranges found)",
-                len(text),
+                "Verbatim 'experience' +%d chars re-routed from '%s' (date ranges found in projects)",
+                len(text), heading,
             )
             continue
 
@@ -3219,6 +3279,35 @@ def parse_resume_with_llm_text(path):
 
     for field, text in verbatim.items():
         result[field] = text
+
+    # ── 2a-preamble: No summary heading found — look for a professional paragraph in the
+    # preamble (text before the first recognised section heading). Covers CVs that use a
+    # bold specialty title (e.g. "REGULATORY AFFAIRS & QUALITY ASSURANCE") instead of an
+    # explicit "PROFESSIONAL SUMMARY" heading. ──────────────────────────────────────────
+    if not result.get("summary") and headings:
+        _first_h_pos = headings[0][0]
+        _preamble_raw = raw_text[:_first_h_pos].strip()
+        if _preamble_raw:
+            _contact_pat = re.compile(r'[@|\\]|\+\d{6,}|https?://', re.I)
+            _allcaps_pat = re.compile(r'^[A-Z][A-Z0-9\s&+/.,():-]+$')
+            _para_lines = []
+            for _pl in _preamble_raw.splitlines():
+                _pl = _pl.strip()
+                if not _pl:
+                    _para_lines = []  # blank line → paragraph boundary, reset
+                    continue
+                if _contact_pat.search(_pl) or (_allcaps_pat.match(_pl) and len(_pl) > 3):
+                    _para_lines = []  # name/contact/all-caps-title line → reset
+                    continue
+                _para_lines.append(_pl)
+            _para_text = " ".join(_para_lines).strip()
+            if len(_para_text) >= 80 and re.search(
+                r'\b(experience|expertise|professional|proven|results|background|'
+                r'specialist|dedicated|accomplished|years\s+of|proficient)\b',
+                _para_text, re.I,
+            ):
+                result["summary"] = _para_text
+                logger.info("Summary extracted from preamble paragraph (%d chars)", len(_para_text))
 
     # ── 2a-post. Clean verbatim skills: remove website headings, URLs, split merged bullets ──
     if result.get("skills"):
@@ -3259,6 +3348,34 @@ def parse_resume_with_llm_text(path):
             l for l in vsk_lines
             if not (l.strip().upper() == _sk_name or
                     (_sk_title and l.strip().lower() == _sk_title))
+        ]
+        # Remove gutter-bleed fragments:
+        #   • Single/double char lines ("s", "li") — never a valid skill
+        #   • Social-media truncations ("nkedIn" from LinkedIn, "acebook", "witter")
+        #   • Lines whose TITLE CASE matches a known job-role phrase but has no
+        #     tool/tech content — e.g. "Regulatory Analyst", "Medical Device" when
+        #     those bleed from the right column header at the same y-level as skills
+        _social_frag = re.compile(
+            r'^(?:n?ked[Ii]n|[Ll]inked[Ii]n|[Ll]inked?|[Ff]acebook|[Tt]witter|'
+            r'[Ii]nstagram|[Yy]outube|[Gg]ithub|[Gg]itlab)\s*$'
+        )
+        _role_only = re.compile(
+            r'^[A-Z][a-z]+(?: [A-Z][a-z]+){0,3}$'  # Title-case, 1–4 words
+        )
+        _role_kw = re.compile(
+            r'\b(analyst|engineer|manager|consultant|officer|executive|director|'
+            r'lead|specialist|developer|designer|coordinator|associate|intern)\b',
+            re.I,
+        )
+        vsk_lines = [
+            l for l in vsk_lines
+            if len(l.strip()) > 2                      # drop bare fragments ("s")
+            and not _social_frag.match(l.strip())      # drop social-media truncations
+            and not (                                   # drop pure role-title leakage
+                _role_only.match(l.strip())
+                and _role_kw.search(l.strip())
+                and not re.search(r'[/(]|\d', l)       # keep if has slash/paren/digit
+            )
         ]
         result["skills"] = "\n".join(l for l in vsk_lines if l.strip())
 
@@ -3308,12 +3425,12 @@ def parse_resume_with_llm_text(path):
             r'10\+2|hsc\b|sslc\b|12th|10th|graduation|affiliated)\b',
             _edu_text, re.I,
         )
-        # Count experience-style lines — bullet char is optional (some PDFs use spaces only).
+        # Count experience-style lines — bullet char is optional and may be any symbol font glyph.
         _exp_verbs = re.findall(
-            r'(?:^|\n)[ \t]*[•\-]?[ \t]*(?:Expertise|Managed|Performed|Prepared|Preparati|'
+            r'(?:^|\n)[ \t]*[^\w\s]?[ \t]*(?:Expertise|Managed|Performed|Prepared|Preparati|'
             r'Worked|Working|Ensure|Contribut|Execut|Conduct|Complet|Monitor|Analys|'
             r'Maintained|Develop|Review|Coordinat|Having|Exposure|Responsible|'
-            r'Handling|Support|Assist|Troubleshoot)',
+            r'Handling|Support|Assist|Troubleshoot|Involved)',
             _edu_text,
         )
         if not _has_edu_kw and len(_exp_verbs) >= 2:
@@ -3341,6 +3458,33 @@ def parse_resume_with_llm_text(path):
                     "— clearing for AI fallback", len(_exp_verbs)
                 )
             result["education"] = ""
+
+    # ── 2b-proj-garbage: If projects content looks like experience (date ranges +
+    # job-title/company lines), merge into experience and clear projects. ──────────
+    if result.get("projects"):
+        _proj_text = result["projects"]
+        _proj_date_re = re.compile(
+            r'(?:'
+            r'(?:JAN(?:UARY)?|FEB(?:RUARY)?|MAR(?:CH)?|APR(?:IL)?|MAY|JUN(?:E)?|'
+            r'JUL(?:Y)?|AUG(?:UST)?|SEP(?:TEMBER)?|OCT(?:OBER)?|NOV(?:EMBER)?|DEC(?:EMBER)?)'
+            r'\s+\d{4}\s*[-–]'
+            r'|\d{1,2}/\d{4}\s*[-–]'
+            r')',
+            re.I,
+        )
+        # Also look for ALL-CAPS job-title lines (e.g. "PROGRAMMER ANALYST, 06/2018")
+        _proj_jobtitle_re = re.compile(
+            r'(?:^|\n)[A-Z][A-Z\s/]+,\s*\d{2}/\d{4}',
+        )
+        if _proj_date_re.search(_proj_text) and _proj_jobtitle_re.search(_proj_text):
+            logger.info(
+                "Projects field contains work experience entries — merging into experience and clearing projects"
+            )
+            if result.get("experience"):
+                result["experience"] = result["experience"] + "\n" + _proj_text
+            else:
+                result["experience"] = _proj_text
+            result["projects"] = ""
 
     # ── 2a-post. Reject title if it looks like a sentence fragment ────────────────
     _title_check = result.get("title", "").strip()
@@ -3912,13 +4056,16 @@ def edit_resume(resume_id=None):
                 # parse_mode: "llm" = Resume Intelligence (AI), anything else = Quick Parse
                 parse_mode = request.form.get("parse_mode", "llm")
                 try:
-                    if ext == "pdf" and parse_mode == "llm":
+                    if ext in ("pdf", "docx") and parse_mode == "llm":
                         logger.info(f"Using Resume Intelligence (AI) path for {path}")
                         try:
                             parsed_data, _ = parse_resume_with_llm_text(path)
                         except Exception as e:
                             logger.warning("Resume Intelligence failed (%s); using Quick Parse.", e, exc_info=True)
-                            parsed_data = _parse_pdf_quick(path)
+                            if ext == "pdf":
+                                parsed_data = _parse_pdf_quick(path)
+                            else:
+                                parsed_data = parse_resume_text(extract_resume_text(path, ext))
                     elif ext == "pdf":
                         parsed_data = _parse_pdf_quick(path)
                     else:
@@ -4934,12 +5081,15 @@ def parse_resume_api():
         parser_used = "standard"
         logger.info(f"API parse-resume: parse_mode={parse_mode}, ext={ext}")
         try:
-            if ext == "pdf" and parse_mode == "llm":
+            if ext in ("pdf", "docx") and parse_mode == "llm":
                 try:
                     parsed, parser_used = parse_resume_with_llm_text(temp_path)
                 except Exception as e:
                     logger.warning("Resume Intelligence failed (%s); using Quick Parse.", e, exc_info=True)
-                    parsed = _parse_pdf_quick(temp_path)
+                    if ext == "pdf":
+                        parsed = _parse_pdf_quick(temp_path)
+                    else:
+                        parsed = parse_resume_text(extract_resume_text(temp_path, ext))
                     parser_used = "text (fallback)"
             elif ext == "pdf":
                 parsed = _parse_pdf_quick(temp_path)
