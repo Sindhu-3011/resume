@@ -39,69 +39,174 @@
     <!-- Left column -->
     <div class="dash-col">
 
-        <!-- Profiles Uploaded Today -->
-        <div class="card">
-            <div class="section-header" style="margin-bottom:18px;">
-                <div class="section-icon icon-experience">&#128197;</div>
-                <h2>Profiles Uploaded Today</h2>
+        <!-- NEW: Candidate Details (replaces Recent Activity slot) -->
+        <div class="card cand-section" style="margin-top:0;">
+            <div class="section-header" style="margin-bottom:12px;">
+                <div class="section-icon icon-experience">&#128101;</div>
+                <h2>Candidate Details</h2>
+                <span class="section-note">Recently added profiles</span>
             </div>
-            {% if today_resumes %}
-                <div class="dash-table-wrap">
-                    <table class="dash-table">
-                        <thead>
-                            <tr><th>#</th><th>Name</th><th>Role / Title</th><th>Uploaded At</th><th></th></tr>
-                        </thead>
-                        <tbody>
-                        {% for r in today_resumes %}
-                            <tr>
-                                <td class="dash-td-num">{{ loop.index }}</td>
-                                <td><a class="dash-link" href="{{ url_for('profile_detail', resume_id=r.id) }}">{{ r.full_name or '—' }}</a></td>
-                                <td><span class="role-badge">{{ r.title or '—' }}</span></td>
-                                <td class="text-muted">{{ r.created_at.strftime('%H:%M') if r.created_at else '—' }}</td>
-                                <td><a class="button secondary" style="padding:5px 12px;font-size:0.85rem;" href="{{ url_for('profile_detail', resume_id=r.id) }}">View</a></td>
-                            </tr>
-                        {% endfor %}
-                        </tbody>
-                    </table>
+
+            <!-- Toolbar -->
+            <div class="cand-toolbar">
+                <div class="cand-toolbar-left">
+                    <label class="cand-sel-all-lbl">
+                        <input type="checkbox" id="candSelectAll" class="cand-cb"> Select All
+                    </label>
+                    <span class="cand-count" id="candSelCount" style="display:none;"></span>
                 </div>
-            {% else %}
-                <p class="muted" style="text-align:center;padding:24px 0;">No profiles uploaded today.</p>
-            {% endif %}
+                <div class="cand-toolbar-right">
+                    <input class="cand-fi" id="qsInput" placeholder="Search name, role, location…" oninput="qsFilter()" style="width:220px;">
+                    <button class="button secondary" style="padding:6px 14px;font-size:0.85rem;" onclick="candClearSel()">Clear</button>
+                </div>
+            </div>
+
+            <!-- Pipeline summary -->
+            <div class="pipeline-summary">
+                <span class="ps-item ps-new">&#9679; {{ status_counts.New }} New</span>
+                <span class="ps-dot">·</span>
+                <span class="ps-item ps-reviewed">&#9679; {{ status_counts.Reviewed }} Reviewed</span>
+                <span class="ps-dot">·</span>
+                <span class="ps-item ps-shortlisted">&#9679; {{ status_counts.Shortlisted }} Shortlisted</span>
+            </div>
+
+            <!-- Table -->
+            <div class="cand-table-wrap">
+                <table class="cand-table" id="candTable">
+                    <thead>
+                        <tr>
+                            <th class="cand-th-cb"></th>
+                            <th class="cand-sortable" onclick="candSort(1)">Name <span class="sort-ic">&#8597;</span></th>
+                            <th class="cand-sortable" onclick="candSort(2)">Exp <span class="sort-ic">&#8597;</span></th>
+                            <th class="cand-sortable" onclick="candSort(3)">Role <span class="sort-ic">&#8597;</span></th>
+                            <th class="cand-sortable" onclick="candSort(4)">Location <span class="sort-ic">&#8597;</span></th>
+                            <th class="cand-sortable" onclick="candSort(5)">Added <span class="sort-ic">&#8597;</span></th>
+                            <th>Status</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody id="candTbody">
+                    {% for c in candidate_details %}
+                        <tr class="cand-row" data-id="{{ c.id }}">
+                            <td class="cand-td-cb"><input type="checkbox" class="cand-cb cand-row-cb" value="{{ c.id }}" onchange="candRowCheck(this)"></td>
+                            <td class="cand-td-name">
+                                <div class="cand-name-row">
+                                    <span class="cand-avatar" data-name="{{ c.full_name }}">{{ c.initials }}</span>
+                                    <a class="dash-link cand-preview-link"
+                                       data-role="{{ c.title }}"
+                                       data-loc="{{ c.location }}"
+                                       data-summary="{{ c.summary_snippet | e }}"
+                                       href="{{ url_for('profile_detail', resume_id=c.id) }}">{{ c.full_name }}</a>
+                                </div>
+                            </td>
+                            {%- set _en = c.exp_years | replace('+','') | int(0) -%}
+                            <td><span class="cand-exp-badge {% if _en >= 8 %}exp-high{% elif _en >= 3 %}exp-mid{% else %}exp-low{% endif %}">{{ c.exp_years }}</span></td>
+                            <td><span class="role-badge">{{ c.title }}</span></td>
+                            <td class="cand-td-loc" title="{{ c.location }}">{{ c.location }}</td>
+                            <td class="text-muted cand-td-date">{{ c.created_at }}</td>
+                            <td>
+                                <span class="status-badge status-{{ c.status | lower }}"
+                                      data-id="{{ c.id }}" data-status="{{ c.status }}"
+                                      onclick="cycleStatus(this)" title="Click to change status">{{ c.status }}</span>
+                            </td>
+                            <td><a class="button secondary" style="padding:4px 10px;font-size:0.82rem;" href="{{ url_for('profile_detail', resume_id=c.id) }}">View</a></td>
+                        </tr>
+                    {% else %}
+                        <tr><td colspan="8" style="text-align:center;padding:28px;color:var(--tx-muted);">No candidates yet.</td></tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
         </div>
 
-        <!-- Recent Activity -->
-        <div class="card">
-            <div class="section-header" style="margin-bottom:18px;">
-                <div class="section-icon icon-projects">&#128336;</div>
-                <h2>Recent Activity</h2>
-                <span class="section-note">Last 10 updates</span>
-            </div>
-            {% if recent_activity %}
-                <div class="dash-table-wrap">
-                    <table class="dash-table">
-                        <thead>
-                            <tr><th>Name</th><th>Role / Title</th><th>Last Updated</th><th></th></tr>
-                        </thead>
-                        <tbody>
-                        {% for r in recent_activity %}
-                            <tr>
-                                <td><a class="dash-link" href="{{ url_for('profile_detail', resume_id=r.id) }}">{{ r.full_name or '—' }}</a></td>
-                                <td><span class="role-badge">{{ r.title or '—' }}</span></td>
-                                <td class="text-muted">
-                                    {% if r.updated_at %}
-                                        {{ r.updated_at.strftime('%Y-%m-%d %H:%M') }}
-                                    {% else %}—{% endif %}
-                                </td>
-                                <td><a class="button secondary" style="padding:5px 12px;font-size:0.85rem;" href="{{ url_for('profile_detail', resume_id=r.id) }}">View</a></td>
-                            </tr>
-                        {% endfor %}
-                        </tbody>
-                    </table>
-                </div>
-            {% else %}
-                <p class="muted" style="text-align:center;padding:24px 0;">No profiles found.</p>
-            {% endif %}
-        </div>
+        <script>
+        (function () {
+            var selIds = new Set();
+
+            window.candRowCheck = function (cb) {
+                cb.checked ? selIds.add(cb.value) : selIds.delete(cb.value);
+                _candUpdateUI();
+            };
+
+            document.getElementById('candSelectAll').addEventListener('change', function () {
+                var on = this.checked;
+                document.querySelectorAll('#candTbody .cand-row-cb').forEach(function (cb) {
+                    if (cb.closest('tr').style.display !== 'none') {
+                        cb.checked = on;
+                        on ? selIds.add(cb.value) : selIds.delete(cb.value);
+                    }
+                });
+                _candUpdateUI();
+            });
+
+            window.candClearSel = function () {
+                selIds.clear();
+                document.querySelectorAll('.cand-row-cb').forEach(function (cb) { cb.checked = false; });
+                document.getElementById('candSelectAll').checked = false;
+                _candUpdateUI();
+            };
+
+            function _candUpdateUI() {
+                var badge = document.getElementById('candSelCount');
+                if (selIds.size > 0) {
+                    badge.textContent = selIds.size + ' selected';
+                    badge.style.display = 'inline-block';
+                } else {
+                    badge.style.display = 'none';
+                }
+            }
+
+            // ── Quick Search ──────────────────────────────────────────────
+            window.qsFilter = function () {
+                var q = (document.getElementById('qsInput').value || '').toLowerCase();
+                document.querySelectorAll('#candTbody .cand-row').forEach(function (row) {
+                    var tds = row.querySelectorAll('td');
+                    var text = [tds[1], tds[3], tds[4]].map(function (td) {
+                        return td ? td.textContent.toLowerCase() : '';
+                    }).join(' ');
+                    row.style.display = (!q || text.includes(q)) ? '' : 'none';
+                });
+            };
+
+            // ── Status cycling ────────────────────────────────────────────
+            var _statusCycle = ['New', 'Reviewed', 'Shortlisted'];
+            window.cycleStatus = function (el) {
+                var cur = el.dataset.status;
+                var next = _statusCycle[(_statusCycle.indexOf(cur) + 1) % _statusCycle.length];
+                var id = el.dataset.id;
+                fetch('/candidate-status', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ id: parseInt(id), status: next })
+                }).then(function (r) { return r.json(); }).then(function (d) {
+                    if (d.ok) {
+                        el.textContent = next;
+                        el.dataset.status = next;
+                        el.className = 'status-badge status-' + next.toLowerCase();
+                    }
+                });
+            };
+
+            var _sortCol = -1, _sortAsc = true;
+            window.candSort = function (col) {
+                var tbody = document.getElementById('candTbody');
+                var rows  = Array.from(tbody.querySelectorAll('.cand-row'));
+                if (_sortCol === col) _sortAsc = !_sortAsc; else { _sortCol = col; _sortAsc = true; }
+                rows.sort(function (a, b) {
+                    var tda = a.querySelectorAll('td')[col];
+                    var tdb = b.querySelectorAll('td')[col];
+                    var va  = tda ? tda.textContent.trim().toLowerCase() : '';
+                    var vb  = tdb ? tdb.textContent.trim().toLowerCase() : '';
+                    return _sortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
+                });
+                rows.forEach(function (r) { tbody.appendChild(r); });
+                document.querySelectorAll('.cand-sortable .sort-ic').forEach(function (ic, i) {
+                    ic.textContent = (i + 1 === col) ? (_sortAsc ? '↑' : '↓') : '↕';
+                });
+            };
+
+        })();
+        </script>
 
     </div><!-- end left col -->
 
@@ -133,8 +238,156 @@
         </div>
 
 
+        <!-- NEW: Upload Trend -->
+        <div class="card" style="margin-top:24px;">
+            <div class="section-header" style="margin-bottom:14px;">
+                <div class="section-icon icon-experience">&#128200;</div>
+                <h2>Upload Trend</h2>
+                <span class="section-note">Last 30 days</span>
+            </div>
+            {% if upload_trend %}
+                <div class="trend-chart-wrap">
+                    <canvas id="trendCanvas" class="trend-canvas"></canvas>
+                </div>
+                <script>
+                (function () {
+                    var data = [{% for d in upload_trend %}{ label: "{{ d.day_label }}", cnt: {{ d.cnt }} }{% if not loop.last %},{% endif %}{% endfor %}];
+                    var canvas = document.getElementById('trendCanvas');
+                    if (!canvas) return;
+                    var dpr = window.devicePixelRatio || 1;
+                    var W = canvas.parentElement.offsetWidth || 300;
+                    var H = 130;
+                    canvas.width  = W * dpr;
+                    canvas.height = H * dpr;
+                    canvas.style.width  = W + 'px';
+                    canvas.style.height = H + 'px';
+                    var ctx = canvas.getContext('2d');
+                    ctx.scale(dpr, dpr);
+
+                    var maxCnt = Math.max.apply(null, data.map(function (d) { return d.cnt; }));
+                    var padL = 28, padR = 8, padT = 12, padB = 30;
+                    var chartW = W - padL - padR;
+                    var chartH = H - padT - padB;
+                    var barW = Math.max(4, Math.floor(chartW / data.length) - 2);
+                    var gap  = (chartW - barW * data.length) / Math.max(data.length - 1, 1);
+
+                    // Gridlines
+                    ctx.strokeStyle = 'rgba(0,0,0,0.06)';
+                    ctx.lineWidth = 1;
+                    for (var g = 0; g <= 4; g++) {
+                        var gy = padT + chartH - (g / 4) * chartH;
+                        ctx.beginPath(); ctx.moveTo(padL, gy); ctx.lineTo(W - padR, gy); ctx.stroke();
+                    }
+
+                    // Bars
+                    data.forEach(function (d, i) {
+                        var bh = maxCnt > 0 ? (d.cnt / maxCnt) * chartH : 0;
+                        var x  = padL + i * (barW + gap);
+                        var y  = padT + chartH - bh;
+                        var grad = ctx.createLinearGradient(0, y, 0, y + bh);
+                        grad.addColorStop(0, '#4f46e5');
+                        grad.addColorStop(1, '#7c3aed');
+                        ctx.fillStyle = grad;
+                        ctx.beginPath();
+                        ctx.roundRect ? ctx.roundRect(x, y, barW, bh, 3) : ctx.rect(x, y, barW, bh);
+                        ctx.fill();
+
+                        // Value label on top
+                        if (bh > 14) {
+                            ctx.fillStyle = '#fff';
+                            ctx.font = 'bold 9px sans-serif';
+                            ctx.textAlign = 'center';
+                            ctx.fillText(d.cnt, x + barW / 2, y + 10);
+                        }
+                    });
+
+                    // X-axis labels (every ~5 bars)
+                    ctx.fillStyle = '#64748b';
+                    ctx.font = '9px sans-serif';
+                    ctx.textAlign = 'center';
+                    var step = Math.ceil(data.length / 6);
+                    data.forEach(function (d, i) {
+                        if (i % step === 0 || i === data.length - 1) {
+                            var x = padL + i * (barW + gap) + barW / 2;
+                            ctx.fillText(d.label, x, H - 6);
+                        }
+                    });
+                })();
+                </script>
+            {% else %}
+                <p class="muted" style="text-align:center;padding:24px 0;">No upload data yet.</p>
+            {% endif %}
+        </div>
+
     </div><!-- end right col -->
 
 </div><!-- end two-col -->
+
+<!-- Hover preview tooltip -->
+<div id="candTooltip" class="cand-tooltip" style="display:none;">
+    <div class="ct-role"></div>
+    <div class="ct-loc"></div>
+    <div class="ct-summary"></div>
+</div>
+
+<script>
+(function () {
+    // ── 1. Count-up animation on stat cards ───────────────────────────────
+    document.querySelectorAll('.dash-card-value').forEach(function (el) {
+        var target = parseInt(el.textContent) || 0;
+        if (!target) return;
+        var duration = 900, startTime = null;
+        el.textContent = '0';
+        function step(ts) {
+            if (!startTime) startTime = ts;
+            var p = Math.min((ts - startTime) / duration, 1);
+            var ease = 1 - Math.pow(1 - p, 3);
+            el.textContent = Math.round(ease * target);
+            if (p < 1) requestAnimationFrame(step);
+        }
+        requestAnimationFrame(step);
+    });
+
+    // ── 2. Animated role bars ─────────────────────────────────────────────
+    document.querySelectorAll('.role-bar-fill').forEach(function (bar) {
+        var tw = bar.style.width;
+        bar.style.width = '0';
+        bar.style.transition = 'width 0.9s cubic-bezier(0.25,0.46,0.45,0.94)';
+        setTimeout(function () { bar.style.width = tw; }, 120);
+    });
+
+    // ── 3. Avatar colours ─────────────────────────────────────────────────
+    var _pal = ['#4f46e5','#7c3aed','#059669','#d97706','#dc2626','#0284c7','#db2777','#65a30d','#0891b2','#9333ea'];
+    function _nameColor(n) {
+        var h = 0;
+        for (var i = 0; i < n.length; i++) h = (h * 31 + n.charCodeAt(i)) >>> 0;
+        return _pal[h % _pal.length];
+    }
+    document.querySelectorAll('.cand-avatar').forEach(function (av) {
+        av.style.background = _nameColor(av.dataset.name || '');
+    });
+
+    // ── 4. Hover preview tooltip ──────────────────────────────────────────
+    var _tip = document.getElementById('candTooltip');
+    function _positionTip(e) {
+        var x = e.clientX + 14, y = e.clientY + 14;
+        if (x + 260 > window.innerWidth)  x = e.clientX - 270;
+        if (y + 120 > window.innerHeight) y = e.clientY - 130;
+        _tip.style.left = x + 'px';
+        _tip.style.top  = y + 'px';
+    }
+    document.querySelectorAll('.cand-preview-link').forEach(function (a) {
+        a.addEventListener('mouseenter', function (e) {
+            _tip.querySelector('.ct-role').textContent    = a.dataset.role    || '';
+            _tip.querySelector('.ct-loc').textContent     = a.dataset.loc     || '';
+            _tip.querySelector('.ct-summary').textContent = a.dataset.summary || '';
+            _tip.style.display = 'block';
+            _positionTip(e);
+        });
+        a.addEventListener('mousemove', _positionTip);
+        a.addEventListener('mouseleave', function () { _tip.style.display = 'none'; });
+    });
+})();
+</script>
 
 {% endblock %}

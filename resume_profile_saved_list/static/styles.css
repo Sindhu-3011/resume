@@ -967,3 +967,208 @@ select.field-error { border-color: var(--clr-danger) !important; box-shadow: 0 0
 @media (max-width: 560px) {
     .dash-cards { grid-template-columns: 1fr 1fr; }
 }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   CANDIDATE DETAILS TABLE  (dashboard.html)
+   ═══════════════════════════════════════════════════════════════════════ */
+.cand-section { margin-top: 28px; }
+
+.cand-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 0 14px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 8px;
+    flex-wrap: wrap;
+}
+.cand-toolbar-left  { display: flex; align-items: center; gap: 14px; }
+.cand-toolbar-right { display: flex; align-items: center; gap: 8px; }
+
+.cand-sel-all-lbl {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    cursor: pointer;
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--tx-2);
+}
+.cand-count {
+    background: var(--clr-primary);
+    color: #fff;
+    border-radius: 999px;
+    padding: 2px 10px;
+    font-size: 0.82rem;
+    font-weight: 600;
+}
+.cand-export-btn { padding: 6px 14px; font-size: 0.85rem; }
+.cand-export-btn:disabled { opacity: 0.45; cursor: default; pointer-events: none; }
+
+.cand-filter-row {
+    display: grid;
+    grid-template-columns: 36px 1fr 80px 1fr 1fr 110px 80px;
+    gap: 6px;
+    padding: 6px 0 10px;
+    align-items: center;
+}
+.cand-filter-stub { /* spacer for checkbox col and action col */ }
+.cand-fi {
+    width: 100%;
+    padding: 6px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--r-sm);
+    font-size: 0.88rem;
+    background: var(--surface-raised);
+    color: var(--tx);
+    transition: border-color var(--ease), background var(--ease);
+}
+.cand-fi:focus { outline: none; border-color: var(--clr-primary); background: #fff; }
+
+.cand-table-wrap {
+    overflow-x: auto;
+    border-radius: var(--r-sm);
+    border: 1px solid var(--border);
+}
+.cand-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.95rem;
+}
+.cand-table thead th {
+    background: var(--surface-raised);
+    padding: 10px 12px;
+    text-align: left;
+    font-size: 0.88rem;
+    font-weight: 700;
+    color: var(--tx-muted);
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+    user-select: none;
+}
+.cand-th-cb { width: 36px; }
+.cand-sortable { cursor: pointer; }
+.cand-sortable:hover { color: var(--clr-primary); }
+.sort-ic { font-style: normal; opacity: 0.5; margin-left: 4px; font-size: 0.8em; }
+.cand-table tbody tr { border-bottom: 1px solid var(--border); transition: background var(--ease); }
+.cand-table tbody tr:last-child { border-bottom: none; }
+.cand-table tbody tr:hover { background: var(--hover-bg); }
+.cand-table td { padding: 9px 12px; vertical-align: middle; }
+
+.cand-td-cb   { width: 36px; text-align: center; }
+.cand-td-name { font-weight: 600; }
+.cand-td-org  { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cand-td-loc  { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cand-td-date { white-space: nowrap; font-size: 0.9rem; }
+
+.cand-exp-badge {
+    display: inline-block;
+    padding: 3px 9px;
+    border-radius: 999px;
+    background: var(--clr-info-l);
+    color: var(--clr-info);
+    font-size: 0.85rem;
+    font-weight: 700;
+    white-space: nowrap;
+}
+.cand-cb {
+    width: 16px;
+    height: 16px;
+    accent-color: var(--clr-primary);
+    cursor: pointer;
+}
+
+/* ── Status badges ─────────────────────────────────────────────────────── */
+.status-badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 0.82rem;
+    font-weight: 600;
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+    transition: opacity var(--ease), transform var(--ease);
+}
+.status-badge:hover { opacity: 0.82; transform: scale(1.05); }
+.status-new         { background: var(--clr-info-l);    color: var(--clr-info);    border: 1px solid rgba(2,132,199,0.2); }
+.status-reviewed    { background: var(--clr-warning-l); color: var(--clr-warning); border: 1px solid rgba(217,119,6,0.2); }
+.status-shortlisted { background: var(--clr-success-l); color: var(--clr-success); border: 1px solid rgba(5,150,105,0.2); }
+
+/* ── Upload Trend chart ────────────────────────────────────────────────── */
+.trend-chart-wrap { width: 100%; overflow: hidden; }
+.trend-canvas     { display: block; width: 100%; }
+
+/* ── Pipeline summary bar ──────────────────────────────────────────────── */
+.pipeline-summary {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    background: var(--surface-raised);
+    border-radius: var(--r-sm);
+    border: 1px solid var(--border);
+    margin-bottom: 12px;
+    font-size: 0.88rem;
+    font-weight: 600;
+    flex-wrap: wrap;
+}
+.ps-dot  { color: var(--border-s); }
+.ps-new         { color: var(--clr-info); }
+.ps-reviewed    { color: var(--clr-warning); }
+.ps-shortlisted { color: var(--clr-success); }
+
+/* ── Candidate avatar ──────────────────────────────────────────────────── */
+.cand-name-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.cand-avatar {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: #fff;
+    flex-shrink: 0;
+    letter-spacing: 0.03em;
+}
+
+/* ── Experience badge colour variants ──────────────────────────────────── */
+.exp-high { background: var(--clr-success-l); color: var(--clr-success); }
+.exp-mid  { background: var(--clr-info-l);    color: var(--clr-info);    }
+.exp-low  { background: #f1f5f9;               color: #64748b;            }
+
+/* ── Hover preview tooltip ─────────────────────────────────────────────── */
+.cand-tooltip {
+    position: fixed;
+    z-index: 9999;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--r-sm);
+    box-shadow: var(--shadow-lg);
+    padding: 12px 14px;
+    max-width: 260px;
+    pointer-events: none;
+}
+.ct-role {
+    font-weight: 700;
+    font-size: 0.9rem;
+    color: var(--clr-primary);
+    margin-bottom: 3px;
+}
+.ct-loc {
+    font-size: 0.82rem;
+    color: var(--tx-muted);
+    margin-bottom: 6px;
+}
+.ct-summary {
+    font-size: 0.83rem;
+    color: var(--tx-2);
+    line-height: 1.5;
+}

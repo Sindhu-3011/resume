@@ -158,6 +158,8 @@ SECTION_ALIASES = {
         # e.g. "I.T. Skills" → "i t skills", "Tech. Skills" → "tech skills"
         "i t skills", "tech skills", "i t proficiencies",
         "tech proficiencies", "tech expertise",
+        "technical skills & tools", "technical skills and tools",
+        "technical skills tools",
     ],
 
     # ── Work experience ───────────────────────────────────────────────────────
@@ -184,6 +186,7 @@ SECTION_ALIASES = {
         "domain experience",
         "relevant work experience", "key work experience",
         "career work history",
+        "early career experience", "early career",
         # abbreviated forms: "Prof. Experience" → "prof experience"
         "prof experience", "prof work experience",
         "work exp", "professional exp",
@@ -228,6 +231,8 @@ SECTION_ALIASES = {
         "examination details", "scholastic record",
         "qualifications and education", "degree information",
         "academic qualifications and education",
+        "education & certifications", "education and certifications",
+        "education certifications",
     ],
 
     # ── Certifications ────────────────────────────────────────────────────────
@@ -248,6 +253,8 @@ SECTION_ALIASES = {
         "online courses",
         "certification and training",
         "certifications and training",
+        "certifications and professional development",
+        "certifications   professional development",
         "professional development certifications",
         "microsoft certifications", "aws certifications",
         "google certifications", "oracle certifications",
@@ -291,6 +298,8 @@ SECTION_ALIASES = {
         "project details", "project organizational details",
         "organizational details", "relevant project organizational details",
         "project and organizational details",
+        "relevant project organizational details",
+        "project organizational details roles and responsibilities",
         "project organizational details roles and responsibilities",
         "client details", "relevant projects",
         "project summary", "projects summary", "project overview",
@@ -322,7 +331,7 @@ SECTION_ALIASES = {
 
     # ── Awards ────────────────────────────────────────────────────────────────
     "awards": [
-        "awards", "award", "awards and recognition",
+        "awards", "award", "awards and recognition", "awards recognition",
         "recognition and awards", "honors and recognition",
         "honours and recognition", "recognition and honors",
         "prizes", "prizes and awards",
@@ -1223,6 +1232,17 @@ def extract_text_from_pdf(path):
         if not text.strip():
             raise ValueError("Could not extract text from PDF using any method")
 
+        # Decode CID-encoded characters. When a PDF uses a custom font without
+        # a ToUnicode table, pymupdf emits glyphs as "(cid:N)". For standard
+        # Latin fonts (WinAnsiEncoding / MacRomanEncoding), glyph index N
+        # directly matches the ASCII/Unicode code point, so chr(N) recovers the
+        # actual character. CIDs outside printable ASCII (e.g. bullet markers
+        # like cid:127) are removed.
+        def _cid_to_char(m):
+            n = int(m.group(1))
+            return chr(n) if 33 <= n <= 126 else ''
+        text = re.sub(r'\(cid:(\d+)\)', _cid_to_char, text)
+
         # ── Targeted OCR for icon-header contact info ─────────────────────────
         # Only runs when email or phone are absent AND EasyOCR is installed.
         has_email = bool(re.search(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}", text))
@@ -1237,19 +1257,87 @@ def extract_text_from_pdf(path):
                 )
             else:
                 ocr_text = _ocr_contact_strip(path)
+                logger.info(f"OCR raw text: {repr(ocr_text[:300])}")
                 if ocr_text:
-                    # Extract only email/phone from OCR and inject as labelled lines.
-                    # Never prepend raw OCR — it duplicates content that is already in
-                    # the text layer, which corrupts summary/section parsing.
+                    # Extract only email/phone/name/location from OCR and inject as
+                    # labelled lines. Never prepend raw OCR — it duplicates content
+                    # that is already in the text layer.
                     contact_lines = []
-                    if not has_email:
-                        em = _extract_email(ocr_text)
-                        if em:
-                            contact_lines.append(f"Email: {em}")
-                    if not has_phone:
-                        ph = _extract_phone(ocr_text)
-                        if ph:
-                            contact_lines.append(f"Phone: {ph}")
+                    _ocr_em = _extract_email(ocr_text) or ""
+                    _ocr_ph = _extract_phone(ocr_text) or ""
+                    if not has_email and _ocr_em:
+                        contact_lines.append(f"Email: {_ocr_em}")
+                    if not has_phone and _ocr_ph:
+                        contact_lines.append(f"Phone: {_ocr_ph}")
+                    # Try to extract name from OCR — the name heading is in the icon
+                    # header image but absent from the PDF text layer.
+                    _ocr_name = ""
+                    _has_name = bool(re.search(
+                        r'(?m)^\s*(?:name|full\s*name)\s*[:\-]', text, re.I
+                    ))
+                    if not _has_name:
+                        for _ol in ocr_text.splitlines():
+                            _ol = _ol.strip()
+                            if not _ol:
+                                continue
+                            if (_ocr_em and _ocr_em in _ol):
+                                continue
+                            if (_ocr_ph and _ocr_ph.replace(" ", "") in _ol.replace(" ", "")):
+                                continue
+                            if re.search(r'@|https?://|www\.|linkedin|github|\d{6,}', _ol, re.I):
+                                continue
+                            if _looks_like_name(_ol):
+                                _ocr_name = _ol
+                                contact_lines.append(f"Name: {_ol}")
+                                logger.info(f"OCR name extracted: {_ol}")
+                                break
+                    # Reconstruct email local part using name when OCR split it on
+                    # underscore/dot or dropped a leading character.
+                    # e.g. OCR "janani\najagopal@outlookcom" + name "JANANI RAJAGOPAL"
+                    # → "janani_rajagopal@outlook.com"
+                    if not has_email and _ocr_em and _ocr_name and '@' in _ocr_em:
+                        _em_local, _em_dom = _ocr_em.split('@', 1)
+                        _nwords = [w.lower() for w in _ocr_name.split() if len(w) >= 3]
+                        # Fix dropped leading char: "ajagopal" is suffix of "rajagopal"
+                        for _nw in _nwords:
+                            if _nw.endswith(_em_local) and len(_nw) > len(_em_local):
+                                _em_local = _nw
+                                break
+                        # Fix underscore split: OCR line before @-line is another name word
+                        _ocr_ll = [_l.strip() for _l in ocr_text.splitlines()]
+                        for _oi, _oline in enumerate(_ocr_ll):
+                            if '@' in _oline:
+                                if _oi > 0:
+                                    _oprev = _ocr_ll[_oi - 1].lower()
+                                    if (_oprev in _nwords and _oprev not in _em_local
+                                            and re.match(r'^[a-z][a-z0-9]*$', _oprev)):
+                                        _em_local = _oprev + '_' + _em_local
+                                break
+                        _em_new = _em_local + '@' + _em_dom
+                        if _em_new != _ocr_em:
+                            logger.info(f"OCR email reconstructed: {_ocr_em} → {_em_new}")
+                            contact_lines = [
+                                f"Email: {_em_new}" if _c.startswith("Email: ") else _c
+                                for _c in contact_lines
+                            ]
+                    # Try to extract location from OCR header
+                    _has_loc = bool(re.search(
+                        r'(?m)^\s*(?:location|address|city)\s*[:\-]', text, re.I
+                    ))
+                    if not _has_loc:
+                        _loc_pat = re.compile(
+                            r'\b(?:india|uk|usa|uae|us|canada|australia|singapore|'
+                            r'bangalore|bengaluru|chennai|hyderabad|pune|mumbai|delhi|'
+                            r'noida|gurgaon|gurugram|coimbatore|trivandrum|kochi|'
+                            r'jaipur|ahmedabad|kolkata|ludhiana|chandigarh)\b', re.I
+                        )
+                        for _ol in ocr_text.splitlines():
+                            _ol = _ol.strip()
+                            if _ol and _loc_pat.search(_ol):
+                                if not re.search(r'@|\d{6,}', _ol):
+                                    contact_lines.append(f"Location: {_ol}")
+                                    logger.info(f"OCR location extracted: {_ol}")
+                                    break
                     if contact_lines:
                         text = "\n".join(contact_lines) + "\n" + text
                         logger.info(f"OCR contact injected: {contact_lines}")
@@ -1824,11 +1912,13 @@ _NAME_STOPWORDS = frozenset({
     "seeking", "passionate", "motivated", "proactive", "dedicated",
     "dynamic", "detail", "focused", "professional", "over", "years", "year",
     "strong", "excellent", "extensive", "hands", "proven", "seasoned",
-    "total", "experience", "current", "employer", "designation", "qualification",
+    "total", "experience", "current", "currently", "presently", "previously",
+    "recently", "employer", "designation", "qualification", "available", "objective",
     "key", "skills", "competencies", "summary", "objectives", "highlights",
     "personal", "information", "education", "project", "work", "certification",
     "achievement", "language", "hobby", "extracurricular", "tools", "applications",
     "core", "section", "header", "details", "accomplishment", "award",
+    "data", "analysis", "analyst", "support", "domain", "domains",
 })
 
 
@@ -3026,6 +3116,15 @@ def parse_resume_with_llm_text(path):
     _path_ext = str(path).rsplit(".", 1)[-1].lower() if "." in str(path) else "pdf"
     raw_text = extract_resume_text(path, _path_ext)
 
+    # DEBUG: write raw text to inspect extraction issues
+    try:
+        import os as _os
+        _dbg = _os.path.join(_os.path.dirname(str(path)), "debug_raw_text.txt")
+        with open(_dbg, "w", encoding="utf-8") as _f:
+            _f.write(raw_text[:5000])
+    except Exception:
+        pass
+
     # For sidebar-style 2-column PDFs the pymupdf word-order extractor interleaves
     # left-column content (KEY SKILLS) with right-column content (WORK EXPERIENCE)
     # when the gutter is too close to the page edge for the block-based detector.
@@ -3036,11 +3135,41 @@ def parse_resume_with_llm_text(path):
         # reads the PDF vector layer and would miss them.
         _ocr_email = _extract_email(raw_text)
         _ocr_phone = _extract_phone(raw_text)
+        _m_ocr_name = re.search(r'(?m)^\s*[Nn]ame\s*:\s*(.+)$', raw_text)
+        _ocr_name_line = _m_ocr_name.group(1).strip() if _m_ocr_name else ""
+        _m_ocr_loc = re.search(r'(?m)^\s*[Ll]ocation\s*:\s*(.+)$', raw_text)
+        _ocr_loc_line = _m_ocr_loc.group(1).strip() if _m_ocr_loc else ""
         two_col = _pdfplumber_two_col_text(path)
         if two_col and len(two_col.strip()) >= len(raw_text.strip()) * 0.5:
-            raw_text = two_col
-            # Re-inject OCR contact info if not already present in the new text
+            _tc = two_col
+            def _cid_to_char_tc(m):
+                n = int(m.group(1))
+                return chr(n) if 33 <= n <= 126 else ''
+            _tc = re.sub(r'\(cid:(\d+)\)', _cid_to_char_tc, _tc)
+            # Reject two_col if it has significantly more word-fragment lines than
+            # the pymupdf raw_text — this detects false column splits where the
+            # pdfplumber gutter crop cuts through full-width single-column lines,
+            # leaving partial words (e.g. "fund pa", "fee reco") at line ends.
+            _FRAG_EXCL = {'and','the','of','in','to','for','at','by','or','on','an','be','as','it','its','has','was','are','may'}
+            def _frag_lines(t):
+                c = 0
+                for _l in t.splitlines():
+                    _ls = _l.strip()
+                    if len(_ls) >= 15:
+                        _m = re.search(r'\b([a-z]{1,4})$', _ls)
+                        if _m and _m.group(1) not in _FRAG_EXCL:
+                            c += 1
+                return c
+            if _frag_lines(_tc) <= _frag_lines(raw_text) + 2:
+                raw_text = _tc
+            else:
+                logger.info("two_col rejected: pdfplumber false column split detected (word fragments)")
+            # Re-inject all OCR contact info if not already present in the new text
             _post = []
+            if _ocr_name_line and _ocr_name_line not in raw_text:
+                _post.append(f"Name: {_ocr_name_line}")
+            if _ocr_loc_line and _ocr_loc_line not in raw_text:
+                _post.append(f"Location: {_ocr_loc_line}")
             if _ocr_email and _ocr_email not in raw_text:
                 _post.append(f"Email: {_ocr_email}")
             if _ocr_phone and _ocr_phone not in raw_text:
@@ -3052,7 +3181,14 @@ def parse_resume_with_llm_text(path):
     raw_text = re.sub(r'\n[ \t]*\d{1,3}[ \t]*(?=\n|$)', '', raw_text)
 
     # ── 1. Base parse via fast regex (instant) ───────────────────────────────────
-    font_name = _extract_name_from_pdf_fonts(path) if _path_ext == "pdf" else None
+    # Skip font-metadata name extraction when OCR already injected a "Name:" label —
+    # the OCR result is more reliable than scanning body text for large-font words.
+    _ocr_injected_name = bool(re.search(r'(?m)^\s*name\s*:', raw_text, re.I))
+    font_name = (
+        _extract_name_from_pdf_fonts(path)
+        if _path_ext == "pdf" and not _ocr_injected_name
+        else None
+    )
     result = parse_resume_text(raw_text, name_hint=font_name)
 
     # Clear name/title if quick_parse grabbed a degree string instead of real values
@@ -3106,6 +3242,24 @@ def parse_resume_with_llm_text(path):
         "QUALIFICATIONS", "CERTIFICATIONS", "PROJECTS", "ACHIEVEMENTS",
         "AWARDS", "REFERENCES",
         "TOOLS & APPLICATIONS", "TOOLS AND APPLICATIONS", "TOOLS",
+        "EARLY CAREER EXPERIENCE",
+        "EDUCATION & CERTIFICATIONS", "EDUCATION AND CERTIFICATIONS",
+        "TECHNICAL SKILLS & TOOLS", "TECHNICAL SKILLS AND TOOLS",
+        "PROJECT DETAILS", "KEY PROJECTS", "KEY PROJECTS WORKED",
+        "PROJECT HIGHLIGHTS", "PROJECT SUMMARY",
+        "Relevant Project/Organizational Details",
+        "Project/Organizational Details",
+        "PROFESSIONAL CERTIFICATIONS", "PROFESSIONAL CERTIFICATION",
+        "AWARDS & RECOGNITION", "AWARDS AND RECOGNITION",
+        "LICENSES AND CERTIFICATIONS", "LICENSES & CERTIFICATIONS",
+        "CERTIFICATES AND LICENSES", "CERTIFICATES & LICENSES",
+        "CERTIFICATION AND TRAINING", "CERTIFICATIONS AND TRAINING",
+        "CERTIFICATIONS & TRAINING", "CERTIFICATION & TRAINING",
+        "CERTIFICATIONS & PROFESSIONAL DEVELOPMENT",
+        "CERTIFICATIONS AND PROFESSIONAL DEVELOPMENT",
+        "PROFESSIONAL DEVELOPMENT", "TRAINING",
+        "ACADEMIC DETAILS",
+        "KEY ACHIEVEMENTS", "KEY ACCOMPLISHMENTS",
         # Title-case headings (Arun-style resumes)
         "Professional Summary", "Work Experience", "Relevant Project Experience",
         "Key Skills", "Technical Skills",
@@ -3126,20 +3280,39 @@ def parse_resume_with_llm_text(path):
                  "APPLICATIONS SUMMARY"):
             return "summary"
         if u in ("EXPERIENCE", "PROFESSIONAL EXPERIENCE", "WORK EXPERIENCE",
-                 "EMPLOYMENT HISTORY", "EMPLOYMENT"):
+                 "EMPLOYMENT HISTORY", "EMPLOYMENT",
+                 "EARLY CAREER EXPERIENCE", "EARLY CAREER"):
             return "experience"
         if u in ("SKILLS", "TECHNICAL SKILLS", "KEY SKILLS", "CORE COMPETENCIES",
-                 "AREAS OF EXPERTISE"):
+                 "AREAS OF EXPERTISE",
+                 "TECHNICAL SKILLS & TOOLS", "TECHNICAL SKILLS AND TOOLS"):
             return "skills"
         if u in ("EDUCATION", "QUALIFICATIONS", "ACADEMIC BACKGROUND",
                  "ACADEMIC QUALIFICATIONS", "EDUCATIONAL QUALIFICATIONS",
-                 "EDUCATIONAL BACKGROUND"):
+                 "EDUCATIONAL BACKGROUND",
+                 "EDUCATION & CERTIFICATIONS", "EDUCATION AND CERTIFICATIONS",
+                 "ACADEMIC DETAILS", "EDUCATIONAL DETAILS"):
             return "education"
-        if u in ("CERTIFICATIONS", "CERTIFICATION"):
+        if u in ("CERTIFICATIONS", "CERTIFICATION",
+                 "PROFESSIONAL CERTIFICATIONS", "PROFESSIONAL CERTIFICATION",
+                 "LICENSES AND CERTIFICATIONS", "LICENSES & CERTIFICATIONS",
+                 "CERTIFICATES AND LICENSES", "CERTIFICATES & LICENSES",
+                 "CERTIFICATION AND TRAINING", "CERTIFICATIONS AND TRAINING",
+                 "CERTIFICATIONS & TRAINING", "CERTIFICATION & TRAINING",
+                 "CERTIFICATIONS & PROFESSIONAL DEVELOPMENT",
+                 "CERTIFICATIONS AND PROFESSIONAL DEVELOPMENT",
+                 "PROFESSIONAL DEVELOPMENT", "TRAINING"):
             return "certifications"
-        if u in ("ACHIEVEMENTS", "ACHIEVEMENT", "AWARDS", "AWARD"):
+        if u in ("ACHIEVEMENTS", "ACHIEVEMENT", "AWARDS", "AWARD",
+                 "AWARDS & RECOGNITION", "AWARDS AND RECOGNITION",
+                 "KEY ACHIEVEMENTS", "KEY ACCOMPLISHMENTS",
+                 "ACCOMPLISHMENTS", "ACCOMPLISHMENT"):
             return "achievements"
-        if u in ("PROJECTS", "PROJECT", "RELEVANT PROJECT EXPERIENCE"):
+        if u in ("PROJECTS", "PROJECT", "RELEVANT PROJECT EXPERIENCE",
+                 "PROJECT DETAILS", "KEY PROJECTS", "KEY PROJECTS WORKED",
+                 "PROJECT HIGHLIGHTS", "PROJECT SUMMARY",
+                 "RELEVANT PROJECT/ORGANIZATIONAL DETAILS",
+                 "RELEVANT PROJECT ORGANIZATIONAL DETAILS"):
             return "projects"
         if u in ("REFERENCES",):
             return "references"
@@ -3170,6 +3343,20 @@ def parse_resume_with_llm_text(path):
         'CERTIFICATIONS', 'CERTIFICATION', 'ACHIEVEMENTS', 'ACHIEVEMENT',
         'AWARDS', 'AWARD', 'REFERENCES', 'PROJECTS', 'QUALIFICATIONS',
     ])
+
+    # Normalise sidebar-label lines where heading is merged with content on the same line
+    # (e.g. "EXPERIENCE VALIDATION ENGINEER, 11/2021" from sidebar-style PDFs).
+    # Split heading onto its own line so _section_heading_re can detect it.
+    _uc_single_headings = [
+        h for h in _EXACT_HEADINGS
+        if h == h.upper() and ' ' not in h and '&' not in h and '/' not in h
+    ]
+    if _uc_single_headings:
+        _sidebar_norm_re = re.compile(
+            r'^(' + '|'.join(re.escape(h) for h in _uc_single_headings) + r')[ \t]+(?=[A-Z\d])',
+            re.MULTILINE
+        )
+        raw_text = _sidebar_norm_re.sub(r'\1\n', raw_text)
 
     candidates = [(m.start(), m.group(1).strip()) for m in _section_heading_re.finditer(raw_text)]
     headings = []
@@ -3270,11 +3457,15 @@ def parse_resume_with_llm_text(path):
             "EDUCATION", "EXPERIENCE", "PROFESSIONAL EXPERIENCE", "WORK EXPERIENCE",
             "SUMMARY", "PROFESSIONAL SUMMARY", "SKILLS", "TECHNICAL SKILLS",
             "CERTIFICATIONS", "PROJECTS",
+            "CORE COMPETENCIES", "TECHNICAL SKILLS & TOOLS", "TECHNICAL SKILLS AND TOOLS",
         )
         if field in verbatim and not _is_explicit:
             continue
         if text:
-            verbatim[field] = text
+            if field == "skills" and field in verbatim:
+                verbatim[field] = verbatim[field] + "\n" + text
+            else:
+                verbatim[field] = text
             logger.info(f"Verbatim '{field}' ({len(text)} chars) from '{heading}'")
 
     for field, text in verbatim.items():
@@ -3458,6 +3649,32 @@ def parse_resume_with_llm_text(path):
                     "— clearing for AI fallback", len(_exp_verbs)
                 )
             result["education"] = ""
+
+        elif _has_edu_kw and len(_exp_verbs) >= 2:
+            # Mixed case: education has real edu content AND trailing experience bullets.
+            # Cause: sidebar PDF page 2 where left column (EDUCATION + degree text) is
+            # joined before right column (experience continuation bullets).
+            # Fix: find the last line containing an edu keyword; everything after it
+            # that looks like experience bullets gets rescued into experience.
+            _edu_kw_line_re = re.compile(
+                r'\b(university|college|institute|school|bachelor|master|'
+                r'b\.e\b|b\.tech\b|b\.com\b|m\.tech\b|diploma|degree|'
+                r'cgpa|gpa|graduation|polytechnic)\b', re.I
+            )
+            _edu_lines_split = _edu_text.splitlines()
+            _last_edu_kw_idx = -1
+            for _eli, _eln in enumerate(_edu_lines_split):
+                if _edu_kw_line_re.search(_eln):
+                    _last_edu_kw_idx = _eli
+            if _last_edu_kw_idx >= 0 and _last_edu_kw_idx < len(_edu_lines_split) - 1:
+                _trailing_exp = [l for l in _edu_lines_split[_last_edu_kw_idx + 1:] if l.strip()]
+                _trailing_text = "\n".join(_trailing_exp).strip()
+                if len(_trailing_text) > 30:
+                    result["education"] = "\n".join(_edu_lines_split[:_last_edu_kw_idx + 1]).strip()
+                    result["experience"] = (result.get("experience", "") + "\n" + _trailing_text).strip()
+                    logger.info(
+                        "Mixed edu+exp: moved %d trailing lines to experience", len(_trailing_exp)
+                    )
 
     # ── 2b-proj-garbage: If projects content looks like experience (date ranges +
     # job-title/company lines), merge into experience and clear projects. ──────────
@@ -5205,6 +5422,62 @@ def dashboard():
             "SELECT COUNT(DISTINCT NULLIF(title, '')) AS count FROM resume"
         ).fetchone()["count"] or 0
 
+        # ── NEW: Candidate details ─────────────────────────────────────────
+        candidate_rows = conn.execute(
+            "SELECT id, full_name, title, location, experience, summary, created_at,"
+            " COALESCE(status, 'New') AS status"
+            " FROM resume ORDER BY created_at DESC LIMIT 200"
+        ).fetchall()
+
+        # ── NEW: Upload trend (last 30 days) ───────────────────────────────
+        upload_trend = conn.execute(
+            """
+            SELECT TO_CHAR(DATE(created_at), 'DD Mon') AS day_label,
+                   COUNT(*) AS cnt
+            FROM resume
+            WHERE created_at >= NOW() - INTERVAL '30 days'
+            GROUP BY DATE(created_at)
+            ORDER BY DATE(created_at)
+            """
+        ).fetchall()
+
+
+    # ── NEW: Helpers to extract exp years and current org ──────────────────
+    def _cd_exp_years(summary_txt, exp_txt):
+        txt = (summary_txt or "")[:600] + " " + (exp_txt or "")[:400]
+        m = re.search(r'(\d+)\s*\+?\s*years?\s+(?:of\s+)?(?:experience|exp\b)', txt, re.I)
+        if m:
+            return m.group(1) + "+"
+        m = re.search(r'(\d+)\s*\+\s*years?', txt, re.I)
+        if m:
+            return m.group(1) + "+"
+        return "—"
+
+    def _initials(name):
+        parts = (name or "").split()
+        if not parts:
+            return "?"
+        return (parts[0][0] + (parts[-1][0] if len(parts) > 1 else "")).upper()
+
+    candidate_details = [
+        {
+            "id": r["id"],
+            "full_name": r["full_name"] or "—",
+            "title": r["title"] or "—",
+            "location": r["location"] or "—",
+            "exp_years": _cd_exp_years(r["summary"], r["experience"]),
+            "status": r["status"] or "New",
+            "initials": _initials(r["full_name"] or ""),
+            "summary_snippet": (r["summary"] or "").strip()[:130],
+            "created_at": r["created_at"].strftime("%Y-%m-%d") if r["created_at"] else "—",
+        }
+        for r in candidate_rows
+    ]
+
+    status_counts = {"New": 0, "Reviewed": 0, "Shortlisted": 0}
+    for _c in candidate_details:
+        status_counts[_c["status"]] = status_counts.get(_c["status"], 0) + 1
+
     return render_template(
         "dashboard.html",
         total_resumes=total_resumes,
@@ -5213,6 +5486,9 @@ def dashboard():
         recent_activity=list(recent_activity),
         total_roles=total_roles,
         all_jd_roles=ALL_JD_ROLES,
+        candidate_details=candidate_details,
+        upload_trend=list(upload_trend),
+        status_counts=status_counts,
     )
 
 
@@ -6608,6 +6884,35 @@ def compare_result(resume_id, jd_id):
         result=result,
         all_jds=list(all_jds),
     )
+
+
+# ── NEW: Candidate status update route ───────────────────────────────────────
+@app.route("/candidate-status", methods=["POST"])
+def update_candidate_status():
+    data = request.get_json(silent=True) or {}
+    resume_id = data.get("id")
+    status = data.get("status")
+    if not resume_id or status not in ("New", "Reviewed", "Shortlisted"):
+        return jsonify({"ok": False, "error": "invalid"}), 400
+    with db_conn() as conn:
+        conn.execute(
+            "UPDATE resume SET status = %s WHERE id = %s",
+            (status, resume_id),
+        )
+    return jsonify({"ok": True})
+
+
+# ── NEW: Ensure status column exists (runs once at startup) ──────────────────
+def _ensure_status_col():
+    try:
+        with db_conn() as conn:
+            conn.execute(
+                "ALTER TABLE resume ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'New'"
+            )
+    except Exception:
+        pass
+
+_ensure_status_col()
 
 
 if __name__ == "__main__":
