@@ -74,11 +74,59 @@
             <select id="groups_select" class="form-select groups-select">
                 <option value="">— Select a role group —</option>
                 <optgroup label="Regulatory Affairs">
+                    <option value="Technical Writer">Technical Writer</option>
+                    <option value="Technical Writer Lead">Technical Writer Lead</option>
+                    <option value="Technical Writing II">Technical Writing II</option>
+                    <option value="Technical Writing II (Analytical instruments)">Technical Writing II (Analytical instruments)</option>
                     <option value="Design Control Consultant">Design Control Consultant</option>
+                    <option value="Instructions For Use expert">Instructions For Use expert</option>
                     <option value="IFU Technical Writer">IFU Technical Writer</option>
                     <option value="IFU Team Lead">IFU Team Lead</option>
+                    <option value="Labelling expert">Labelling expert</option>
+                    <option value="Post Market Surveillance">Post Market Surveillance</option>
                     <option value="Product Registration Specialist">Product Registration Specialist</option>
-                    <option value="Labeling Specialist">Labeling Specialist</option>
+                    <option value="Regulatory Affairs Manager">Regulatory Affairs Manager</option>
+                    <option value="Regulatory Affairs Specialist">Regulatory Affairs Specialist</option>
+                    <option value="Complaints Handling">Complaints Handling</option>
+                </optgroup>
+                <optgroup label="PI (Product Information) &amp; Labelling Unit">
+                    <option value="PI &amp; Labelling Manager">PI &amp; Labelling Manager</option>
+                    <option value="PI &amp; Labelling Lead">PI &amp; Labelling Lead</option>
+                    <option value="Product Information Specialist">Product Information Specialist</option>
+                    <option value="Medical Writer (PI-focused)">Medical Writer (PI-focused)</option>
+                    <option value="Labelling Specialist">Labelling Specialist</option>
+                    <option value="Quality Assurance Reviewer (Labelling QA)">Quality Assurance Reviewer (Labelling QA)</option>
+                    <option value="Translation Specialist">Translation Specialist</option>
+                    <option value="Labelling Analyst">Labelling Analyst</option>
+                </optgroup>
+                <optgroup label="Market Access &amp; RegDesk Unit">
+                    <option value="Market Access / RegDesk Manager">Market Access / RegDesk Manager</option>
+                    <option value="Regulatory Operations Associate">Regulatory Operations Associate</option>
+                    <option value="Regulatory Intelligence Specialist">Regulatory Intelligence Specialist</option>
+                    <option value="Registration Specialist">Registration Specialist</option>
+                    <option value="Compliance Specialist">Compliance Specialist</option>
+                    <option value="Market Access Analyst">Market Access Analyst</option>
+                </optgroup>
+                <optgroup label="Complaints Unit">
+                    <option value="Complaints Handling Manager">Complaints Handling Manager</option>
+                    <option value="Complaints Team Lead">Complaints Team Lead</option>
+                    <option value="Complaints Compliance Specialist">Complaints Compliance Specialist</option>
+                    <option value="Complaints Specialist">Complaints Specialist</option>
+                    <option value="Complaints Analyst">Complaints Analyst</option>
+                </optgroup>
+                <optgroup label="QARA Data Analytics &amp; AI Unit">
+                    <option value="AI &amp; Data Analytics Lead (QARA)">AI &amp; Data Analytics Lead (QARA)</option>
+                    <option value="AI Governance &amp; Compliance Officer">AI Governance &amp; Compliance Officer</option>
+                    <option value="Regulatory Technology Specialist">Regulatory Technology Specialist</option>
+                    <option value="Quality Data Engineer">Quality Data Engineer</option>
+                    <option value="QARA Business Analyst">QARA Business Analyst</option>
+                </optgroup>
+                <optgroup label="Doc Control Unit">
+                    <option value="Document Control Manager">Document Control Manager</option>
+                    <option value="Senior Document Control Specialist">Senior Document Control Specialist</option>
+                    <option value="Technical Documentation Coordinator">Technical Documentation Coordinator</option>
+                    <option value="Document Associate">Document Associate</option>
+                    <option value="Training &amp; Compliance Analyst">Training &amp; Compliance Analyst</option>
                 </optgroup>
                 <optgroup label="Validation Roles">
                     <option value="CSV Analyst">CSV Analyst</option>
@@ -94,15 +142,21 @@
                     <option value="Test Engineer">Test Engineer</option>
                     <option value="Test Lead">Test Lead</option>
                 </optgroup>
-                <optgroup label="IT Roles">
+                <optgroup label="IT Technology">
+                    <option value="IT Manager">IT Manager</option>
+                    <option value="Network Engineer">Network Engineer</option>
+                    <option value="IT Support Specialist">IT Support Specialist</option>
+                    <option value="Cloud Engineer">Cloud Engineer</option>
                     <option value="Software Developer">Software Developer</option>
+                    <option value="Cybersecurity Engineer">Cybersecurity Engineer</option>
+                    <option value="Data Engineer">Data Engineer</option>
+                    <option value="Testing Engineer">Testing Engineer</option>
+                    <option value="Information Security Analyst">Information Security Analyst</option>
                     <option value="Full Stack Developer">Full Stack Developer</option>
                     <option value="Frontend Developer">Frontend Developer</option>
                     <option value="Backend Developer">Backend Developer</option>
                     <option value="DevOps Engineer">DevOps Engineer</option>
-                    <option value="Cloud Engineer">Cloud Engineer</option>
                     <option value="Data Analyst">Data Analyst</option>
-                    <option value="Data Engineer">Data Engineer</option>
                     <option value="Business Analyst">Business Analyst</option>
                     <option value="QA Engineer">QA Engineer</option>
                     <option value="Automation Tester">Automation Tester</option>
@@ -110,7 +164,6 @@
                     <option value="Scrum Master">Scrum Master</option>
                     <option value="UI/UX Designer">UI/UX Designer</option>
                     <option value="Solution Architect">Solution Architect</option>
-                    <option value="Cybersecurity Engineer">Cybersecurity Engineer</option>
                     <option value="Database Administrator">Database Administrator</option>
                     <option value="AI/ML Engineer">AI/ML Engineer</option>
                     <option value="SAP Consultant">SAP Consultant</option>
@@ -121,6 +174,36 @@
         </div>
     </div>
 
+    <!-- ── Section 2b: Years of Experience (mandatory) ─────────────── -->
+    <div class="form-section card">
+        <div class="form-section-hdr">
+            <span class="form-section-icon" style="background:#fce7f3;color:#9d174d;">&#128197;</span>
+            <div>
+                <h2 class="form-section-title">Years of Experience <span class="required-star">*</span></h2>
+                <p class="form-section-sub">Total years of professional experience</p>
+            </div>
+        </div>
+        <div class="groups-field-wrap">
+            <select id="exp_yrs_select" name="exp_yrs" class="form-select groups-select">
+                <option value="">— Select years of experience —</option>
+                <option value="Fresher (0 yrs)" {% if resume.exp_yrs == 'Fresher (0 yrs)' %}selected{% endif %}>Fresher (0 yrs)</option>
+                <option value="0-1 yrs" {% if resume.exp_yrs == '0-1 yrs' %}selected{% endif %}>0–1 yrs</option>
+                <option value="1-2 yrs" {% if resume.exp_yrs == '1-2 yrs' %}selected{% endif %}>1–2 yrs</option>
+                <option value="2-3 yrs" {% if resume.exp_yrs == '2-3 yrs' %}selected{% endif %}>2–3 yrs</option>
+                <option value="3-4 yrs" {% if resume.exp_yrs == '3-4 yrs' %}selected{% endif %}>3–4 yrs</option>
+                <option value="4-5 yrs" {% if resume.exp_yrs == '4-5 yrs' %}selected{% endif %}>4–5 yrs</option>
+                <option value="5-6 yrs" {% if resume.exp_yrs == '5-6 yrs' %}selected{% endif %}>5–6 yrs</option>
+                <option value="6-7 yrs" {% if resume.exp_yrs == '6-7 yrs' %}selected{% endif %}>6–7 yrs</option>
+                <option value="7-8 yrs" {% if resume.exp_yrs == '7-8 yrs' %}selected{% endif %}>7–8 yrs</option>
+                <option value="8-10 yrs" {% if resume.exp_yrs == '8-10 yrs' %}selected{% endif %}>8–10 yrs</option>
+                <option value="10-12 yrs" {% if resume.exp_yrs == '10-12 yrs' %}selected{% endif %}>10–12 yrs</option>
+                <option value="12-15 yrs" {% if resume.exp_yrs == '12-15 yrs' %}selected{% endif %}>12–15 yrs</option>
+                <option value="15+ yrs" {% if resume.exp_yrs == '15+ yrs' %}selected{% endif %}>15+ yrs</option>
+            </select>
+            <p id="exp_yrs_error" class="field-error-msg" style="display:none;">&#9888; Please select Years of Experience before saving.</p>
+        </div>
+    </div>
+
     <!-- ── Section 3: Personal Information ──────────────────────────── -->
     <div class="form-section card">
         <div class="form-section-hdr">
@@ -128,6 +211,23 @@
             <div>
                 <h2 class="form-section-title">Personal Information</h2>
                 <p class="form-section-sub">Basic contact and identity details</p>
+            </div>
+        </div>
+
+        <!-- Duplicate warning banner (hidden by default) -->
+        <div id="dupBanner" style="display:none;margin-bottom:16px;background:#fef2f2;border:1.5px solid #fca5a5;border-radius:10px;padding:14px 16px;">
+            <div style="display:flex;align-items:flex-start;gap:12px;">
+                <span style="font-size:1.3rem;line-height:1;">&#9888;&#65039;</span>
+                <div style="flex:1;">
+                    <p style="margin:0 0 4px;font-size:0.92rem;font-weight:700;color:#991b1b;">Duplicate Profile Detected</p>
+                    <p id="dupMsg" style="margin:0 0 10px;font-size:0.85rem;color:#7f1d1d;line-height:1.5;"></p>
+                    <a id="dupLink" href="#" target="_blank"
+                       style="display:inline-block;padding:6px 14px;background:#dc2626;color:#fff;border-radius:6px;font-size:0.82rem;font-weight:700;text-decoration:none;">
+                        &#128065; View Existing Profile
+                    </a>
+                </div>
+                <button type="button" onclick="closeDupBanner()"
+                        style="background:none;border:none;cursor:pointer;font-size:1.2rem;color:#ef4444;line-height:1;padding:0;">&#10005;</button>
             </div>
         </div>
 
@@ -158,9 +258,10 @@
                        value="{{ resume.linkedin or '' }}" placeholder="https://www.linkedin.com/in/yourprofile">
             </div>
             <div class="field-group field-full">
-                <label for="location">Location</label>
+                <label for="location">Location <span class="required-star">*</span></label>
                 <input id="location" name="location" type="text"
                        value="{{ resume.location or '' }}" placeholder="City, State, Country">
+                <p id="location_error" class="field-error-msg" style="display:none;">&#9888; Please enter a Location before saving.</p>
             </div>
         </div>
     </div>
@@ -528,6 +629,123 @@
         }
     };
     window.syncGroupSelect();
+})();
+
+/* ── Duplicate profile check ──────────────────────────────────────────── */
+(function () {
+    var resumeId   = {{ resume.id | tojson }};  // null for new, int for edit
+    var _submitOk  = false;  // set to true only after API confirms no duplicate
+
+    function escHtml(s) {
+        return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
+    function showDupBanner(d) {
+        var banner = document.getElementById('dupBanner');
+        var msg    = document.getElementById('dupMsg');
+        var link   = document.getElementById('dupLink');
+        var parts  = [];
+        if (d.email) parts.push('email <strong>' + escHtml(d.email) + '</strong>');
+        if (d.phone) parts.push('phone <strong>' + escHtml(d.phone) + '</strong>');
+        msg.innerHTML = 'A profile for <strong>' + escHtml(d.name) + '</strong> already exists with the same '
+                      + parts.join(' or ') + '. Please check before adding again.';
+        link.href = '/profile/' + d.id;
+        banner.style.display = 'block';
+        banner.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+
+    function hideDupBanner() {
+        document.getElementById('dupBanner').style.display = 'none';
+    }
+
+    window.closeDupBanner = function () { hideDupBanner(); };
+
+    /* Real-time hint on blur (UX only) */
+    function blurCheck() {
+        var email = (document.getElementById('email').value || '').trim();
+        var phone = (document.getElementById('phone').value || '').trim();
+        if (!email && !phone) return;
+        fetch('/api/check-duplicate', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({email: email, phone: phone, exclude_id: resumeId})
+        }).then(function(r){return r.json();}).then(function(d){
+            d.duplicate ? showDupBanner(d) : hideDupBanner();
+        }).catch(function(){});
+    }
+    document.getElementById('email').addEventListener('blur', blurCheck);
+    document.getElementById('phone').addEventListener('blur', blurCheck);
+
+    /* ── Async submit guard ─────────────────────────────────────────── */
+    var form = document.querySelector('form.edit-form');
+    if (form) {
+        form.addEventListener('submit', function (e) {
+            if (_submitOk) return;  // already verified — let it through
+            e.preventDefault();
+            e.stopImmediatePropagation();
+
+            /* ── Mandatory field checks: exp_yrs + location ── */
+            var expSel   = document.getElementById('exp_yrs_select');
+            var expErr   = document.getElementById('exp_yrs_error');
+            var locInput = document.getElementById('location');
+            var locErr   = document.getElementById('location_error');
+            var blocked  = false;
+
+            if (expSel && !expSel.value) {
+                expSel.classList.add('field-error');
+                if (expErr) expErr.style.display = 'block';
+                if (!blocked) { expSel.scrollIntoView({behavior:'smooth',block:'center'}); expSel.focus(); }
+                blocked = true;
+            } else if (expSel) {
+                expSel.classList.remove('field-error');
+                if (expErr) expErr.style.display = 'none';
+            }
+
+            if (locInput && !locInput.value.trim()) {
+                locInput.classList.add('field-error');
+                if (locErr) locErr.style.display = 'block';
+                if (!blocked) { locInput.scrollIntoView({behavior:'smooth',block:'center'}); locInput.focus(); }
+                blocked = true;
+            } else if (locInput) {
+                locInput.classList.remove('field-error');
+                if (locErr) locErr.style.display = 'none';
+            }
+
+            if (blocked) return;
+            /* ─────────────────────────────────────────────── */
+
+            var email = (document.getElementById('email').value || '').trim();
+            var phone = (document.getElementById('phone').value || '').trim();
+
+            if (!email && !phone) {
+                _submitOk = true; form.submit(); return;
+            }
+
+            var saveBtn = form.querySelector('[type="submit"]');
+            if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Checking…'; }
+
+            fetch('/api/check-duplicate', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({email: email, phone: phone, exclude_id: resumeId})
+            })
+            .then(function(r){ return r.json(); })
+            .then(function(d) {
+                if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = '✓ Save Profile'; }
+                if (d.duplicate) {
+                    showDupBanner(d);
+                } else {
+                    hideDupBanner();
+                    _submitOk = true;
+                    form.submit();
+                }
+            })
+            .catch(function() {
+                if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = '✓ Save Profile'; }
+                _submitOk = true; form.submit();  // network error — allow through, server will catch
+            });
+        }, true);  // capture phase
+    }
 })();
 </script>
 {% endblock %}

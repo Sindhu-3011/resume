@@ -48,9 +48,11 @@ ollama serve
 Then in another terminal:
 
 ```bash
-ollama pull resume-expert   # Recommended; ~4GB
+ollama pull llama3.2:latest  # Recommended default; ~2GB
 # OR
-ollama pull llama3.2:latest # Alternative; ~2GB
+ollama pull resume-expert    # Best for resume parsing; ~4GB
+# OR
+ollama pull deepseek-r1:8b   # Higher accuracy; ~5GB
 ```
 
 ### 5. Run the App
@@ -82,11 +84,12 @@ The app works with multiple Ollama models:
 
 | Model | Size | Speed | Best For |
 |-------|------|-------|----------|
-| `resume-expert` | 4 GB | Slow | Best accuracy for resumes |
-| `llama3.2:latest` | 2 GB | Fast | Good balance |
-| `llama2:13b` | 7 GB | Very slow | Maximum accuracy |
+| `llama3.2:latest` | 2 GB | Fast | **Recommended default** — good balance |
+| `resume-expert` | 4 GB | Medium | Best accuracy for resume parsing |
+| `deepseek-r1:8b` | 5 GB | Medium | Higher reasoning accuracy |
+| `llama2:13b` | 7 GB | Slow | Maximum accuracy (if VRAM allows) |
 
-**Recommendation:** Start with `llama3.2:latest` for a good balance of speed and accuracy.
+**Recommendation:** Start with `llama3.2:latest` — it's the fastest and gives great results for most resumes.
 
 ### Database
 
@@ -158,14 +161,15 @@ resume_profile_saved_list/
 ```env
 DATABASE_URL=postgresql://postgres:postgres@localhost:5432/resume_profiles
 OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_TEXT_MODEL=resume-expert:latest      # Change if using different model
+OLLAMA_TEXT_MODEL=llama3.2:latest      # Change to whichever model you pulled
 OLLAMA_TEXT_TIMEOUT=60
 ```
 
-Change `OLLAMA_TEXT_MODEL` if you pulled a different model:
-- `llama3.2:latest`
+Change `OLLAMA_TEXT_MODEL` to whichever model you pulled:
+- `llama3.2:latest` (default, recommended)
+- `resume-expert:latest`
+- `deepseek-r1:8b`
 - `llama2:13b`
-- etc.
 
 ---
 
@@ -183,7 +187,7 @@ psql -U postgres -d resume_profiles -f create_tables.sql
 # In another terminal:
 ollama serve
 
-# In a third terminal:
+# In a third terminal (pull your chosen model):
 ollama pull llama3.2:latest
 cd resume_profile_saved_list
 source venv/bin/activate

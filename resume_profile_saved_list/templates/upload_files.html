@@ -11,6 +11,8 @@
     <div style="display:flex;gap:10px;flex-wrap:wrap;">
         <a class="button secondary" href="{{ url_for('profile_list') }}">&#128203; View Profiles</a>
         {% if raw_files %}
+        <button class="button" id="parse-all-btn" type="button"
+                style="background:#059669;">&#128196; Parse &amp; Save to Profiles</button>
         <button class="button" id="compare-open-btn" type="button">&#9878; Bulk Compare</button>
         {% endif %}
     </div>
@@ -163,7 +165,7 @@
             <label>Job Description to compare against</label>
             <select id="cmp-jd-select" class="form-select">
                 <option value="">— Select a JD —</option>
-                {% for cat in ['Regulatory Affairs', 'Validation Roles', 'IT Roles'] %}
+                {% for cat in ['Regulatory Affairs', 'PI & Labelling Unit', 'Market Access & RegDesk Unit', 'Complaints Unit', 'QARA Data Analytics & AI Unit', 'Doc Control Unit', 'Validation Roles', 'IT Technology'] %}
                     {% set cat_jds = jds | selectattr('category', 'equalto', cat) | list %}
                     {% if cat_jds %}
                     <optgroup label="{{ cat }}">
@@ -652,6 +654,42 @@
 
     // Initial checkbox state
     updateCheckboxState();
+
+    /* ── Parse & Save to Profiles ─────────────────────────────────── */
+    var parseAllBtn = document.getElementById('parse-all-btn');
+    if (parseAllBtn) {
+        parseAllBtn.addEventListener('click', function () {
+            parseAllBtn.disabled = true;
+            parseAllBtn.textContent = '⏳ Parsing…';
+            var xhr = new XMLHttpRequest();
+            xhr.open('POST', '/api/process-raw-files', true);
+            xhr.setRequestHeader('Content-Type', 'application/json');
+            xhr.onload = function () {
+                parseAllBtn.disabled = false;
+                parseAllBtn.innerHTML = '&#128196; Parse &amp; Save to Profiles';
+                var res; try { res = JSON.parse(xhr.responseText); } catch(e) { res = null; }
+                if (!res) { showResult('Server error. Please try again.', 'error'); return; }
+                if (res.processed > 0) {
+                    showResult('✓ ' + res.processed + ' profile(s) saved successfully! Go to Dashboard to view them.', 'success');
+                } else if (res.errors && res.errors.length) {
+                    showResult('Some files could not be parsed. ' + res.errors.length + ' error(s).', 'error');
+                } else {
+                    showResult('No new files to process — all files already saved.', 'success');
+                }
+                if (res.errors) {
+                    res.errors.forEach(function (e) {
+                        showResult(escHtml(e.file) + ': ' + escHtml(e.error), 'error');
+                    });
+                }
+            };
+            xhr.onerror = function () {
+                parseAllBtn.disabled = false;
+                parseAllBtn.innerHTML = '&#128196; Parse &amp; Save to Profiles';
+                showResult('Network error. Please try again.', 'error');
+            };
+            xhr.send('{}');
+        });
+    }
 
 })();
 

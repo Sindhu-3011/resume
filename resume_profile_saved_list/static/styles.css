@@ -1172,3 +1172,103 @@ select.field-error { border-color: var(--clr-danger) !important; box-shadow: 0 0
     color: var(--tx-2);
     line-height: 1.5;
 }
+
+/* ── Interview Status Select ────────────────────────────────────────────── */
+.ist-select {
+    font-size: 0.75rem;
+    padding: 3px 6px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-card);
+    color: var(--tx-1);
+    cursor: pointer;
+    max-width: 170px;
+    min-width: 130px;
+}
+.ist-select:focus {
+    outline: none;
+    border-color: var(--clr-accent);
+}
+
+/* ── Interview Status Chart ─────────────────────────────────────────────── */
+.ist-chart-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 4px 0;
+}
+.ist-bar-row {
+    display: grid;
+    grid-template-columns: 180px 1fr 70px;
+    align-items: center;
+    gap: 10px;
+}
+.ist-bar-label {
+    font-size: 0.78rem;
+    color: var(--tx-2);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.ist-bar-track {
+    height: 10px;
+    background: var(--border);
+    border-radius: 999px;
+    overflow: hidden;
+}
+.ist-bar-fill {
+    height: 100%;
+    border-radius: 999px;
+    transition: width 0.8s ease;
+}
+.ist-bar-count {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    justify-content: flex-end;
+}
+.ist-cnt {
+    font-size: 0.8rem;
+    font-weight: 700;
+    color: var(--tx-1);
+}
+.ist-pct {
+    font-size: 0.75rem;
+    font-weight: 600;
+}
+
+/* ── Dashboard right-column visual improvements ─────────────────────────── */
+
+/* Role-wise Candidate Count — larger bars & spacing */
+.role-bar-list { gap: 16px; }
+.role-bar-row { gap: 12px; align-items: center; }
+.role-bar-label { width: 170px; font-size: 0.9rem; font-weight: 600; }
+.role-bar-track { height: 12px; border-radius: 999px; }
+.role-bar-fill { height: 12px; border-radius: 999px; }
+.role-bar-count { width: 30px; font-size: 1rem; font-weight: 800; }
+
+/* Interview Status chart — larger bars, wrappable labels, count-only */
+.ist-chart-wrap { gap: 16px; padding: 6px 0; }
+.ist-bar-row {
+    grid-template-columns: 175px 1fr 28px;
+    gap: 12px;
+    align-items: center;
+}
+.ist-bar-label {
+    font-size: 0.83rem;
+    font-weight: 500;
+    color: var(--tx-2);
+    white-space: normal;
+    line-height: 1.3;
+    overflow: visible;
+    text-overflow: clip;
+}
+.ist-bar-track { height: 12px; border-radius: 999px; }
+.ist-bar-fill  { height: 12px; border-radius: 999px; }
+.ist-cnt { font-size: 0.92rem; font-weight: 800; }
+
+/* Right column cards — give them slightly more breathing room */
+.dash-col .card { padding: 22px 20px; }
+
+/* Give right column a bit more space vs. left candidate table */
+.dash-two-col { grid-template-columns: 1.55fr 1fr; gap: 24px; }
