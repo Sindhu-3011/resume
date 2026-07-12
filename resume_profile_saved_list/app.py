@@ -6252,7 +6252,7 @@ def process_raw_files():
 
 
 @app.route("/api/export-compare-pdf", methods=["POST"])
-def export_compare_pdf():
+def export_bulk_compare_pdf():
     """Generate a PDF from bulk-compare results for download."""
     from reportlab.platypus import Table, TableStyle, HRFlowable
     from reportlab.lib import colors as rl_colors

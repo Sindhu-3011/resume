@@ -1,4 +1,4 @@
-  File "C:\Users\crash\dev\resume\resume_profile_saved_list\app.py", line 7
-    <<<<<<< Updated upstream
-    ^^
-SyntaxError: invalid syntax
+Traceback (most recent call last):
+  File "C:\Users\crash\resume\resume_profile_saved_list\app.py", line 1, in <module>
+    from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, send_from_directory, abort, send_file
+ModuleNotFoundError: No module named 'flask'
