@@ -4,14 +4,9 @@ from io import BytesIO
 from reportlab.lib.pagesizes import letter, A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
-<<<<<<< Updated upstream
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
-from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_JUSTIFY, TA_RIGHT
-=======
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, Table, TableStyle, HRFlowable
-from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_JUSTIFY
+from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_JUSTIFY, TA_RIGHT
 from reportlab.lib.colors import HexColor, white as RL_WHITE
->>>>>>> Stashed changes
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -2654,16 +2649,10 @@ def merge_resume_data(form_data, parsed_data, overwrite=False):
 
 # ── Ollama "Resume Intelligence" parser (text LLM) ─────────────────────────────
 
-<<<<<<< Updated upstream
-_OLLAMA_BASE         = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
-_TEXT_MODEL          = os.environ.get("OLLAMA_TEXT_MODEL", "resume-parser")
-_OLLAMA_TEXT_TIMEOUT = int(os.environ.get("OLLAMA_TEXT_TIMEOUT", "10"))   # per-call cap
-_OLLAMA_BUDGET_SECS  = int(os.environ.get("OLLAMA_BUDGET_SECS", "10"))    # total AI budget
-=======
 _OLLAMA_BASE         = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 _TEXT_MODEL          = os.environ.get("OLLAMA_TEXT_MODEL", "llama3.2:latest")
 _OLLAMA_TEXT_TIMEOUT = int(os.environ.get("OLLAMA_TEXT_TIMEOUT", "60"))
->>>>>>> Stashed changes
+_OLLAMA_BUDGET_SECS  = int(os.environ.get("OLLAMA_BUDGET_SECS", "10"))    # total AI budget
 
 
 # ── Pure-Ollama extraction — NO regex field engine in this path ────────────────
