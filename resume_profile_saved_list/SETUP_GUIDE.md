@@ -148,6 +148,7 @@ This will run Ollama on `http://localhost:11434`
 **If you have the `resume-expert-model.tar.gz` file:**
 
 ```bash
+<<<<<<< Updated upstream
 # Extract the model to your Ollama models directory
 cd ~/.ollama/models
 tar -xzf /path/to/resume-expert-model.tar.gz
@@ -178,6 +179,19 @@ ollama pull llama3.2:latest
 - **16GB+ RAM** → use `llama3.2:latest` (best accuracy)
 
 The first pull takes 5–10 minutes depending on your internet speed and model size.
+=======
+# Recommended default — fast and accurate:
+ollama pull llama3.2:latest
+
+# Fine-tuned for resume parsing (best accuracy):
+ollama pull resume-expert
+
+# Larger & more accurate (needs more VRAM/disk):
+ollama pull deepseek-r1:8b
+```
+
+**Note:** `llama3.2:latest` is the recommended default. Use `resume-expert` if you want resume-specific fine-tuning, or `deepseek-r1:8b` for higher reasoning accuracy.
+>>>>>>> Stashed changes
 
 ### 5d. Verify Models Are Ready
 
@@ -202,6 +216,7 @@ SECRET_KEY=your-secret-key-here
 
 # Ollama configuration
 OLLAMA_BASE_URL=http://localhost:11434
+<<<<<<< Updated upstream
 # This is pre-configured for resume-expert:latest
 OLLAMA_TEXT_MODEL=resume-expert:latest
 OLLAMA_TEXT_TIMEOUT=60
@@ -212,6 +227,13 @@ OLLAMA_TEXT_TIMEOUT=60
 - If you pulled `llama2:13b` → use `llama2:13b`
 - If you pulled `mistral` → use `mistral`
 - If you pulled `llama3.2:latest` → use `llama3.2:latest`
+=======
+OLLAMA_TEXT_MODEL=llama3.2:latest       # Change to whichever model you pulled
+OLLAMA_TEXT_TIMEOUT=60
+```
+
+**Model options:** `llama3.2:latest` (default), `resume-expert:latest`, `deepseek-r1:8b`. Set `OLLAMA_TEXT_MODEL` to whichever you pulled in Step 5c.
+>>>>>>> Stashed changes
 
 ---
 

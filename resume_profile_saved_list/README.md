@@ -28,7 +28,7 @@ A Flask web app for uploading, parsing, and managing candidate resume profiles. 
 | PDF extraction | PyPDF2, pdfplumber, PyMuPDF |
 | DOCX extraction | python-docx |
 | OCR (optional) | EasyOCR + PyMuPDF |
-| AI parsing (optional) | Ollama (local LLM, e.g. `llama3.2:1b`) |
+| AI parsing (optional) | Ollama (local LLM, e.g. `llama3.2:latest`) |
 | Config | python-dotenv |
 
 ## Prerequisites
@@ -88,16 +88,18 @@ Quick Parse (the regex-based parser) works without it — this step is only need
 3. Pull a model (choose one based on your hardware):
 
    ```bash
-   # Recommended for resume parsing (if available):
+   # Best accuracy — fine-tuned for resume parsing (if available):
    ollama pull resume-expert
-   
-   # Or use a general-purpose model:
+
+   # Recommended default — good balance of speed and accuracy:
    ollama pull llama3.2:latest
-   ollama pull llama2:13b
+
+   # Higher accuracy — needs more VRAM/disk:
+   ollama pull deepseek-r1:8b
    ```
 
-By default the app talks to Ollama at `http://localhost:11434` using the `resume-expert:latest`
-model (or `llama3.2:latest` if not available). Override these via the `OLLAMA_*` environment variables.
+By default the app talks to Ollama at `http://localhost:11434` using the `llama3.2:latest`
+model. Override these via the `OLLAMA_*` environment variables.
 
 ### 4. Configure the database connection
 
@@ -109,11 +111,11 @@ SECRET_KEY=your-secret-key-here
 
 # AI parsing settings (only used by "Resume Intelligence" mode)
 OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_TEXT_MODEL=resume-expert:latest
+OLLAMA_TEXT_MODEL=llama3.2:latest
 OLLAMA_TEXT_TIMEOUT=60
 ```
 
-**Note:** If you pulled a different Ollama model, update `OLLAMA_TEXT_MODEL` accordingly (e.g., `llama3.2:latest`)
+**Note:** Set `OLLAMA_TEXT_MODEL` to whichever model you pulled (e.g., `resume-expert:latest` or `deepseek-r1:8b`).
 
 ### 5. Create the database
 
@@ -215,7 +217,7 @@ The app starts on `http://127.0.0.1:5001` in debug mode.
 | `DATABASE_URL` | `postgresql://postgres:postgres@localhost:5432/resume_profiles` | PostgreSQL connection string |
 | `SECRET_KEY` | `resume-profile-secret-key` | Flask session secret |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server URL (AI parse mode) |
-| `OLLAMA_TEXT_MODEL` | `resume-expert:latest` | Ollama model used for resume parsing (falls back to `llama3.2:latest` if unavailable) |
+| `OLLAMA_TEXT_MODEL` | `llama3.2:latest` | Ollama model used for resume parsing (e.g. `resume-expert:latest`, `deepseek-r1:8b`) |
 | `OLLAMA_TEXT_TIMEOUT` | `60` | Per-request Ollama timeout (seconds) |
 
 ## Database Schema

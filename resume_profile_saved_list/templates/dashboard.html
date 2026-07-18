@@ -649,6 +649,49 @@
         </div>
 
 
+        <!-- Interview Status Distribution Chart -->
+        <div class="card" style="margin-top:24px;" id="istChartCard">
+            <div class="section-header" style="margin-bottom:14px;">
+                <div class="section-icon" style="background:#fef3c7;color:#d97706;">&#128203;</div>
+                <h2>Interview Status</h2>
+                <span class="section-note">Candidate pipeline overview</span>
+            </div>
+            {% set _ist_data = interview_status_counts %}
+            {% if _ist_data %}
+                <div class="ist-chart-wrap" id="istChartWrap">
+                    {% set _ist_colors = {
+                        'To Be Interviewed':               '#6366f1',
+                        'Profile Shared With Client':      '#0284c7',
+                        'Can be considered for Future Roles': '#8b5cf6',
+                        'Client Offer Released':           '#059669',
+                        'Joined Vaisesika':                '#10b981',
+                        'Not Available Currently':         '#64748b',
+                        'Not Shortlisted':                 '#f59e0b',
+                        'Position Closed':                 '#dc2626',
+                        'Rejected By Client':              '#ef4444',
+                        'Rejected Internally':             '#991b1b',
+                        'Selected by Client':              '#16a34a'
+                    } %}
+                    {% set _total = _ist_data.values() | sum %}
+                    {% for label, cnt in _ist_data.items() | sort(attribute=1, reverse=True) %}
+                    {% set _pct = ((cnt / _total) * 100) | round(1) %}
+                    {% set _col = _ist_colors.get(label, '#6366f1') %}
+                    <div class="ist-bar-row">
+                        <div class="ist-bar-label" title="{{ label }}">{{ label }}</div>
+                        <div class="ist-bar-track">
+                            <div class="ist-bar-fill role-bar-fill" style="width:0%;background:{{ _col }};" data-pct="{{ _pct }}"></div>
+                        </div>
+                        <div class="ist-bar-count">
+                            <span class="ist-cnt" style="color:{{ _col }};">{{ cnt }}</span>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+            {% else %}
+                <p class="muted" style="text-align:center;padding:24px 0;">No interview status data yet.</p>
+            {% endif %}
+        </div>
+
     </div><!-- end right col -->
 
 </div><!-- end two-col -->

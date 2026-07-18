@@ -186,7 +186,7 @@
             <label>Job Description to compare against</label>
             <select id="cmp-jd-select" class="form-select">
                 <option value="">— Select a JD —</option>
-                {% for cat in ['Regulatory Affairs', 'Validation Roles', 'IT Roles'] %}
+                {% for cat in ['Regulatory Affairs', 'PI & Labelling Unit', 'Market Access & RegDesk Unit', 'Complaints Unit', 'QARA Data Analytics & AI Unit', 'Doc Control Unit', 'Validation Roles', 'IT Technology'] %}
                     {% set cat_jds = jds | selectattr('category', 'equalto', cat) | list %}
                     {% if cat_jds %}
                     <optgroup label="{{ cat }}">

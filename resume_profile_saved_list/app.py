@@ -4,8 +4,9 @@ from io import BytesIO
 from reportlab.lib.pagesizes import letter, A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, Table, TableStyle, HRFlowable
 from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_JUSTIFY, TA_RIGHT
+from reportlab.lib.colors import HexColor, white as RL_WHITE
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -1962,6 +1963,8 @@ _NAME_STOPWORDS = frozenset({
     "architect", "leadership", "scientist", "technician", "supervisor",
     "annexure", "appendix", "gamp", "cfr", "ich", "gxp", "fda", "qms",
     "sop", "capa", "iso",
+    "enclosure", "declaration", "format",
+    "biodata", "bio", "curriculum", "vitae",
 })
 
 # Degree/qualification abbreviations (dots stripped) — e.g. "M.Sc.", "B.Tech"
@@ -1973,10 +1976,35 @@ _DEGREE_ABBR = frozenset({
 })
 
 
+_DEGREE_ABBR_PAT = re.compile(
+    r'^(?:M\.?Sc|B\.?Sc|B\.?E|M\.?E|B\.?Tech|M\.?Tech|Ph\.?D|MBA|BBA|BCA|MCA|'
+    r'B\.?Com|M\.?Com|BA|MA|LLB|LLM|MBBS|MD|MS|BE|ME|BSc|MSc)\.?$',
+    re.I,
+)
+
+_DEGREE_SUFFIX_PAT = re.compile(
+    r',?\s*(?:M\.?Sc|B\.?Sc|B\.?E|M\.?E|B\.?Tech|M\.?Tech|Ph\.?D|MBA|BBA|BCA|MCA|'
+    r'B\.?Com|M\.?Com|BA|MA|LLB|LLM|MBBS|MD|MS|BE|ME|BSc|MSc)\.?'
+    r'(?:\s*[,/]\s*(?:M\.?Sc|B\.?Sc|B\.?E|M\.?E|B\.?Tech|M\.?Tech|Ph\.?D|MBA|BBA|'
+    r'BCA|MCA|B\.?Com|M\.?Com|BA|MA|LLB|LLM|MBBS|MD|MS|BE|ME|BSc|MSc)\.?)*\s*$',
+    re.I,
+)
+
+
+def _strip_degree_suffix(text):
+    """Remove trailing academic degree qualifiers from a candidate name line.
+    'Abhisheak Kaniyala, M.Sc.' → 'Abhisheak Kaniyala'
+    'Ravi Kumar B.E., M.Tech' → 'Ravi Kumar'
+    """
+    return _DEGREE_SUFFIX_PAT.sub("", text).strip()
+
+
 def _looks_like_name(line):
     """Return True only if *line* could plausibly be a person's full name."""
     line = line.strip()
     if not line or len(line) > 55:
+        return False
+    if _DEGREE_ABBR_PAT.match(line):
         return False
     if re.search(r'[,;:!?]|\.{2,}|—|–|\(|\)', line):
         return False
@@ -2288,13 +2316,20 @@ def _extract_name_from_pdf_fonts(path):
             line_text = " ".join(p[0] for p in name_parts)
             bold = any(p[2] for p in name_parts)
             underline = any(p[3] for p in name_parts)
+            # Try stripped version first (handles "Name, M.Sc." lines)
+            stripped_line = _strip_degree_suffix(line_text)
             # Try from longest prefix down; take the first that looks like a name
-            words = line_text.split()
-            for n in range(min(5, len(words)), 0, -1):
-                candidate = " ".join(words[:n])
-                if _looks_like_name(candidate):
-                    score = (bold and underline) * 4 + bold * 2
-                    candidates.append((score, line_max_size, candidate))
+            for _candidate_text in ([stripped_line, line_text] if stripped_line != line_text else [line_text]):
+                words = _candidate_text.split()
+                _found = False
+                for n in range(min(5, len(words)), 0, -1):
+                    candidate = " ".join(words[:n])
+                    if _looks_like_name(candidate):
+                        score = (bold and underline) * 4 + bold * 2
+                        candidates.append((score, line_max_size, candidate))
+                        _found = True
+                        break
+                if _found:
                     break
 
     if not candidates:
@@ -2416,21 +2451,30 @@ def parse_resume_text(text, name_hint=None):
         # First pass: look for all-caps names in FIRST 10 lines (e.g., "SIVARANJANI D")
         if not parsed["full_name"]:
             for _nl in useful_top_lines[:10]:
+                _nl_clean = _strip_degree_suffix(_nl)
+                if _nl_clean.isupper() and _looks_like_name(_nl_clean):
+                    parsed["full_name"] = _nl_clean[:80]
+                    break
+        # First pass: look for all-caps names in FIRST 10 lines (e.g., "SIVARANJANI D")
+        if not parsed["full_name"]:
+            for _nl in useful_top_lines[:10]:
                 if _nl.isupper() and _looks_like_name(_nl):
                     parsed["full_name"] = _nl[:80]
                     break
         # Second pass: look for TWO-WORD names (common name pattern) in first 15 lines
         if not parsed["full_name"]:
             for _nl in useful_top_lines[:15]:
-                _words = _nl.split()
-                if len(_words) == 2 and _looks_like_name(_nl):
-                    parsed["full_name"] = _nl[:80]
+                _nl_clean = _strip_degree_suffix(_nl)
+                _words = _nl_clean.split()
+                if len(_words) == 2 and _looks_like_name(_nl_clean):
+                    parsed["full_name"] = _nl_clean[:80]
                     break
         # Third pass: look for any proper-cased name in all useful lines
         if not parsed["full_name"]:
             for _nl in useful_top_lines:
-                if _looks_like_name(_nl):
-                    parsed["full_name"] = _nl[:80]
+                _nl_clean = _strip_degree_suffix(_nl)
+                if _looks_like_name(_nl_clean):
+                    parsed["full_name"] = _nl_clean[:80]
                     break
         if not parsed["full_name"]:
             # Looser pass: short proper-cased line with 2-5 words and no stopwords
@@ -2739,9 +2783,9 @@ def merge_resume_data(form_data, parsed_data, overwrite=False):
 
 # ── Ollama "Resume Intelligence" parser (text LLM) ─────────────────────────────
 
-_OLLAMA_BASE         = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
-_TEXT_MODEL          = os.environ.get("OLLAMA_TEXT_MODEL", "resume-parser")
-_OLLAMA_TEXT_TIMEOUT = int(os.environ.get("OLLAMA_TEXT_TIMEOUT", "10"))   # per-call cap
+_OLLAMA_BASE         = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+_TEXT_MODEL          = os.environ.get("OLLAMA_TEXT_MODEL", "llama3.2:latest")
+_OLLAMA_TEXT_TIMEOUT = int(os.environ.get("OLLAMA_TEXT_TIMEOUT", "60"))
 _OLLAMA_BUDGET_SECS  = int(os.environ.get("OLLAMA_BUDGET_SECS", "10"))    # total AI budget
 
 
@@ -5142,157 +5186,595 @@ def export_top_matches(resume_id):
     )
 
 
+def _pdf_hr(color=None, thickness=0.5):
+    """Reusable horizontal rule for PDF reports."""
+    return HRFlowable(width='100%', thickness=thickness,
+                      color=color or HexColor('#e2e8f0'),
+                      spaceAfter=6, spaceBefore=6)
+
+
+def _pdf_skill_tags(skills, bg, fg, cols=4, col_w=1.65):
+    """Render a skill list as a flat colored-cell table — no nested tables."""
+    if not skills:
+        return None
+    tag_style = ParagraphStyle('_Tag', fontSize=8, textColor=fg,
+                                fontName='Helvetica-Bold', alignment=TA_CENTER,
+                                leading=11)
+    cells = [Paragraph(str(s)[:38], tag_style) for s in skills]
+    while len(cells) % cols != 0:
+        cells.append('')
+    rows = [cells[i:i + cols] for i in range(0, len(cells), cols)]
+    grid = Table(rows, colWidths=[col_w * inch] * cols)
+    grid.setStyle(TableStyle([
+        ('BACKGROUND',    (0, 0), (-1, -1), bg),
+        ('FONTNAME',      (0, 0), (-1, -1), 'Helvetica-Bold'),
+        ('FONTSIZE',      (0, 0), (-1, -1), 8),
+        ('TEXTCOLOR',     (0, 0), (-1, -1), fg),
+        ('ALIGN',         (0, 0), (-1, -1), 'CENTER'),
+        ('VALIGN',        (0, 0), (-1, -1), 'MIDDLE'),
+        ('LEFTPADDING',   (0, 0), (-1, -1), 6),
+        ('RIGHTPADDING',  (0, 0), (-1, -1), 6),
+        ('TOPPADDING',    (0, 0), (-1, -1), 5),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
+        ('GRID',          (0, 0), (-1, -1), 2, RL_WHITE),
+    ]))
+    return grid
+
+
+def _build_match_detail_story(resume_dict, jd_dict, sc, rank=None):
+    """
+    Build a list of ReportLab flowables for one resume-vs-JD match section.
+    Used by both export_top_matches_pdf and export_compare_pdf.
+    """
+    C_NAVY      = HexColor('#1e293b')
+    C_GREEN     = HexColor('#15803d')
+    C_GREEN_BG  = HexColor('#d1fae5')
+    C_RED       = HexColor('#dc2626')
+    C_RED_BG    = HexColor('#fee2e2')
+    C_ORANGE    = HexColor('#d97706')
+    C_ORANGE_BG = HexColor('#fff7ed')
+    C_PURPLE    = HexColor('#7c3aed')
+    C_PURPLE_BG = HexColor('#ede9fe')
+    C_BLUE      = HexColor('#2563eb')
+    C_BLUE_BG   = HexColor('#dbeafe')
+    C_GRAY      = HexColor('#64748b')
+    C_LIGHT     = HexColor('#f8fafc')
+    C_BORDER    = HexColor('#e2e8f0')
+
+    LEVEL_COLOR = {'Strong Match': C_GREEN, 'Good Match': C_BLUE,
+                   'Partial Match': C_ORANGE, 'Low Match': C_RED}
+    LEVEL_BG    = {'Strong Match': C_GREEN_BG, 'Good Match': C_BLUE_BG,
+                   'Partial Match': C_ORANGE_BG, 'Low Match': C_RED_BG}
+
+    level       = sc.get('match_level', 'Low Match')
+    lv_color    = LEVEL_COLOR.get(level, C_GRAY)
+    lv_bg       = LEVEL_BG.get(level,    C_LIGHT)
+    pct         = sc.get('match_percentage', 0)
+
+    s_body  = ParagraphStyle('_Body',  fontSize=9,  textColor=C_NAVY, spaceAfter=3, leading=14)
+    s_muted = ParagraphStyle('_Muted', fontSize=8.5, textColor=C_GRAY, spaceAfter=3, leading=13)
+
+    story = []
+
+    # ── Banner: rank + title + score ─────────────────────────────────────────
+    rank_label = f'#{rank}' if rank else ''
+    rank_cell = Table(
+        [[Paragraph(rank_label,
+                    ParagraphStyle('_Rk', fontSize=22, fontName='Helvetica-Bold',
+                                   textColor=RL_WHITE, alignment=TA_CENTER))]],
+        colWidths=[0.65 * inch], rowHeights=[0.65 * inch]
+    )
+    rank_cell.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, -1), lv_color),
+        ('VALIGN',     (0, 0), (-1, -1), 'MIDDLE'),
+        ('LEFTPADDING',(0, 0), (-1, -1), 0),
+        ('RIGHTPADDING',(0,0), (-1, -1), 0),
+        ('TOPPADDING', (0, 0), (-1, -1), 0),
+        ('BOTTOMPADDING',(0,0),(-1, -1), 0),
+    ]))
+
+    title_inner = [
+        Paragraph(jd_dict.get('title', ''),
+                  ParagraphStyle('_JDT', fontSize=13, fontName='Helvetica-Bold',
+                                  textColor=C_NAVY, spaceAfter=2)),
+        Paragraph(f"{jd_dict.get('category', '')}  ·  {jd_dict.get('role', '')}",
+                  ParagraphStyle('_JDC', fontSize=8.5, textColor=C_GRAY)),
+    ]
+    title_cell = Table([title_inner], colWidths=[4.1 * inch])
+    title_cell.setStyle(TableStyle([
+        ('VALIGN',      (0, 0), (-1, -1), 'MIDDLE'),
+        ('LEFTPADDING', (0, 0), (-1, -1), 10),
+        ('TOPPADDING',  (0, 0), (-1, -1), 4),
+        ('BOTTOMPADDING',(0,0), (-1, -1), 4),
+        ('BACKGROUND',  (0, 0), (-1, -1), C_LIGHT),
+    ]))
+
+    score_cell = Table([
+        [Paragraph(f'{pct}%',
+                   ParagraphStyle('_ScBig', fontSize=26, fontName='Helvetica-Bold',
+                                   textColor=lv_color, alignment=TA_CENTER))],
+        [Paragraph(level,
+                   ParagraphStyle('_ScLvl', fontSize=8, textColor=lv_color,
+                                   alignment=TA_CENTER, fontName='Helvetica-Bold'))],
+    ], colWidths=[2.1 * inch])
+    score_cell.setStyle(TableStyle([
+        ('BACKGROUND',   (0, 0), (-1, -1), lv_bg),
+        ('VALIGN',       (0, 0), (-1, -1), 'MIDDLE'),
+        ('TOPPADDING',   (0, 0), (-1, -1), 6),
+        ('BOTTOMPADDING',(0, 0), (-1, -1), 6),
+        ('LEFTPADDING',  (0, 0), (-1, -1), 0),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 0),
+    ]))
+
+    banner = Table([[rank_cell, title_cell, score_cell]],
+                    colWidths=[0.65 * inch, 4.1 * inch, 2.1 * inch],
+                    rowHeights=[0.65 * inch])
+    banner.setStyle(TableStyle([
+        ('BOX',           (0, 0), (-1, -1), 1, lv_color),
+        ('LEFTPADDING',   (0, 0), (-1, -1), 0),
+        ('RIGHTPADDING',  (0, 0), (-1, -1), 0),
+        ('TOPPADDING',    (0, 0), (-1, -1), 0),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
+    ]))
+    story.append(banner)
+    story.append(Spacer(1, 0.14 * inch))
+
+    # ── Score breakdown table ─────────────────────────────────────────────────
+    story.append(Paragraph(
+        'Match Score Breakdown',
+        ParagraphStyle('_SecH', fontSize=10, fontName='Helvetica-Bold',
+                        textColor=C_NAVY, spaceAfter=5, spaceBefore=8)
+    ))
+    exp_note_short = (sc.get('experience_note') or '')[:90]
+    sb_data = [
+        ['Metric', 'Score', 'Detail'],
+        ['Overall Match',     f"{pct}%",
+         f"{sc.get('matched_count',0)} of {sc.get('total_jd_requirements',0)} requirements met"],
+        ['Skills Match',      f"{sc.get('skills_match_percentage',0)}%",
+         f"{sc.get('matched_count',0)} skills matched"],
+        ['Experience Match',  f"{sc.get('experience_match_percentage',0)}%",
+         exp_note_short or '—'],
+    ]
+    sb_tbl = Table(sb_data, colWidths=[1.55 * inch, 0.85 * inch, 4.45 * inch])
+    sb_tbl.setStyle(TableStyle([
+        ('BACKGROUND',   (0, 0), (-1, 0),  C_NAVY),
+        ('TEXTCOLOR',    (0, 0), (-1, 0),  RL_WHITE),
+        ('FONTNAME',     (0, 0), (-1, 0),  'Helvetica-Bold'),
+        ('FONTSIZE',     (0, 0), (-1, -1), 8.5),
+        ('ROWBACKGROUNDS',(0,1), (-1, -1), [C_LIGHT, RL_WHITE]),
+        ('GRID',         (0, 0), (-1, -1), 0.5, C_BORDER),
+        ('ALIGN',        (1, 0), (1,  -1), 'CENTER'),
+        ('FONTNAME',     (1, 1), (1,  1),  'Helvetica-Bold'),
+        ('TEXTCOLOR',    (1, 1), (1,  1),  lv_color),
+        ('FONTNAME',     (1, 2), (1,  3),  'Helvetica-Bold'),
+        ('VALIGN',       (0, 0), (-1, -1), 'MIDDLE'),
+        ('TOPPADDING',   (0, 0), (-1, -1), 5),
+        ('BOTTOMPADDING',(0, 0), (-1, -1), 5),
+        ('LEFTPADDING',  (0, 0), (-1, -1), 8),
+    ]))
+    story.append(sb_tbl)
+    story.append(Spacer(1, 0.12 * inch))
+
+    # ── Matched / Missing skills — two-column ─────────────────────────────────
+    matched  = sc.get('matched_skills', [])
+    missing  = sc.get('missing_skills', [])
+
+    def _skill_list_cell(skills, tick, color, bg):
+        rows = [Paragraph(f'<b>{tick}  {s}</b>',
+                           ParagraphStyle('_SI', fontSize=8.5, textColor=color,
+                                           spaceAfter=2, leading=13))
+                for s in skills]
+        if not rows:
+            rows = [Paragraph('None' if tick == '✗' else 'All matched!',
+                               ParagraphStyle('_SIN', fontSize=8.5, textColor=color))]
+        return rows
+
+    left_hdr   = Paragraph(
+        f'Matched Skills ({sc.get("matched_count", 0)})',
+        ParagraphStyle('_MH', fontSize=10, fontName='Helvetica-Bold',
+                        textColor=C_GREEN, spaceAfter=5))
+    right_hdr  = Paragraph(
+        f'Missing / Gap Skills ({sc.get("missing_count", 0)})',
+        ParagraphStyle('_GH', fontSize=10, fontName='Helvetica-Bold',
+                        textColor=C_RED, spaceAfter=5))
+
+    left_items  = _skill_list_cell(matched, '✓', C_GREEN, C_GREEN_BG)
+    right_items = _skill_list_cell(missing, '✗', C_RED,   C_RED_BG)
+
+    skills_tbl = Table(
+        [[[left_hdr]  + left_items,
+          [right_hdr] + right_items]],
+        colWidths=[3.35 * inch, 3.35 * inch]
+    )
+    skills_tbl.setStyle(TableStyle([
+        ('VALIGN',       (0, 0), (-1, -1), 'TOP'),
+        ('BACKGROUND',   (0, 0), (0,  -1), HexColor('#f0fdf4')),
+        ('BACKGROUND',   (1, 0), (1,  -1), HexColor('#fff5f5')),
+        ('BOX',          (0, 0), (0,  -1), 0.5, C_GREEN),
+        ('BOX',          (1, 0), (1,  -1), 0.5, C_RED),
+        ('LEFTPADDING',  (0, 0), (-1, -1), 10),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 10),
+        ('TOPPADDING',   (0, 0), (-1, -1), 10),
+        ('BOTTOMPADDING',(0, 0), (-1, -1), 10),
+    ]))
+    story.append(skills_tbl)
+    story.append(Spacer(1, 0.1 * inch))
+
+    # ── Strong Areas ─────────────────────────────────────────────────────────
+    strong = sc.get('strong_areas', [])
+    if strong:
+        story.append(Paragraph(
+            'Strong Areas',
+            ParagraphStyle('_SAH', fontSize=10, fontName='Helvetica-Bold',
+                            textColor=C_PURPLE, spaceAfter=5, spaceBefore=6)
+        ))
+        tags = _pdf_skill_tags(strong, C_PURPLE_BG, C_PURPLE)
+        if tags:
+            story.append(tags)
+        story.append(Spacer(1, 0.06 * inch))
+
+    # ── Skill Gaps ───────────────────────────────────────────────────────────
+    weak = sc.get('weak_areas', [])
+    if weak:
+        story.append(Paragraph(
+            'Skill Gaps to Address',
+            ParagraphStyle('_WAH', fontSize=10, fontName='Helvetica-Bold',
+                            textColor=C_ORANGE, spaceAfter=5, spaceBefore=6)
+        ))
+        tags = _pdf_skill_tags(weak, C_ORANGE_BG, C_ORANGE)
+        if tags:
+            story.append(tags)
+        story.append(Spacer(1, 0.06 * inch))
+
+    # ── Experience Assessment ─────────────────────────────────────────────────
+    exp_note  = sc.get('experience_note', '')
+    jd_yrs    = sc.get('jd_years_required')
+    res_yrs   = sc.get('resume_years_estimated')
+    if exp_note or jd_yrs or res_yrs:
+        story.append(_pdf_hr())
+        story.append(Paragraph(
+            'Experience Assessment',
+            ParagraphStyle('_ExpH', fontSize=10, fontName='Helvetica-Bold',
+                            textColor=C_NAVY, spaceAfter=5, spaceBefore=4)
+        ))
+        if exp_note:
+            story.append(Paragraph(exp_note, s_body))
+        exp_rows = []
+        if jd_yrs:
+            exp_rows.append(['JD Requires', f'{jd_yrs}+ years'])
+        if res_yrs is not None:
+            exp_rows.append(['Resume Shows', f'~{res_yrs} year(s)'])
+        if exp_rows:
+            exp_tbl = Table(exp_rows, colWidths=[1.5 * inch, 2.2 * inch])
+            exp_tbl.setStyle(TableStyle([
+                ('FONTSIZE',     (0, 0), (-1, -1), 9),
+                ('FONTNAME',     (0, 0), (0,  -1), 'Helvetica-Bold'),
+                ('TEXTCOLOR',    (0, 0), (0,  -1), C_NAVY),
+                ('TEXTCOLOR',    (1, 0), (1,  -1), lv_color),
+                ('FONTNAME',     (1, 0), (1,  -1), 'Helvetica-Bold'),
+                ('TOPPADDING',   (0, 0), (-1, -1), 3),
+                ('BOTTOMPADDING',(0, 0), (-1, -1), 3),
+                ('LEFTPADDING',  (0, 0), (-1, -1), 6),
+            ]))
+            story.append(exp_tbl)
+
+    # ── Recommendations ───────────────────────────────────────────────────────
+    story.append(_pdf_hr())
+    story.append(Paragraph(
+        'Recommendations',
+        ParagraphStyle('_RecH', fontSize=10, fontName='Helvetica-Bold',
+                        textColor=C_NAVY, spaceAfter=5, spaceBefore=4)
+    ))
+    recs = []
+    if pct >= 80:
+        recs.append('Strong candidate — recommend for immediate interview.')
+    elif pct >= 60:
+        recs.append('Good candidate — consider for interview with skill gap discussion.')
+    elif pct >= 40:
+        recs.append('Partial match — may require upskilling in the gap areas listed above.')
+    else:
+        recs.append('Low match — candidate profile does not closely align with this role.')
+    if missing:
+        top_miss = missing[:5]
+        recs.append(f'Key areas to strengthen: {", ".join(top_miss)}'
+                    f'{"..." if len(missing) > 5 else ""}.')
+    if strong:
+        recs.append(f'Candidate demonstrates strong background in: {", ".join(strong[:4])}.')
+    for rec in recs:
+        story.append(Paragraph(f'•  {rec}', s_body))
+
+    return story
+
+
 @app.route("/profile/<int:resume_id>/export-top-matches-pdf")
 def export_top_matches_pdf(resume_id):
-    """Export top 3 matching JDs with resume as PDF."""
+    """Export top 3 matching JDs as a professional candidate assessment PDF."""
     with db_conn() as conn:
         resume = conn.execute("SELECT * FROM resume WHERE id = %s", (resume_id,)).fetchone()
         if not resume:
             return "Profile not found", 404
-
-        # Calculate top 3 matching JDs
         jds = conn.execute("SELECT * FROM job_description ORDER BY created_at DESC").fetchall()
-        resume_dict = dict(resume)
 
-        matches = []
-        for jd in jds:
-            jd_dict = dict(jd)
-            score = calculate_match_score(resume_dict, jd_dict)
-            matches.append({
-                'jd': jd_dict,
-                'jd_id': jd['id'],
-                'jd_title': jd['title'],
-                'match_percentage': score['match_percentage'],
-                'matched_count': score['matched_count'],
-                'total_jd_requirements': score['total_jd_requirements']
-            })
+    resume_dict = dict(resume)
 
-        matches.sort(key=lambda x: x['match_percentage'], reverse=True)
-        top_matches = matches[:3]
+    matches = []
+    for jd in jds:
+        jd_dict = dict(jd)
+        score = calculate_match_score(resume_dict, jd_dict)
+        matches.append({'jd': jd_dict, 'score': score})
+    matches.sort(key=lambda x: x['score']['match_percentage'], reverse=True)
+    top_matches = matches[:3]
 
-    # Generate PDF
+    # ── Shared palette / styles ────────────────────────────────────────────────
+    C_NAVY   = HexColor('#1e293b')
+    C_BLUE   = HexColor('#2563eb')
+    C_GRAY   = HexColor('#64748b')
+    C_LIGHT  = HexColor('#f8fafc')
+    C_BORDER = HexColor('#e2e8f0')
+    C_GREEN  = HexColor('#15803d')
+    C_ORANGE = HexColor('#d97706')
+    C_RED    = HexColor('#dc2626')
+    LEVEL_COLS = {'Strong Match': C_GREEN, 'Good Match': C_BLUE,
+                  'Partial Match': C_ORANGE, 'Low Match': C_RED}
+
     buffer = BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=letter,
-                          topMargin=0.5*inch, bottomMargin=0.5*inch,
-                          leftMargin=0.75*inch, rightMargin=0.75*inch)
+    doc = SimpleDocTemplate(
+        buffer, pagesize=letter,
+        topMargin=0.55 * inch, bottomMargin=0.55 * inch,
+        leftMargin=0.75 * inch, rightMargin=0.75 * inch
+    )
     story = []
-    styles = getSampleStyleSheet()
 
-    # Resume Header
-    title_style = ParagraphStyle(
-        'CustomTitle',
-        parent=styles['Heading1'],
-        fontSize=22,
-        textColor='#1e293b',
-        spaceAfter=4,
-        alignment=TA_CENTER,
-        fontName='Helvetica-Bold'
+    # ── Cover: report header strip ─────────────────────────────────────────────
+    hdr_tbl = Table(
+        [[Paragraph('CANDIDATE ASSESSMENT REPORT',
+                    ParagraphStyle('_HDR', fontSize=9, textColor=RL_WHITE,
+                                   fontName='Helvetica-Bold', alignment=TA_CENTER))]],
+        colWidths=[7.0 * inch], rowHeights=[24]
     )
-    story.append(Paragraph(f"Resume: {resume_dict.get('full_name', 'Resume')}", title_style))
+    hdr_tbl.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, -1), C_NAVY),
+        ('VALIGN',     (0, 0), (-1, -1), 'MIDDLE'),
+    ]))
+    story.append(hdr_tbl)
+    story.append(Spacer(1, 0.2 * inch))
 
+    # Candidate name + title + contact — explicit rowHeights guarantee no overlap
+    _name_rows   = []
+    _row_heights = []
+    _name_rows.append([Paragraph(
+        resume_dict.get('full_name', ''),
+        ParagraphStyle('_CName', fontSize=24, fontName='Helvetica-Bold',
+                        textColor=C_NAVY, alignment=TA_CENTER, leading=30))])
+    _row_heights.append(0.50 * inch)   # 36 pt — fits 24 pt font centred with room
     if resume_dict.get('title'):
-        subtitle_style = ParagraphStyle(
-            'Subtitle',
-            parent=styles['Normal'],
-            fontSize=11,
-            textColor='#64748b',
-            spaceAfter=16,
-            alignment=TA_CENTER
-        )
-        story.append(Paragraph(resume_dict.get('title'), subtitle_style))
+        _name_rows.append([Paragraph(
+            resume_dict['title'],
+            ParagraphStyle('_CRole', fontSize=11, textColor=C_GRAY,
+                            alignment=TA_CENTER, leading=16))])
+        _row_heights.append(0.30 * inch)   # 21.6 pt — fits 11 pt font
+    # Contact: split each field on | to de-duplicate combined parser output
+    _seen_cp = set()
+    _contact_parts = []
+    for _f in [resume_dict.get('email'), resume_dict.get('phone'),
+                resume_dict.get('location')]:
+        for _tok in (_f or '').replace('|', '\n').split('\n'):
+            _tok = _tok.strip()
+            if _tok and _tok not in _seen_cp:
+                _seen_cp.add(_tok)
+                _contact_parts.append(_tok)
+    _contact_parts = _contact_parts[:4]
+    if _contact_parts:
+        _name_rows.append([Paragraph(
+            '  |  '.join(_contact_parts),
+            ParagraphStyle('_CCont', fontSize=9, textColor=C_GRAY,
+                            alignment=TA_CENTER, leading=12))])
+        _row_heights.append(0.26 * inch)   # 18.7 pt — fits 9 pt font
+    _name_tbl = Table(_name_rows, colWidths=[7.0 * inch], rowHeights=_row_heights)
+    _name_tbl.setStyle(TableStyle([
+        ('ALIGN',         (0, 0), (-1, -1), 'CENTER'),
+        ('VALIGN',        (0, 0), (-1, -1), 'MIDDLE'),
+        ('TOPPADDING',    (0, 0), (-1, -1), 0),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
+        ('LEFTPADDING',   (0, 0), (-1, -1), 0),
+        ('RIGHTPADDING',  (0, 0), (-1, -1), 0),
+    ]))
+    story.append(_name_tbl)
 
-    # Contact info
-    contact_parts = []
-    if resume_dict.get('email'):
-        contact_parts.append(resume_dict['email'])
-    if resume_dict.get('phone'):
-        contact_parts.append(resume_dict['phone'])
-    if resume_dict.get('location'):
-        contact_parts.append(resume_dict['location'])
+    story.append(Spacer(1, 0.2 * inch))
+    story.append(_pdf_hr(C_BLUE, 1.2))
+    story.append(Spacer(1, 0.08 * inch))
 
-    if contact_parts:
-        contact_style = ParagraphStyle(
-            'Contact',
-            parent=styles['Normal'],
-            fontSize=9,
-            textColor='#475569',
-            spaceAfter=20,
-            alignment=TA_CENTER
-        )
-        story.append(Paragraph(' | '.join(contact_parts), contact_style))
+    # Overview summary table
+    story.append(Paragraph(
+        'TOP 3 MATCHING ROLES — OVERVIEW',
+        ParagraphStyle('_OvH', fontSize=10, fontName='Helvetica-Bold',
+                        textColor=C_BLUE, spaceAfter=7)
+    ))
+    ov_data = [['Rank', 'Job Role', 'Category', 'Match Score', 'Matched', 'Missing']]
+    for i, m in enumerate(top_matches, 1):
+        sc = m['score']
+        ov_data.append([
+            f'#{i}',
+            m['jd'].get('title', ''),
+            m['jd'].get('category', ''),
+            f"{sc['match_percentage']}%  ({sc['match_level']})",
+            str(sc['matched_count']),
+            str(sc['missing_count']),
+        ])
+    ov_tbl = Table(ov_data,
+                    colWidths=[0.45*inch, 2.2*inch, 1.2*inch, 1.5*inch, 0.8*inch, 0.85*inch])
+    ov_style = TableStyle([
+        ('BACKGROUND',    (0, 0), (-1,  0), C_NAVY),
+        ('TEXTCOLOR',     (0, 0), (-1,  0), RL_WHITE),
+        ('FONTNAME',      (0, 0), (-1,  0), 'Helvetica-Bold'),
+        ('FONTSIZE',      (0, 0), (-1, -1), 8.5),
+        ('ROWBACKGROUNDS',(0, 1), (-1, -1), [C_LIGHT, RL_WHITE]),
+        ('GRID',          (0, 0), (-1, -1), 0.5, C_BORDER),
+        ('ALIGN',         (0, 0), (-1, -1), 'CENTER'),
+        ('ALIGN',         (1, 0), (2,  -1), 'LEFT'),
+        ('VALIGN',        (0, 0), (-1, -1), 'MIDDLE'),
+        ('TOPPADDING',    (0, 0), (-1, -1), 5),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
+        ('LEFTPADDING',   (0, 0), (-1, -1), 6),
+    ])
+    for i, m in enumerate(top_matches, 1):
+        col = LEVEL_COLS.get(m['score']['match_level'], C_GRAY)
+        ov_style.add('TEXTCOLOR',  (3, i), (3, i), col)
+        ov_style.add('FONTNAME',   (3, i), (3, i), 'Helvetica-Bold')
+    ov_tbl.setStyle(ov_style)
+    story.append(ov_tbl)
 
-    story.append(Spacer(1, 0.3*inch))
+    # Candidate skills snapshot
+    if resume_dict.get('skills'):
+        story.append(Spacer(1, 0.12 * inch))
+        story.append(_pdf_hr())
+        story.append(Paragraph(
+            'Candidate Key Skills',
+            ParagraphStyle('_CSH', fontSize=10, fontName='Helvetica-Bold',
+                            textColor=C_NAVY, leading=14, spaceAfter=0)
+        ))
+        story.append(Spacer(1, 0.1 * inch))
+        raw_skills = [s.strip()
+                       for s in resume_dict['skills'].replace(',', '\n').split('\n')
+                       if s.strip()][:20]
+        tags = _pdf_skill_tags(raw_skills, HexColor('#dbeafe'), C_BLUE, cols=4, col_w=1.65)
+        if tags:
+            story.append(tags)
 
-    # Top 3 Matches
-    top3_style = ParagraphStyle(
-        'Top3Title',
-        parent=styles['Heading2'],
-        fontSize=16,
-        textColor='#1e293b',
-        spaceAfter=12,
-        spaceBefore=6,
-        fontName='Helvetica-Bold'
-    )
-    story.append(Paragraph('TOP 3 MATCHING JOB DESCRIPTIONS', top3_style))
+    story.append(PageBreak())
 
-    section_style = ParagraphStyle(
-        'SectionHeading',
-        parent=styles['Heading3'],
-        fontSize=11,
-        textColor='#1e293b',
-        spaceAfter=6,
-        spaceBefore=8,
-        fontName='Helvetica-Bold'
-    )
-
-    body_style = ParagraphStyle(
-        'Body',
-        parent=styles['Normal'],
-        fontSize=8.5,
-        spaceAfter=6,
-        alignment=TA_LEFT
-    )
-
+    # ── Per-match detail pages ─────────────────────────────────────────────────
     for idx, match in enumerate(top_matches, 1):
-        jd = match['jd']
-        # Match header
-        match_header = f"#{idx} - {jd.get('title', 'Job Description')} ({match['match_percentage']}% match)"
-        story.append(Paragraph(match_header, section_style))
+        detail = _build_match_detail_story(resume_dict, match['jd'], match['score'], rank=idx)
+        story.extend(detail)
+        if idx < len(top_matches):
+            story.append(PageBreak())
 
-        # Match stats
-        stats_text = f"<b>Skills Matched:</b> {match['matched_count']}/{match['total_jd_requirements']}"
-        story.append(Paragraph(stats_text, body_style))
+    # Footer
+    story.append(Spacer(1, 0.25 * inch))
+    story.append(_pdf_hr())
+    story.append(Paragraph(
+        f'Generated by Resume Profile Manager  ·  Candidate: {resume_dict.get("full_name", "")}',
+        ParagraphStyle('_Ftr', fontSize=7.5, textColor=C_GRAY, alignment=TA_CENTER, leading=11)
+    ))
 
-        if jd.get('category'):
-            story.append(Paragraph(f"<b>Category:</b> {jd['category']}", body_style))
-
-        story.append(Spacer(1, 0.1*inch))
-
-        # Responsibilities
-        if jd.get('responsibilities'):
-            story.append(Paragraph('<b>Responsibilities:</b>', body_style))
-            resp_text = jd['responsibilities'].replace('\n', ' ')[:300] + "..."
-            story.append(Paragraph(resp_text, body_style))
-
-        # Required Skills
-        if jd.get('skills'):
-            story.append(Paragraph('<b>Required Skills:</b>', body_style))
-            skills_list = [s.strip() for s in jd['skills'].split('\n') if s.strip()][:5]
-            skills_text = ', '.join(skills_list)
-            story.append(Paragraph(skills_text, body_style))
-
-        story.append(Spacer(1, 0.15*inch))
-
-    # Build PDF
     doc.build(story)
     buffer.seek(0)
+    fname = f"{resume_dict.get('full_name', 'candidate').replace(' ', '_')}_assessment_report.pdf"
+    return send_file(buffer, mimetype='application/pdf', as_attachment=True, download_name=fname)
 
-    filename = f"{resume_dict.get('full_name', 'resume').replace(' ', '_')}_top_3_matches.pdf"
+
+@app.route("/compare/<int:resume_id>/<int:jd_id>/export-pdf")
+def export_compare_pdf(resume_id, jd_id):
+    """Export a single resume vs JD comparison as a professional assessment PDF."""
+    with db_conn() as conn:
+        ensure_jd_table(conn)
+        resume = conn.execute("SELECT * FROM resume WHERE id = %s", (resume_id,)).fetchone()
+        jd     = conn.execute("SELECT * FROM job_description WHERE id = %s", (jd_id,)).fetchone()
+    if not resume or not jd:
+        return "Resume or JD not found", 404
+
+    resume_dict = dict(resume)
+    jd_dict     = dict(jd)
+    sc          = calculate_match_score(resume_dict, jd_dict)
+
+    C_NAVY  = HexColor('#1e293b')
+    C_BLUE  = HexColor('#2563eb')
+    C_GRAY  = HexColor('#64748b')
+
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer, pagesize=letter,
+        topMargin=0.55 * inch, bottomMargin=0.55 * inch,
+        leftMargin=0.75 * inch, rightMargin=0.75 * inch
+    )
+    story = []
+
+    # Report header strip
+    hdr_tbl = Table(
+        [[Paragraph('CANDIDATE MATCH REPORT',
+                    ParagraphStyle('_HR2', fontSize=9, textColor=RL_WHITE,
+                                   fontName='Helvetica-Bold', alignment=TA_CENTER))]],
+        colWidths=[7.0 * inch], rowHeights=[24]
+    )
+    hdr_tbl.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, -1), C_NAVY),
+        ('VALIGN',     (0, 0), (-1, -1), 'MIDDLE'),
+    ]))
+    story.append(hdr_tbl)
+    story.append(Spacer(1, 0.18 * inch))
+
+    # Candidate name + contact — explicit rowHeights guarantee no overlap
+    _cn2_rows   = []
+    _cn2_rh     = []
+    _cn2_rows.append([Paragraph(
+        resume_dict.get('full_name', ''),
+        ParagraphStyle('_CN2', fontSize=22, fontName='Helvetica-Bold',
+                        textColor=C_NAVY, alignment=TA_CENTER, leading=28))])
+    _cn2_rh.append(0.48 * inch)   # 34.6 pt — fits 22 pt font centred
+    if resume_dict.get('title'):
+        _cn2_rows.append([Paragraph(
+            resume_dict['title'],
+            ParagraphStyle('_CR2', fontSize=10, textColor=C_GRAY,
+                            alignment=TA_CENTER, leading=15))])
+        _cn2_rh.append(0.28 * inch)
+    _seen_cp2 = set()
+    _contact2  = []
+    for _f in [resume_dict.get('email'), resume_dict.get('phone'),
+                resume_dict.get('location')]:
+        for _tok in (_f or '').replace('|', '\n').split('\n'):
+            _tok = _tok.strip()
+            if _tok and _tok not in _seen_cp2:
+                _seen_cp2.add(_tok)
+                _contact2.append(_tok)
+    _contact2 = _contact2[:4]
+    if _contact2:
+        _cn2_rows.append([Paragraph(
+            '  |  '.join(_contact2),
+            ParagraphStyle('_CC2', fontSize=8.5, textColor=C_GRAY,
+                            alignment=TA_CENTER, leading=12))])
+        _cn2_rh.append(0.24 * inch)
+    _cn2_tbl = Table(_cn2_rows, colWidths=[7.0 * inch], rowHeights=_cn2_rh)
+    _cn2_tbl.setStyle(TableStyle([
+        ('ALIGN',         (0, 0), (-1, -1), 'CENTER'),
+        ('VALIGN',        (0, 0), (-1, -1), 'MIDDLE'),
+        ('TOPPADDING',    (0, 0), (-1, -1), 0),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
+        ('LEFTPADDING',   (0, 0), (-1, -1), 0),
+        ('RIGHTPADDING',  (0, 0), (-1, -1), 0),
+    ]))
+    story.append(_cn2_tbl)
+    story.append(Spacer(1, 0.15 * inch))
+    story.append(_pdf_hr(C_BLUE, 1.2))
+    story.append(Spacer(1, 0.08 * inch))
+
+    # Compared-against label
+    story.append(Paragraph(
+        f'Compared Against:  <b>{jd_dict.get("title", "")}</b>'
+        f'  ·  {jd_dict.get("category", "")}',
+        ParagraphStyle('_CAL', fontSize=9.5, textColor=C_GRAY, spaceAfter=10)
+    ))
+
+    # Detailed match section
+    story.extend(_build_match_detail_story(resume_dict, jd_dict, sc, rank=None))
+
+    # Footer
+    story.append(Spacer(1, 0.2 * inch))
+    story.append(_pdf_hr())
+    story.append(Paragraph(
+        f'Generated by Resume Profile Manager  ·  '
+        f'{resume_dict.get("full_name", "")} vs {jd_dict.get("title", "")}',
+        ParagraphStyle('_Ft2', fontSize=7.5, textColor=C_GRAY, alignment=TA_CENTER)
+    ))
+
+    doc.build(story)
+    buffer.seek(0)
+    cname = resume_dict.get('full_name', 'candidate').replace(' ', '_')
+    jname = jd_dict.get('title', 'role').replace(' ', '_')
     return send_file(
-        buffer,
-        mimetype='application/pdf',
-        as_attachment=True,
-        download_name=filename
+        buffer, mimetype='application/pdf', as_attachment=True,
+        download_name=f'{cname}_vs_{jname}_report.pdf'
     )
 
 
@@ -6653,7 +7135,7 @@ def process_raw_files():
 
 
 @app.route("/api/export-compare-pdf", methods=["POST"])
-def export_compare_pdf():
+def export_bulk_compare_pdf():
     """Generate a PDF from bulk-compare results for download."""
     from reportlab.platypus import Table, TableStyle, HRFlowable
     from reportlab.lib import colors as rl_colors
@@ -7198,7 +7680,7 @@ PREDEFINED_JDS = [
     {
         "title": "Software Developer",
         "role": "Software Developer",
-        "category": "IT Roles",
+        "category": "IT Technology",
         "responsibilities": (
             "Design, develop, test, and maintain software applications\n"
             "Write clean, efficient, and well-documented code\n"
@@ -7222,7 +7704,7 @@ PREDEFINED_JDS = [
     {
         "title": "Full Stack Developer",
         "role": "Full Stack Developer",
-        "category": "IT Roles",
+        "category": "IT Technology",
         "responsibilities": (
             "Develop both front-end and back-end components of web applications\n"
             "Design and implement RESTful APIs and microservices\n"
@@ -7244,7 +7726,7 @@ PREDEFINED_JDS = [
     {
         "title": "DevOps Engineer",
         "role": "DevOps Engineer",
-        "category": "IT Roles",
+        "category": "IT Technology",
         "responsibilities": (
             "Design and implement CI/CD pipelines\n"
             "Manage cloud infrastructure and containerized environments\n"
@@ -7266,7 +7748,7 @@ PREDEFINED_JDS = [
     {
         "title": "QA Engineer",
         "role": "QA Engineer",
-        "category": "IT Roles",
+        "category": "IT Technology",
         "responsibilities": (
             "Design, develop, and execute test cases and test plans\n"
             "Perform manual and automated testing of software applications\n"
@@ -7289,7 +7771,7 @@ PREDEFINED_JDS = [
     {
         "title": "Data Analyst",
         "role": "Data Analyst",
-        "category": "IT Roles",
+        "category": "IT Technology",
         "responsibilities": (
             "Collect, process, and analyze large datasets to extract meaningful insights\n"
             "Create dashboards and visualizations using BI tools\n"
@@ -7312,7 +7794,7 @@ PREDEFINED_JDS = [
     {
         "title": "AI/ML Engineer",
         "role": "AI/ML Engineer",
-        "category": "IT Roles",
+        "category": "IT Technology",
         "responsibilities": (
             "Design, develop, and deploy machine learning models\n"
             "Work with large datasets to train and evaluate ML models\n"
@@ -7334,7 +7816,7 @@ PREDEFINED_JDS = [
     {
         "title": "SAP Consultant",
         "role": "SAP Consultant",
-        "category": "IT Roles",
+        "category": "IT Technology",
         "responsibilities": (
             "Implement, configure, and support SAP modules\n"
             "Analyze business requirements and translate them into SAP solutions\n"
@@ -8071,7 +8553,18 @@ def _ensure_department_col():
         pass
 
 
+def _migrate_jd_category_it_roles():
+    try:
+        with db_conn() as conn:
+            conn.execute(
+                "UPDATE job_description SET category = 'IT Technology' WHERE category = 'IT Roles'"
+            )
+    except Exception:
+        pass
+
+
 _ensure_department_col()
+_migrate_jd_category_it_roles()
 
 
 DEPARTMENTS = ["IT", "QA", "Finance", "HR", "Sales", "Marketing", "Operations", "Other"]
@@ -8496,4 +8989,4 @@ def user_delete(user_id):
 
 
 if __name__ == "__main__":
-    app.run(debug=True, use_reloader=False, port=5001)
+    app.run(debug=True, use_reloader=False, port=5001, host='0.0.0.0')
