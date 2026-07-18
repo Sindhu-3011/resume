@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}User Management | Resume Profile{% endblock %}
+{% block content %}
+
+<section class="hero card">
+    <div>
+        <p class="eyebrow">Accounts &amp; Access</p>
+        <h1>User Management</h1>
+        <p class="muted">Add, edit, or disable the accounts allowed to sign in to this app.</p>
+    </div>
+    <a class="button" href="{{ url_for('user_add') }}">+ Add New User</a>
+</section>
+
+{% if users %}
+<div class="card" style="padding:0; overflow:hidden;">
+    <div style="overflow-x:auto;">
+    <table class="jdm-table">
+        <thead>
+            <tr>
+                <th>#</th>
+                <th>Username</th>
+                <th>Full Name</th>
+                <th>Email</th>
+                <th>Role</th>
+                <th>Status</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for u in users %}
+            <tr>
+                <td class="jdm-td-num">{{ loop.index }}</td>
+                <td>{{ u.username }}</td>
+                <td>{{ u.full_name or '—' }}</td>
+                <td>{{ u.email or '—' }}</td>
+                <td>
+                    <span class="jdm-cat-badge {% if u.role == 'admin' %}jdm-cat-it{% endif %}">
+                        {{ u.role }}
+                    </span>
+                </td>
+                <td>
+                    {% if u.is_active %}
+                        <span class="jdm-cat-badge jdm-cat-val">Active</span>
+                    {% else %}
+                        <span class="jdm-cat-badge">Disabled</span>
+                    {% endif %}
+                </td>
+                <td class="jdm-actions">
+                    <a class="button secondary jdm-btn" href="{{ url_for('user_edit', user_id=u.id) }}">Edit</a>
+                    <form method="post" action="{{ url_for('user_delete', user_id=u.id) }}" style="display:inline"
+                          onsubmit="return confirm('Delete user &quot;{{ u.username }}&quot;? This cannot be undone.')">
+                        <button type="submit" class="button danger jdm-btn" {% if u.username == current_username %}disabled title="You can't delete your own account while logged in"{% endif %}>Delete</button>
+                    </form>
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    </div>
+</div>
+{% else %}
+<div class="card" style="text-align:center; padding:48px 24px;">
+    <p style="font-size:3rem; margin-bottom:12px;">&#128100;</p>
+    <h3>No users yet</h3>
+    <p class="muted" style="margin-bottom:20px;">Click "Add New User" to create the first account.</p>
+    <a class="button" href="{{ url_for('user_add') }}">+ Add New User</a>
+</div>
+{% endif %}
+
+{% endblock %}

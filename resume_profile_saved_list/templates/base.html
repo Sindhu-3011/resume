@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{% block title %}Resume Profile{% endblock %}</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=12">
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=13">
 </head>
 <body>
 <div class="app-layout">
@@ -27,17 +27,27 @@
 
             <p class="nav-section-label">Manage</p>
 
-            <a href="{{ url_for('upload_files') }}"
-               class="nav-item {{ 'active' if request.endpoint == 'upload_files' else '' }}">
-                <span class="nav-icon">&#128193;</span>
-                <span class="nav-label">Upload Files</span>
-            </a>
-
             <a href="{{ url_for('jd_management') }}"
                class="nav-item {{ 'active' if request.endpoint in ('jd_management','jd_add','jd_detail','jd_edit') else '' }}">
                 <span class="nav-icon">&#128221;</span>
                 <span class="nav-label">JD Management</span>
             </a>
+
+            <a href="{{ url_for('requirement_management') }}"
+               class="nav-item {{ 'active' if request.endpoint in ('requirement_management','requirement_add','requirement_detail','requirement_edit') else '' }}"
+               title="Requirement Management">
+                <span class="nav-icon">&#128188;</span>
+                <span class="nav-label">Requirements</span>
+            </a>
+
+            {% if current_role == 'admin' %}
+            <a href="{{ url_for('user_management') }}"
+               class="nav-item {{ 'active' if request.endpoint in ('user_management','user_add','user_edit') else '' }}"
+               title="User Management">
+                <span class="nav-icon">&#128100;</span>
+                <span class="nav-label">Users</span>
+            </a>
+            {% endif %}
 
             <p class="nav-section-label">Profiles</p>
 
@@ -48,7 +58,7 @@
             </a>
 
             <a href="{{ url_for('edit_resume') }}"
-               class="nav-item {{ 'active' if request.endpoint == 'edit_resume' and not request.view_args.get('resume_id') else '' }}">
+               class="nav-item {{ 'active' if (request.endpoint == 'edit_resume' and not request.view_args.get('resume_id')) or request.endpoint == 'upload_files' else '' }}">
                 <span class="nav-icon">&#10010;</span>
                 <span class="nav-label">Add Profile</span>
             </a>
@@ -68,10 +78,27 @@
                 <button class="menu-toggle" type="button" aria-label="Toggle menu" onclick="document.body.classList.toggle('menu-open')">&#9776;</button>
                 <div class="menu">
                     <a href="{{ url_for('dashboard') }}">&#128202; Dashboard</a>
-                    <a href="{{ url_for('upload_files') }}">&#128193; Upload Files</a>
+                    <a href="{{ url_for('jd_management') }}">&#128221; JD Management</a>
+                    <a href="{{ url_for('requirement_management') }}">&#128188; Requirement Management</a>
+                    {% if current_role == 'admin' %}
+                    <a href="{{ url_for('user_management') }}">&#128100; User Management</a>
+                    {% endif %}
                     <a href="{{ url_for('profile_list') }}">&#128203; View Profiles</a>
                     <a href="{{ url_for('edit_resume') }}">&#8679; Add Profile</a>
+                    {% if current_username %}
+                    <a href="{{ url_for('logout') }}">&#8630; Logout</a>
+                    {% endif %}
                 </div>
+                {% if current_username %}
+                <div class="navbar-account">
+                    <span class="navbar-account-avatar">{{ (current_full_name or current_username)[0]|upper }}</span>
+                    <span class="navbar-account-text">
+                        <span class="navbar-account-name" title="{{ current_full_name or current_username }}">{{ current_full_name or current_username }}</span>
+                        <span class="navbar-account-role">{{ current_role|capitalize }}</span>
+                    </span>
+                    <a class="navbar-logout" href="{{ url_for('logout') }}" title="Logout" aria-label="Logout">&#9211;</a>
+                </div>
+                {% endif %}
             </nav>
         </header>
 

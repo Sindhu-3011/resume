@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}{% if user %}Edit User{% else %}Add User{% endif %} | Resume Profile{% endblock %}
+{% block content %}
+
+<section class="hero card">
+    <div>
+        <p class="eyebrow">{% if user %}Edit{% else %}New{% endif %} User</p>
+        <h1>{% if user %}Edit: {{ user.username }}{% else %}Add User{% endif %}</h1>
+        <p class="muted">{% if user %}Update this account's details below. Leave the password blank to keep it unchanged.{% else %}Fill in the new account's details below.{% endif %}</p>
+    </div>
+    <a class="button secondary" href="{{ url_for('user_management') }}">&larr; Back to Users</a>
+</section>
+
+<form class="card form-grid" method="post">
+
+    <div>
+        <label for="username">Username {% if not user %}<span style="color:#c0182c;">*</span>{% endif %}</label>
+        {% if user %}
+        <input id="username" value="{{ user.username }}" disabled>
+        {% else %}
+        <input id="username" name="username" required placeholder="e.g. jsmith">
+        {% endif %}
+    </div>
+
+    <div>
+        <label for="full_name">Full Name</label>
+        <input id="full_name" name="full_name" placeholder="e.g. Jane Smith"
+               value="{{ user.full_name if user else '' }}">
+    </div>
+
+    <div>
+        <label for="email">Email</label>
+        <input id="email" name="email" type="email" placeholder="e.g. jane@company.com"
+               value="{{ user.email if user else '' }}">
+    </div>
+
+    <div>
+        <label for="role">Role</label>
+        <select id="role" name="role" class="form-select">
+            {% for r in roles %}
+            <option value="{{ r }}" {% if user and user.role == r %}selected{% elif not user and r == 'user' %}selected{% endif %}>{{ r|capitalize }}</option>
+            {% endfor %}
+        </select>
+    </div>
+
+    <div>
+        <label for="password">{% if user %}New Password{% else %}Password <span style="color:#c0182c;">*</span>{% endif %}</label>
+        <input id="password" name="password" type="password" autocomplete="new-password"
+               placeholder="{% if user %}Leave blank to keep current password{% else %}Set a password{% endif %}"
+               {% if not user %}required{% endif %}>
+    </div>
+
+    {% if user %}
+    <div>
+        <label for="is_active">Status</label>
+        <select id="is_active" name="is_active" class="form-select">
+            <option value="on" {% if user.is_active %}selected{% endif %}>Active</option>
+            <option value="" {% if not user.is_active %}selected{% endif %}>Disabled</option>
+        </select>
+    </div>
+    {% endif %}
+
+    <div class="full actions">
+        <button class="button" type="submit">{% if user %}Save Changes{% else %}Add User{% endif %}</button>
+        <a class="button secondary" href="{{ url_for('user_management') }}">Cancel</a>
+    </div>
+
+</form>
+{% endblock %}

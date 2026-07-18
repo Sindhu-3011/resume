@@ -85,6 +85,16 @@
         </div>
         {% endif %}
 
+        <!-- NEW: Top matching resumes for this JD (reverse of the manual pick-a-resume flow below) -->
+        <div class="card">
+            <div class="section-header" style="margin-bottom:14px;">
+                <div class="section-icon icon-projects">&#127942;</div>
+                <h2>Top Matching Resumes</h2>
+            </div>
+            <p class="muted" style="font-size:0.9rem; margin-bottom:14px;">Automatically score every stored resume against this JD and show the top 3 matches.</p>
+            <a class="button" style="background:#7c3aed; width:100%; text-align:center;" href="{{ url_for('jd_top_matches', jd_id=jd.id) }}">Find Top 3 Matches</a>
+        </div>
+
         <!-- Compare against a resume -->
         <div class="card">
             <div class="section-header" style="margin-bottom:14px;">

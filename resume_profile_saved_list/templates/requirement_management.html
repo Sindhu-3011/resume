@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}Requirement Management | Resume Profile{% endblock %}
+{% block content %}
+
+<section class="hero card">
+    <div>
+        <p class="eyebrow">Client Requisitions</p>
+        <h1>Requirement Management</h1>
+        <p class="muted">Track open client requirements: profiles shared, interviewed, and offered.</p>
+    </div>
+    <a class="button" href="{{ url_for('requirement_add') }}">+ Add New Requirement</a>
+</section>
+
+{% if requirements %}
+<div class="card" style="padding:0; overflow:hidden;">
+    <div style="overflow-x:auto;">
+    <table class="jdm-table" id="req-table">
+        <thead>
+            <tr>
+                <th>#</th>
+                <th>Requirement ID</th>
+                <th>Requirement Name</th>
+                <th>Client</th>
+                <th>Division/Group</th>
+                <th># of Requirement</th>
+                <th>Status</th>
+                <th># of Profiles Shared</th>
+                <th>Interviewed</th>
+                <th>Offered</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for r in requirements %}
+            <tr>
+                <td class="jdm-td-num">{{ loop.index }}</td>
+                <td><a class="jdm-link" href="{{ url_for('requirement_detail', req_id=r.id) }}">{{ r.requirement_code }}</a></td>
+                <td>{{ r.requirement_name }}</td>
+                <td>{{ r.client or '—' }}</td>
+                <td>{{ r.division or '—' }}</td>
+                <td>{{ r.num_requirement }}</td>
+                <td>
+                    <span class="jdm-cat-badge {% if r.status == 'Open' %}jdm-cat-it{% elif r.status == 'Filled' %}jdm-cat-val{% else %}{% endif %}">
+                        {{ r.status }}
+                    </span>
+                </td>
+                <td>{{ r.profiles_shared }}</td>
+                <td>{{ r.interviewed }}</td>
+                <td>{{ r.offered }}</td>
+                <td class="jdm-actions">
+                    <a class="button secondary jdm-btn" href="{{ url_for('requirement_detail', req_id=r.id) }}">View</a>
+                    <a class="button secondary jdm-btn" href="{{ url_for('requirement_edit', req_id=r.id) }}">Edit</a>
+                    <form method="post" action="{{ url_for('requirement_delete', req_id=r.id) }}" style="display:inline"
+                          onsubmit="return confirm('Delete this requirement? This cannot be undone.')">
+                        <button type="submit" class="button danger jdm-btn">Delete</button>
+                    </form>
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    </div>
+</div>
+{% else %}
+<div class="card" style="text-align:center; padding:48px 24px;">
+    <p style="font-size:3rem; margin-bottom:12px;">&#128203;</p>
+    <h3>No Requirements yet</h3>
+    <p class="muted" style="margin-bottom:20px;">Click "Add New Requirement" to start tracking a client requisition.</p>
+    <a class="button" href="{{ url_for('requirement_add') }}">+ Add New Requirement</a>
+</div>
+{% endif %}
+
+{% endblock %}

@@ -1,0 +1,125 @@
+{% extends "base.html" %}
+{% block title %}Top Matches | {{ jd.title }}{% endblock %}
+{% block content %}
+
+<section class="hero card">
+    <div>
+        <p class="eyebrow">Top Matching Resumes</p>
+        <h1>{{ jd.title }}</h1>
+        <p class="muted">Scored {{ total_scored }} stored resume(s) against this JD — showing the top {{ top_matches | length }}.
+            <span class="jdm-cat-badge {% if jd.category == 'Validation Roles' %}jdm-cat-val{% else %}jdm-cat-it{% endif %}" style="margin-left:8px;">
+                {{ jd.category }}
+            </span>
+        </p>
+    </div>
+    <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:flex-start;">
+        <a class="button secondary" href="{{ url_for('jd_detail', jd_id=jd.id) }}">&#8592; Back to JD</a>
+    </div>
+</section>
+
+{% if not top_matches %}
+<div class="card" style="text-align:center; padding:40px 0;">
+    <p class="muted">No resumes are stored in the system yet.</p>
+</div>
+{% else %}
+<div class="dash-col">
+    {% for entry in top_matches %}
+    {% set resume = entry.resume %}
+    {% set result = entry.score %}
+    {% set stroke_color = '#15803d' if result.match_level_color == 'green'
+                     else '#1d4ed8' if result.match_level_color == 'blue'
+                     else '#d97706' if result.match_level_color == 'orange'
+                     else '#dc2626' %}
+    {% set shown_matched = result.matched_skills[:10] %}
+    {% set shown_missing = result.missing_skills[:10] %}
+    <div class="card">
+
+        <!-- Top row: identity + overall score -->
+        <div style="display:flex; align-items:center; gap:20px; flex-wrap:wrap;">
+            <div style="font-size:1.3rem; font-weight:700; color:#9ca3af; width:34px; text-align:center; flex-shrink:0;">
+                #{{ loop.index }}
+            </div>
+
+            <span class="profile-avatar" style="width:48px;height:48px;font-size:1.1rem;flex-shrink:0;">
+                {{ (resume.full_name or 'U')[0] | upper }}
+            </span>
+
+            <div style="flex:1; min-width:220px;">
+                <strong style="display:block; font-size:1.05rem;">{{ resume.full_name or '—' }}</strong>
+                <span class="text-muted" style="font-size:0.88rem;">{{ resume.title or '—' }}</span>
+                {% if resume.location %}
+                <span class="text-muted" style="font-size:0.82rem; display:block;">{{ resume.location }}</span>
+                {% endif %}
+            </div>
+
+            <div style="text-align:center; min-width:90px;">
+                <div style="font-size:1.4rem; font-weight:700; color:{{ stroke_color }};">{{ result.match_percentage }}%</div>
+                <div class="cmr-level-badge cmr-level-{{ result.match_level_color }}" style="font-size:0.75rem;">{{ result.match_level }}</div>
+            </div>
+
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                <a class="button secondary" style="padding:6px 14px; font-size:0.85rem;"
+                   href="{{ url_for('compare_result', resume_id=resume.id, jd_id=jd.id) }}">Full Comparison</a>
+                <a class="button secondary" style="padding:6px 14px; font-size:0.85rem;"
+                   href="{{ url_for('profile_detail', resume_id=resume.id) }}">View Profile</a>
+            </div>
+        </div>
+
+        <!-- Sub-score bars -->
+        <div class="cmr-sub-scores" style="margin-top:16px;">
+            <div class="cmr-sub-row">
+                <span class="cmr-sub-label">Skills Match</span>
+                <div class="cmr-sub-bar-track">
+                    <div class="cmr-sub-bar-fill" style="width:{{ result.skills_match_percentage }}%; background:{{ stroke_color }};"></div>
+                </div>
+                <span class="cmr-sub-pct">{{ result.skills_match_percentage }}%</span>
+            </div>
+            <div class="cmr-sub-row">
+                <span class="cmr-sub-label">Experience</span>
+                <div class="cmr-sub-bar-track">
+                    <div class="cmr-sub-bar-fill" style="width:{{ result.experience_match_percentage }}%; background:#7c3aed;"></div>
+                </div>
+                <span class="cmr-sub-pct">{{ result.experience_match_percentage }}%</span>
+            </div>
+        </div>
+        {% if result.experience_note %}
+        <p class="muted" style="font-size:0.82rem; margin-top:6px;">{{ result.experience_note }}</p>
+        {% endif %}
+
+        <!-- Matched / missing skill tags -->
+        <div style="display:flex; gap:20px; flex-wrap:wrap; margin-top:14px;">
+            <div style="flex:1; min-width:220px;">
+                <span style="font-size:0.8rem; font-weight:600; color:#15803d;">&#10003; Matched ({{ result.matched_count }})</span>
+                <div class="cmr-tag-wrap" style="margin-top:6px;">
+                    {% for skill in shown_matched %}
+                    <span class="cmr-tag cmr-tag-match">{{ skill }}</span>
+                    {% endfor %}
+                    {% if result.matched_count > shown_matched | length %}
+                    <span class="cmr-tag" style="opacity:0.7;">+{{ result.matched_count - shown_matched | length }} more</span>
+                    {% endif %}
+                    {% if not result.matched_skills %}
+                    <span class="muted" style="font-size:0.85rem;">None</span>
+                    {% endif %}
+                </div>
+            </div>
+            <div style="flex:1; min-width:220px;">
+                <span style="font-size:0.8rem; font-weight:600; color:#dc2626;">&#10007; Missing ({{ result.missing_count }})</span>
+                <div class="cmr-tag-wrap" style="margin-top:6px;">
+                    {% for skill in shown_missing %}
+                    <span class="cmr-tag cmr-tag-miss">{{ skill }}</span>
+                    {% endfor %}
+                    {% if result.missing_count > shown_missing | length %}
+                    <span class="cmr-tag" style="opacity:0.7;">+{{ result.missing_count - shown_missing | length }} more</span>
+                    {% endif %}
+                    {% if not result.missing_skills %}
+                    <span class="muted" style="font-size:0.85rem; color:#15803d; font-weight:600;">All required skills matched!</span>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+
+{% endblock %}

@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, send_from_directory, abort, send_file
+from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, send_from_directory, abort, send_file, session
 import psycopg2
 from io import BytesIO
 from reportlab.lib.pagesizes import letter, A4
@@ -22,6 +22,7 @@ import urllib.request
 import urllib.error
 from contextlib import contextmanager
 from werkzeug.utils import secure_filename
+from werkzeug.security import generate_password_hash, check_password_hash
 from PyPDF2 import PdfReader
 from docx import Document
 
@@ -216,7 +217,7 @@ SECTION_ALIASES = {
         "education", "academic background", "qualifications",
         "academic qualification", "academics",
         "educational background", "academic credentials",
-        "educational qualifications", "academic details",
+        "educational qualifications", "educational qualification", "academic details",
         "educational details", "academic qualifications",
         "education details", "qualification details",
         "academic history", "academic information",
@@ -732,10 +733,20 @@ def _detect_col_gutter_words(page):
     # The gutter must be almost empty (≤1 % of words straddle it).
     if best_cross > max(2, n * 0.01):
         return None
-    # Both columns must hold a real share of the content.
+    # Both columns must hold a real share of the content. A narrow sidebar
+    # (short skill/contact tags, or just a couple of section headings on an
+    # otherwise sparse page) legitimately holds far fewer words than a wide
+    # prose column even when the split is completely genuine — a flat 15%
+    # share was rejecting real sidebars that clear a clean, zero-crossing
+    # gutter (the strongest signal of a true column boundary) purely for
+    # being word-sparse, and a flat percentage doesn't scale between a dense
+    # page and a mostly-empty one anyway. A small absolute floor does the
+    # same job (filters out a single stray word/artifact) without penalizing
+    # sparse sidebars on either dense or sparse pages.
     left  = sum(1 for w in words if w[2] <= best_x)
     right = sum(1 for w in words if w[0] >= best_x)
-    if left < n * 0.15 or right < n * 0.15:
+    min_side = max(15, n * 0.05)
+    if left < min_side or right < min_side:
         return None
 
     # Final guard: in a true 2-column layout each line lives mostly in one
@@ -1429,11 +1440,18 @@ def _extract_canvas_docx(body):
             box["kind"] = "experience_content"
             continue
 
-        # Section label (matches SECTION_ALIASES, short text)
+        # Section label (matches SECTION_ALIASES, short text). Some templates put
+        # the heading AND its list content in one shape (e.g. "Soft Skills" +
+        # its bullet items all in a single sidebar text box) rather than in
+        # separate boxes — keep any lines after the heading as that section's
+        # own content instead of discarding them just because the box also
+        # happens to start with a heading-shaped first line.
         sec = canonical_section_name(first)
         if sec and len(first.split()) <= 4:
             box["kind"]    = "label"
             box["section"] = sec
+            if len(box["lines"]) > 1:
+                box["extra_text"] = "\n".join(box["lines"][1:])
             continue
 
         # Contact info (phone / email present)
@@ -1501,6 +1519,8 @@ def _extract_canvas_docx(body):
     lbl = next((b for b in boxes if b.get("kind") == "label" and b.get("section") == "summary"), None)
     if lbl:
         parts.append(lbl["lines"][0])
+        if lbl.get("extra_text"):
+            parts.append(lbl["extra_text"])
     _add(b for b in boxes if b.get("kind") == "summary")
 
     # 4. Experience — all explicitly-positioned shapes sorted by y (page order)
@@ -1517,12 +1537,17 @@ def _extract_canvas_docx(body):
     edu_lbl = next((b for b in boxes if b.get("kind") == "label" and b.get("section") == "education"), None)
     if edu_lbl:
         parts.append(edu_lbl["lines"][0])
+        if edu_lbl.get("extra_text"):
+            parts.append(edu_lbl["extra_text"])
     _add(b for b in boxes if b.get("kind") == "education")
 
-    # 6. Skills
-    sk_lbl = next((b for b in boxes if b.get("kind") == "label" and b.get("section") == "skills"), None)
-    if sk_lbl:
+    # 6. Skills — a template may have several labelled sub-groups sharing the
+    # "skills" section (e.g. "Soft Skills" and "Hard Skills" as separate boxes);
+    # emit every one of them, not just the first found.
+    for sk_lbl in (b for b in boxes if b.get("kind") == "label" and b.get("section") == "skills"):
         parts.append(sk_lbl["lines"][0])
+        if sk_lbl.get("extra_text"):
+            parts.append(sk_lbl["extra_text"])
     _add(b for b in boxes if b.get("kind") == "skills")
 
     return "\n".join(parts)
@@ -1548,7 +1573,13 @@ def extract_text_from_docx(path):
                                 parts.append(t)
                         for tbl in hdr.tables:
                             for row in tbl.rows:
-                                row_text = " | ".join(c.text.strip() for c in row.cells if c.text.strip())
+                                # Join cells with a newline, not " | " — a space-pipe join
+                                # glues the LAST line of one cell onto the FIRST line of the
+                                # next cell with no line break between them (e.g. a sidebar
+                                # cell's LinkedIn line fusing onto the main cell's first
+                                # summary line), which hides that fused line from every
+                                # downstream line-based heuristic (name/contact detection).
+                                row_text = "\n".join(c.text.strip() for c in row.cells if c.text.strip())
                                 if row_text:
                                     parts.append(row_text)
         except Exception:
@@ -1562,7 +1593,10 @@ def extract_text_from_docx(path):
             elif child.tag == qn("w:tbl"):
                 tbl = DocxTable(child, doc)
                 for row in tbl.rows:
-                    row_text = " | ".join(cell.text.strip() for cell in row.cells if cell.text.strip())
+                    # See note above — newline join prevents cross-column line-fusion,
+                    # which is the main reason 2-column sidebar DOCX templates (name,
+                    # title, contact block in one cell) lose their identity fields.
+                    row_text = "\n".join(cell.text.strip() for cell in row.cells if cell.text.strip())
                     if row_text:
                         parts.append(row_text)
 
@@ -1919,6 +1953,23 @@ _NAME_STOPWORDS = frozenset({
     "achievement", "language", "hobby", "extracurricular", "tools", "applications",
     "core", "section", "header", "details", "accomplishment", "award",
     "data", "analysis", "analyst", "support", "domain", "domains",
+    # Job-title / designation words — these appear bold near the top of many
+    # resumes (right under the name) and were being mistaken for the name itself.
+    "lead", "engineer", "specialist", "manager", "consultant", "developer",
+    "officer", "coordinator", "administrator", "director", "executive",
+    "associate", "senior", "junior", "assistant", "validation", "regulatory",
+    "affairs", "quality", "assurance", "registration", "compliance",
+    "architect", "leadership", "scientist", "technician", "supervisor",
+    "annexure", "appendix", "gamp", "cfr", "ich", "gxp", "fda", "qms",
+    "sop", "capa", "iso",
+})
+
+# Degree/qualification abbreviations (dots stripped) — e.g. "M.Sc.", "B.Tech"
+# were passing the name heuristic because they're short, bold, all-alpha tokens.
+_DEGREE_ABBR = frozenset({
+    "msc", "bsc", "mtech", "btech", "be", "me", "mba", "bba", "bca", "mca",
+    "phd", "ma", "ba", "bcom", "mcom", "llb", "llm", "md", "bds", "mds",
+    "bpharm", "mpharm", "bed", "med",
 })
 
 
@@ -1943,6 +1994,9 @@ def _looks_like_name(line):
     lower_words = {w.lower().strip(".,;:-") for w in words}
     if lower_words & _NAME_STOPWORDS:
         return False
+    alpha_words = {re.sub(r"[^a-z]", "", w.lower()) for w in words}
+    if alpha_words & _DEGREE_ABBR:
+        return False
     return bool(words) and words[0][0].isupper()
 
 
@@ -1951,6 +2005,14 @@ _TITLE_SECTION_WORDS = frozenset({
     "skills", "certifications", "projects", "employment", "history", "background",
     "qualifications", "competencies", "expertise", "achievements", "declaration",
     "references", "hobbies", "interests", "languages",
+})
+
+_LANGUAGE_NAMES = frozenset({
+    "english", "tamil", "hindi", "telugu", "kannada", "malayalam", "marathi",
+    "gujarati", "bengali", "punjabi", "urdu", "odia", "assamese", "sanskrit",
+    "konkani", "sindhi", "kashmiri", "manipuri", "bodo", "dogri", "maithili",
+    "french", "german", "spanish", "italian", "portuguese", "russian",
+    "mandarin", "chinese", "japanese", "korean", "arabic", "dutch",
 })
 
 
@@ -1972,6 +2034,11 @@ def _looks_like_title(line):
     # Reject common resume section headings (e.g. "PROFILE SUMMARY", "WORK EXPERIENCE")
     lower_words = {w.lower().rstrip('.:') for w in words}
     if len(lower_words & _TITLE_SECTION_WORDS) >= 1 and len(words) <= 3:
+        return False
+    # Reject language lists (e.g. "English Tamil", "Hindi French German") — these
+    # get mistaken for a short Title-Case job title when a resume has no real
+    # headline and the fallback scan picks up whatever short line it can find.
+    if lower_words and lower_words <= _LANGUAGE_NAMES:
         return False
     return any(w[0].isupper() for w in words if w and w[0].isalpha())
 
@@ -1999,6 +2066,20 @@ def _extract_name_from_header_line(lines):
     return ""
 
 
+def _fuzzy_abbr_pattern(abbr):
+    """Build a regex for a degree abbreviation that tolerates the dots/spaces
+    resumes commonly insert between its letters (e.g. "M.Sc.", "B. Tech")."""
+    return r'\.?\s*'.join(re.escape(ch) for ch in abbr)
+
+
+_DEGREE_FIELD_PREFIX_RE = re.compile(
+    r'\b(?:' + '|'.join(
+        _fuzzy_abbr_pattern(a) for a in sorted(_DEGREE_ABBR, key=len, reverse=True)
+    ) + r')\.?\s*(?:degree\s*)?in\s*$',
+    re.I,
+)
+
+
 def _extract_title_from_para(text):
     """
     Extract a job title embedded in a summary sentence, e.g.:
@@ -2017,7 +2098,13 @@ def _extract_title_from_para(text):
         if title_m:
             candidate = title_m.group(1).strip()
             words = candidate.split()
-            if 2 <= len(words) <= 7:
+            # Reject "<degree> in <field>" phrasing (e.g. "M.Sc. in Analytical
+            # Chemistry with 9 years of ... experience") — the captured phrase
+            # is a field of study, not a job title, when it's immediately
+            # preceded by a degree abbreviation + "in".
+            preceding = before[:title_m.start()]
+            if (2 <= len(words) <= 7
+                    and not _DEGREE_FIELD_PREFIX_RE.search(preceding)):
                 return candidate
     # Pattern 2: as a/an <Title>
     m2 = re.search(
@@ -2026,7 +2113,12 @@ def _extract_title_from_para(text):
     )
     if m2:
         candidate = m2.group(1).strip()
-        if 1 <= len(candidate.split()) <= 7:
+        # Require >= 2 words, same as Pattern 1 above — a single word here
+        # (e.g. "Lead" from "as a Lead/Design Engineer", where the capture
+        # stops at the slash) is almost always a truncated fragment, not a
+        # real title, and blocks the fuller top-of-resume tagline title
+        # (Title priority 2) from ever being tried.
+        if 2 <= len(candidate.split()) <= 7:
             return candidate
     return ""
 
@@ -2312,11 +2404,21 @@ def parse_resume_text(text, name_hint=None):
     # Prevents professional summary sentences from being assigned as the name.
     # Prioritize all-caps names (likely to be actual names in resume headers)
     if not parsed["full_name"]:
-        # First pass: look for all-caps names in FIRST 10 lines (e.g., "SIVARANJANI D")
-        for _nl in useful_top_lines[:10]:
-            if _nl.isupper() and _looks_like_name(_nl):
-                parsed["full_name"] = _nl[:80]
+        # Pass 0: the name is sometimes combined with a degree/title on one line
+        # (e.g. "GURUVIGNESH Y - B.E MBA(PM) Senior Engineer (R&D Medical Device)").
+        # The parentheses/hyphen make the whole line fail the name check, but the
+        # segment before the first " - "/"–"/"|" separator is often just the name.
+        for _nl in useful_top_lines[:3]:
+            _seg = re.split(r'\s+[-–|]\s+', _nl, maxsplit=1)[0].strip()
+            if _seg and _seg != _nl and _looks_like_name(_seg):
+                parsed["full_name"] = _seg[:80]
                 break
+        # First pass: look for all-caps names in FIRST 10 lines (e.g., "SIVARANJANI D")
+        if not parsed["full_name"]:
+            for _nl in useful_top_lines[:10]:
+                if _nl.isupper() and _looks_like_name(_nl):
+                    parsed["full_name"] = _nl[:80]
+                    break
         # Second pass: look for TWO-WORD names (common name pattern) in first 15 lines
         if not parsed["full_name"]:
             for _nl in useful_top_lines[:15]:
@@ -2345,11 +2447,37 @@ def parse_resume_text(text, name_hint=None):
         parsed["title"] = _extract_title_from_para(text[:700])
     # Title priority 2: first short proper-cased line after the name that reads
     # like a job title (not a summary sentence, not a section heading).
+    # Scoped to the true preamble (lines before the first recognized section
+    # heading) rather than the general-purpose useful_top_lines[:20] window —
+    # once real section content starts (Skills, Personal Details, etc.), a
+    # short Title-Case line found there is a sub-heading, not a job title, and
+    # if the preamble genuinely has no title-like line, it's better to leave
+    # the field blank than guess from unrelated section content.
     if not parsed["title"]:
+        _first_heading_idx = next(
+            (i for i, l in enumerate(lines[:20]) if canonical_section_name(l)),
+            20,
+        )
+        _title_scan_lines = [l for l in useful_top_lines if l in lines[:_first_heading_idx]]
         _name_line = parsed.get("full_name", "")
-        for _tl in useful_top_lines:
+        for _tl in _title_scan_lines:
             if _tl == _name_line:
                 continue
+            # Skip our own OCR-injected "Name:/Email:/Phone:/Location:" label
+            # lines — they must never be mistaken for a job title.
+            if re.match(r'^\s*(name|email|phone|location)\s*:', _tl, re.I):
+                continue
+            # Long taglines often bundle "<Title> | <keyword> | <keyword>..."
+            # or "<Title> – <keyword list>" (e.g. "QA Specialist – Design
+            # Control | Medical Device & IVD Quality") — the combined line
+            # fails _looks_like_title's word-count check even though the
+            # real title segment before the first separator is perfectly
+            # valid on its own. Same separator pattern as the name Pass 0
+            # split above.
+            _tl_seg = re.split(r'\s+[-–|]\s+', _tl, maxsplit=1)[0].strip()
+            if _tl_seg and _tl_seg != _tl and not canonical_section_name(_tl_seg) and _looks_like_title(_tl_seg):
+                parsed["title"] = _tl_seg[:80]
+                break
             if not canonical_section_name(_tl) and _looks_like_title(_tl):
                 parsed["title"] = _tl[:80]
                 break
@@ -2667,6 +2795,105 @@ def _ollama_chat(prompt, *, as_json, num_predict, num_ctx=8192):
         return json.loads(content)
     except (ValueError, TypeError):
         return {}
+
+
+_IDENTITY_FIELDS = ("full_name", "email", "phone", "location", "linkedin")
+
+
+def _validate_identity_field(field, value):
+    """Sanity-check one LLM-returned identity field; return "" if implausible."""
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    if field == "email":
+        return value if re.match(
+            r'^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$', value
+        ) else ""
+    if field == "phone":
+        digits = re.sub(r"\D", "", value)
+        return value if 10 <= len(digits) <= 15 else ""
+    if field == "full_name":
+        if len(value) > 80 or not (1 <= len(value.split()) <= 6):
+            return ""
+        if re.search(r'[@\d]', value):
+            return ""
+        return value[:80]
+    if field == "linkedin":
+        m = re.search(r'linkedin\.com/in/([a-zA-Z0-9\-_%]+)', value, re.I)
+        if m:
+            return "https://www.linkedin.com/in/" + m.group(1)
+        handle = re.sub(r'^https?://(www\.)?linkedin\.com/', '', value, flags=re.I).strip('/')
+        handle = handle[3:] if handle.lower().startswith("in/") else handle
+        if handle and re.match(r'^[a-zA-Z0-9][a-zA-Z0-9\-_%]{2,}$', handle):
+            return "https://www.linkedin.com/in/" + handle
+        return ""
+    if field == "location":
+        if len(value) > 100 or re.search(r'@|https?://', value):
+            return ""
+        return value[:180]
+    return value
+
+
+def _identity_value_grounded(field, value, source_text):
+    """Reject values the model invented instead of read — require the value to
+    actually trace back to the resume text. Small local models will confidently
+    return a plausible-looking placeholder (e.g. "johndoe@example.com") when the
+    real contact info isn't in the text they were given (e.g. it's trapped in an
+    image-based header that OCR hasn't recovered yet); format validity alone
+    can't tell a real value from a fabricated one, only presence in-text can.
+    """
+    text_lower = source_text.lower()
+    if field == "email":
+        local = value.split('@', 1)[0].lower()
+        return local in text_lower
+    if field == "phone":
+        digits = re.sub(r"\D", "", value)
+        text_digits = re.sub(r"\D", "", source_text)
+        return len(digits) >= 7 and digits[-7:] in text_digits
+    if field == "linkedin":
+        handle = value.rstrip('/').rsplit('/', 1)[-1].lower()
+        return handle in text_lower
+    # full_name / location: require at least one significant word to appear —
+    # exact-phrase grounding is too strict since the model may reformat casing/
+    # word order, but a value with zero words present in source is fabricated.
+    words = [w.lower() for w in re.findall(r"[A-Za-z]{3,}", value)]
+    return any(w in text_lower for w in words) if words else False
+
+
+def _ollama_identity_extract(text, missing_fields):
+    """Ask the local LLM for identity fields the rule-based parser couldn't find.
+
+    Runs on its own — independent of the content-field AI budget below — so heavy
+    fields (summary/experience, which can legitimately take most of that budget)
+    never starve name/contact extraction. This is the generalizing fallback for
+    resume layouts that don't match any of the rule-based heuristics, and the ONLY
+    fallback at all for location/linkedin, which the regex-only pass can miss
+    whenever they aren't behind an explicit label.
+    """
+    if not missing_fields:
+        return {}
+    prompt = (
+        "Extract the candidate's identity details from this resume header/contact "
+        "area. Return ONLY this JSON, using an empty string for anything not "
+        'present:\n{"full_name": "", "email": "", "phone": "", "location": "", '
+        '"linkedin": ""}\n\nRESUME:\n' + text[:1800]
+    )
+    try:
+        raw = _ollama_chat(prompt, as_json=True, num_predict=150, num_ctx=2048)
+    except Exception as e:
+        logger.warning(f"Identity AI extraction failed: {e}")
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    filled = {}
+    for field in missing_fields:
+        val = _validate_identity_field(field, raw.get(field, ""))
+        if val and not _identity_value_grounded(field, val, text):
+            logger.warning(f"Identity AI '{field}' = '{val}' not grounded in source text — discarding as hallucination")
+            val = ""
+        if val:
+            filled[field] = val
+    return filled
 
 
 def _split_resume_chunks(text):
@@ -3102,6 +3329,126 @@ def _pdfplumber_contact_scan(path):
         return {}
 
 
+_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9\-]{3,}")
+
+
+def _looks_like_proper_noun_token(tok):
+    """True for tokens shaped like a proper noun / product name / acronym
+    ("eLHR", "LSPath", "POMSnet", "ADC", "M-Files") rather than an ordinary
+    English word ("develop", "manufacturing", "Omni"). With only a handful of
+    project blocks to compare, plain words can end up statistically unique to
+    one block by pure chance — this shape filter keeps that coincidence from
+    being mistaken for a real, distinctive project identifier.
+    """
+    if any(c.isdigit() for c in tok):
+        return True
+    if tok.isupper() and 2 <= len(tok) <= 8:
+        return True
+    return any(c.isupper() for c in tok[1:])
+
+
+def _reassign_project_specific_bullets(experience_text, projects_text):
+    """Move Experience bullets that are clearly about ONE specific listed project
+    into that project's block in Projects, instead of leaving them as generic
+    Experience content.
+
+    Purely additive / conservative by design: it only ever moves a bullet when
+    it contains a proper-noun-shaped keyword (see `_looks_like_proper_noun_token`)
+    that is unique to exactly one of the project blocks on THIS resume (computed
+    per-upload, no hardcoded project names or domain stoplist) — product names
+    (e.g. "eLHR", "LSPath") naturally pass this test, while generic domain
+    vocabulary shared across every project ("validation", "CSV", "review") and
+    plain capitalized words ("Omni") naturally fail it and are left alone.
+    A bullet whose keywords point to more than one project, or to none, is left
+    exactly where it was. Only runs when there are 2+ project blocks to disambiguate
+    between — on every other resume shape this is a complete no-op.
+    """
+    if not experience_text or not projects_text:
+        return experience_text, projects_text
+
+    blocks = re.split(r'(?=^\s*Client:)', projects_text, flags=re.MULTILINE)
+    blocks = [b for b in blocks if b.strip()]
+    if len(blocks) < 2:
+        return experience_text, projects_text  # nothing to disambiguate against
+
+    # Uniqueness must be computed over ALL case variants of a word, not just the
+    # shape-qualified ones — otherwise a word that's overwhelmingly common but
+    # happens to appear in ALL CAPS once (e.g. a stray "ABBOTT" in one project's
+    # description, vs. "Abbott" as the client name in five others) would look
+    # falsely "unique" just because its other occurrences got shape-filtered out
+    # before the counting happened.
+    block_raw_tokens = [_TOKEN_RE.findall(b) for b in blocks]
+    token_owner_count = {}
+    for toks in block_raw_tokens:
+        for t in {tok.lower() for tok in toks}:
+            token_owner_count[t] = token_owner_count.get(t, 0) + 1
+    distinctive = [
+        {t.lower() for t in toks
+         if token_owner_count[t.lower()] == 1 and _looks_like_proper_noun_token(t)}
+        for toks in block_raw_tokens
+    ]
+    if not any(distinctive):
+        return experience_text, projects_text
+
+    # Split Experience into bullet segments (each starting at a "•" marker);
+    # non-bullet lines (e.g. the company/title/dates table) are left untouched.
+    lines = experience_text.split('\n')
+    segments = []
+    current = None
+    for line in lines:
+        if line.strip().startswith('•'):
+            if current is not None:
+                segments.append(current)
+            current = [line]
+        elif current is not None:
+            current.append(line)
+        else:
+            segments.append([line])
+    if current is not None:
+        segments.append(current)
+
+    # When a resume has its own distinct Projects section (2+ blocks, confirmed
+    # above) AND Experience contains bullet points at all, those bullets did not
+    # come from the Work Experience heading itself — that heading's own content is
+    # the non-bullet company/title/dates table; every "•" line reaching this point
+    # was appended from a "Role and Responsibilities"/"Project Details" occurrence
+    # (see the heading loop above). So here ALL bullets are routed into Projects:
+    # to the one specific project they name if identifiable, otherwise to a
+    # general trailing section — never left mixed into the Experience table.
+    kept_experience = []
+    appended_to_block = [[] for _ in blocks]
+    unmatched_bullets = []
+    for seg in segments:
+        seg_text = '\n'.join(seg)
+        if not seg_text.strip().startswith('•'):
+            kept_experience.append(seg_text)
+            continue
+        seg_tokens = {t.lower() for t in _TOKEN_RE.findall(seg_text)}
+        matches = [i for i, dist in enumerate(distinctive) if seg_tokens & dist]
+        if len(matches) == 1:
+            appended_to_block[matches[0]].append(seg_text)
+            logger.info(
+                f"Moved Experience bullet to Project block {matches[0]} "
+                f"(matched keyword(s): {seg_tokens & distinctive[matches[0]]})"
+            )
+        else:
+            unmatched_bullets.append(seg_text)
+            logger.info("Moved Experience bullet to general Projects section (no single distinctive project match)")
+
+    if not any(appended_to_block) and not unmatched_bullets:
+        return experience_text, projects_text  # no bullets to move — no-op
+
+    new_blocks = []
+    for block, extra in zip(blocks, appended_to_block):
+        if extra:
+            new_blocks.append(block.rstrip() + "\nResponsibilities:\n" + "\n".join(extra))
+        else:
+            new_blocks.append(block.rstrip())
+    if unmatched_bullets:
+        new_blocks.append("Role and Responsibilities:\n" + "\n".join(unmatched_bullets))
+    return "\n".join(kept_experience).strip(), "\n".join(new_blocks).strip()
+
+
 def parse_resume_with_llm_text(path):
     """Pure-Ollama resume parsing — no regex field engine.
 
@@ -3164,11 +3511,16 @@ def parse_resume_with_llm_text(path):
                 raw_text = _tc
             else:
                 logger.info("two_col rejected: pdfplumber false column split detected (word fragments)")
-            # Re-inject all OCR contact info if not already present in the new text
+            # Re-inject all OCR contact info if not already present in the new text.
+            # Name/Location use a "labelled line already exists" check rather than a
+            # raw substring search — a plain "in raw_text" check falsely matches when
+            # the same words appear incidentally elsewhere (e.g. a college's city
+            # matching the candidate's home city, like "...college, India, Chennai
+            # 2015" in the Education section), which silently drops the re-injection.
             _post = []
-            if _ocr_name_line and _ocr_name_line not in raw_text:
+            if _ocr_name_line and not re.search(r'(?m)^\s*name\s*:', raw_text, re.I):
                 _post.append(f"Name: {_ocr_name_line}")
-            if _ocr_loc_line and _ocr_loc_line not in raw_text:
+            if _ocr_loc_line and not re.search(r'(?m)^\s*(location|address|city)\s*:', raw_text, re.I):
                 _post.append(f"Location: {_ocr_loc_line}")
             if _ocr_email and _ocr_email not in raw_text:
                 _post.append(f"Email: {_ocr_email}")
@@ -3238,6 +3590,7 @@ def parse_resume_with_llm_text(path):
         "PROFESSIONAL SUMMARY", "PROFILE SUMMARY", "APPLICATIONS SUMMARY",
         "AREAS OF EXPERTISE", "TECHNICAL SKILLS", "CORE COMPETENCIES", "KEY SKILLS",
         "ACADEMIC BACKGROUND", "ACADEMIC QUALIFICATIONS",
+        "EDUCATIONAL QUALIFICATION", "EDUCATIONAL QUALIFICATIONS",
         "SUMMARY", "EXPERIENCE", "EMPLOYMENT", "SKILLS", "EDUCATION",
         "QUALIFICATIONS", "CERTIFICATIONS", "PROJECTS", "ACHIEVEMENTS",
         "AWARDS", "REFERENCES",
@@ -3260,10 +3613,21 @@ def parse_resume_with_llm_text(path):
         "PROFESSIONAL DEVELOPMENT", "TRAINING",
         "ACADEMIC DETAILS",
         "KEY ACHIEVEMENTS", "KEY ACCOMPLISHMENTS",
+        "CAREER SUMMARY", "DECLARATION", "PERSONAL DETAILS", "OTHER PERSONAL DETAILS",
+        "HOBBIES", "LANGUAGES", "OBJECTIVE",
+        "Professional Summary & Skill set", "Technical & Other Proficiency",
         # Title-case headings (Arun-style resumes)
         "Professional Summary", "Work Experience", "Relevant Project Experience",
         "Key Skills", "Technical Skills",
         "Tools & Applications", "Tools and Applications",
+        # Per-role bullet lists — common in Indian IT/validation CVs that repeat a
+        # "Project Details" + "Role and Responsibilities" pair once per employer.
+        # Without this heading recognized, its bullets silently fall inside whatever
+        # OTHER section happens to precede them in the linear text (usually Projects).
+        "ROLES AND RESPONSIBILITIES", "Roles and Responsibilities",
+        "ROLE AND RESPONSIBILITIES", "Role and Responsibilities",
+        "KEY RESPONSIBILITIES", "Key Responsibilities",
+        "RESPONSIBILITIES", "Responsibilities",
     ]
     _section_heading_re = re.compile(
         r'(?:^|(?<=\n))\s*('
@@ -3277,19 +3641,23 @@ def parse_resume_with_llm_text(path):
     def _heading_field(h):
         u = h.strip().upper()
         if u in ("SUMMARY", "PROFILE SUMMARY", "PROFESSIONAL SUMMARY",
-                 "APPLICATIONS SUMMARY"):
+                 "APPLICATIONS SUMMARY", "CAREER SUMMARY",
+                 "PROFESSIONAL SUMMARY & SKILL SET"):
             return "summary"
         if u in ("EXPERIENCE", "PROFESSIONAL EXPERIENCE", "WORK EXPERIENCE",
                  "EMPLOYMENT HISTORY", "EMPLOYMENT",
-                 "EARLY CAREER EXPERIENCE", "EARLY CAREER"):
+                 "EARLY CAREER EXPERIENCE", "EARLY CAREER",
+                 "ROLES AND RESPONSIBILITIES", "ROLE AND RESPONSIBILITIES",
+                 "KEY RESPONSIBILITIES", "RESPONSIBILITIES"):
             return "experience"
         if u in ("SKILLS", "TECHNICAL SKILLS", "KEY SKILLS", "CORE COMPETENCIES",
                  "AREAS OF EXPERTISE",
-                 "TECHNICAL SKILLS & TOOLS", "TECHNICAL SKILLS AND TOOLS"):
+                 "TECHNICAL SKILLS & TOOLS", "TECHNICAL SKILLS AND TOOLS",
+                 "TECHNICAL & OTHER PROFICIENCY"):
             return "skills"
         if u in ("EDUCATION", "QUALIFICATIONS", "ACADEMIC BACKGROUND",
                  "ACADEMIC QUALIFICATIONS", "EDUCATIONAL QUALIFICATIONS",
-                 "EDUCATIONAL BACKGROUND",
+                 "EDUCATIONAL QUALIFICATION", "EDUCATIONAL BACKGROUND",
                  "EDUCATION & CERTIFICATIONS", "EDUCATION AND CERTIFICATIONS",
                  "ACADEMIC DETAILS", "EDUCATIONAL DETAILS"):
             return "education"
@@ -3342,6 +3710,7 @@ def parse_resume_with_llm_text(path):
     _STRONG_HEADINGS = frozenset([
         'CERTIFICATIONS', 'CERTIFICATION', 'ACHIEVEMENTS', 'ACHIEVEMENT',
         'AWARDS', 'AWARD', 'REFERENCES', 'PROJECTS', 'QUALIFICATIONS',
+        'EDUCATION', 'RESPONSIBILITIES', 'HOBBIES',
     ])
 
     # Normalise sidebar-label lines where heading is merged with content on the same line
@@ -3385,7 +3754,15 @@ def parse_resume_with_llm_text(path):
         re.I,
     )
 
+    # An ALL-CAPS "job title / company" line followed by a date (e.g.
+    # "PROGRAMMER ANALYST, 06/2018") — used alongside _qual_exp_date_re to confirm
+    # a "Projects" section is really mislabeled work history, not genuine
+    # standalone projects (which often have their own dates too, but no company
+    # line like this).
+    _proj_jobtitle_re = re.compile(r'(?:^|\n)[A-Z][A-Z\s/]+,\s*\d{2}/\d{4}')
+
     verbatim = {}
+    _ambiguous_field_source = set()
     for i, (pos, heading) in enumerate(headings):
         field = _heading_field(heading)
         nl_pos = raw_text.find("\n", pos)
@@ -3437,35 +3814,73 @@ def parse_resume_with_llm_text(path):
 
         # "Projects" / "Project Details" headings in Indian IT CVs often list work
         # assignments with company names and numeric date ranges (e.g. 06/2018-11/2021).
-        # When detected, append to experience and skip setting projects.
-        if field == "projects" and text and _qual_exp_date_re.search(text):
+        # When detected, append to experience and skip setting projects. Requires
+        # BOTH a date range AND an ALL-CAPS job-title/company line — a date range
+        # alone isn't enough, since genuine standalone projects often have their
+        # own start/end dates too and shouldn't be swept into Experience.
+        if (field == "projects" and text
+                and _qual_exp_date_re.search(text)
+                and _proj_jobtitle_re.search(text)):
+            if "experience" in verbatim:
+                verbatim["experience"] += "\n" + text
+            else:
+                verbatim["experience"] = text
+            # `result["projects"]` may already hold this same text from the earlier
+            # base regex parse (parse_resume_text runs its own independent section
+            # split) — clear it here so the content doesn't end up duplicated in
+            # both Experience and Project Details.
+            result["projects"] = ""
+            logger.info(
+                "Verbatim 'experience' +%d chars re-routed from '%s' (date ranges found in projects) "
+                "— cleared duplicate 'projects' value from base parse",
+                len(text), heading,
+            )
+            continue
+
+        # "Career Summary" is ambiguous — most resumes use it for a professional
+        # blurb, but some (confusingly) use it to head their job/career history.
+        # Same signal as the "Qualifications" disambiguation above: job date
+        # ranges mean it's really work experience, not a summary.
+        if heading.upper() == "CAREER SUMMARY" and text and _qual_exp_date_re.search(text):
             if "experience" in verbatim:
                 verbatim["experience"] += "\n" + text
             else:
                 verbatim["experience"] = text
             logger.info(
-                "Verbatim 'experience' +%d chars re-routed from '%s' (date ranges found in projects)",
-                len(text), heading,
+                "Verbatim 'experience' +%d chars re-routed from 'Career Summary' (date ranges found)",
+                len(text),
             )
             continue
 
         if not field:
             continue
-        # Explicit heading labels (e.g. "EDUCATION") always override an earlier
-        # ambiguous heading (e.g. "Qualifications") for the same field.
-        _is_explicit = heading.upper() in (
-            "EDUCATION", "EXPERIENCE", "PROFESSIONAL EXPERIENCE", "WORK EXPERIENCE",
-            "SUMMARY", "PROFESSIONAL SUMMARY", "SKILLS", "TECHNICAL SKILLS",
-            "CERTIFICATIONS", "PROJECTS",
-            "CORE COMPETENCIES", "TECHNICAL SKILLS & TOOLS", "TECHNICAL SKILLS AND TOOLS",
-        )
-        if field in verbatim and not _is_explicit:
+        if field in verbatim:
+            # A field can legitimately recur multiple times in one resume — multiple
+            # employers each with their own "Project Details"/"Role and
+            # Responsibilities" block, multiple "Skills" groupings, etc. Whether a
+            # later occurrence of the SAME field should REPLACE the current value or
+            # be APPENDED to it depends on whether the current value was a confident
+            # match or just a guess:
+            if field in _ambiguous_field_source and heading.upper() != "QUALIFICATIONS":
+                # The current value came from an ambiguous "Qualifications" guess;
+                # a real, unambiguous heading for this field (e.g. "EDUCATION")
+                # replaces that guess rather than appending to it.
+                if text:
+                    verbatim[field] = text
+                    _ambiguous_field_source.discard(field)
+                    logger.info(f"Verbatim '{field}' ({len(text)} chars) from '{heading}' (replaced ambiguous guess)")
+            elif text:
+                # Same field, another confident occurrence — append rather than
+                # overwrite (would silently lose earlier content) or drop (would
+                # silently lose this content), since resumes commonly repeat a
+                # section like this once per job/client rather than only once total.
+                verbatim[field] = verbatim[field] + "\n" + text
+                logger.info(f"Verbatim '{field}' +{len(text)} chars appended from '{heading}'")
             continue
         if text:
-            if field == "skills" and field in verbatim:
-                verbatim[field] = verbatim[field] + "\n" + text
-            else:
-                verbatim[field] = text
+            verbatim[field] = text
+            if heading.upper() == "QUALIFICATIONS":
+                _ambiguous_field_source.add(field)
             logger.info(f"Verbatim '{field}' ({len(text)} chars) from '{heading}'")
 
     for field, text in verbatim.items():
@@ -3703,6 +4118,131 @@ def parse_resume_with_llm_text(path):
                 result["experience"] = _proj_text
             result["projects"] = ""
 
+    # ── 2c-skills-in-experience: sidebar resumes sometimes repeat their Skills
+    # column on later pages WITHOUT repeating the "SKILLS" heading, so that
+    # continuation has no marker distinguishing it from whatever section is
+    # active at that point in the text — usually Experience. Detect a run of
+    # 3+ consecutive "Short Title-Case Header" + "description" pairs (no
+    # bullets, no dates in between) inside Experience and move it to Skills.
+    _bullet_chars = ("-", "•", "*", "▪", "●", "○", "◦", "‣", "»", "›", "·", "", "")
+
+    def _looks_like_skill_header(line):
+        line = line.strip()
+        if not line or line.startswith(_bullet_chars):
+            return False
+        # Real job/company lines are the main false-positive risk here — they're
+        # often ALL CAPS and/or use a comma or pipe to separate title/company/
+        # location (e.g. "SENIOR EXECUTIVE, STELIS BIOPHARMA, DODDABALLAPURA",
+        # "Business Analyst | Salesforce Business Analyst"). Genuine skill
+        # category headers ("Microsoft Office Suite", "Data Management") never
+        # look like that, so reject both patterns outright.
+        if "," in line or "|" in line:
+            return False
+        letters_only = re.sub(r"[^A-Za-z]", "", line)
+        if letters_only and letters_only.isupper():
+            return False
+        if re.search(r"\d", line):
+            return False
+        if len(line) > 60:
+            return False
+        words = line.split()
+        if not (1 <= len(words) <= 6):
+            return False
+        _minor = {"and", "or", "of", "for", "the", "in", "&", "to"}
+        for w in words:
+            if w.lower() in _minor:
+                continue
+            if not w[0].isupper():
+                return False
+        return words[0][0].isupper()
+
+    def _is_bullet_or_date_line(line):
+        line = line.strip()
+        if not line:
+            return False
+        if line.startswith(_bullet_chars):
+            return True
+        return bool(re.search(r"\b(19|20)\d{2}\b", line))
+
+    _exp_for_skills = result.get("experience", "")
+    if _exp_for_skills:
+        _exp_lines = _exp_for_skills.splitlines()
+        _n_lines = len(_exp_lines)
+        _skill_blocks = []
+        _si = 0
+        while _si < _n_lines:
+            if _looks_like_skill_header(_exp_lines[_si]):
+                _start = _si
+                _pair_count = 0
+                _sj = _si
+                while _sj < _n_lines and _looks_like_skill_header(_exp_lines[_sj]):
+                    _sj += 1
+                    _desc_lines = 0
+                    while (_sj < _n_lines and _exp_lines[_sj].strip()
+                           and not _looks_like_skill_header(_exp_lines[_sj])
+                           and not _is_bullet_or_date_line(_exp_lines[_sj])):
+                        _desc_lines += 1
+                        _ends_with_comma = _exp_lines[_sj].rstrip().endswith(",")
+                        _sj += 1
+                        # Only keep consuming lines while the previous one trails
+                        # off with a comma (a genuine mid-sentence line wrap, e.g.
+                        # "...CARR,\nFEA, QC Charts..."). Without that signal, stop
+                        # after one line — otherwise an unrelated stray fragment
+                        # right after a complete sentence (e.g. a duplicated/
+                        # truncated leftover line from the source document) gets
+                        # swallowed into this entry's description.
+                        if not _ends_with_comma:
+                            break
+                    if _desc_lines == 0:
+                        break
+                    _pair_count += 1
+                    if _sj < _n_lines and _is_bullet_or_date_line(_exp_lines[_sj]):
+                        break
+                _end = _sj
+                if _pair_count >= 3:
+                    _skill_blocks.append((_start, _end))
+                _si = _end if _end > _si else _si + 1
+            else:
+                _si += 1
+
+        if _skill_blocks:
+            _covered = set()
+            for _bs, _be in _skill_blocks:
+                _covered.update(range(_bs, _be))
+            _rescued = [l for i, l in enumerate(_exp_lines) if i in _covered]
+            _kept = [l for i, l in enumerate(_exp_lines) if i not in _covered]
+            _rescued_text = "\n".join(_rescued).strip()
+            if _rescued_text:
+                if result.get("skills"):
+                    result["skills"] = result["skills"] + "\n" + _rescued_text
+                else:
+                    result["skills"] = _rescued_text
+                result["experience"] = "\n".join(_kept).strip()
+                logger.info(
+                    "Rescued %d line(s) of unlabeled skills-sidebar continuation from Experience into Skills",
+                    len(_rescued),
+                )
+
+    # ── 2d-cert-overrun: the initial base regex parse (parse_resume_text, at the
+    # very top of this function) does its own independent section split and can
+    # set "certifications" from a colon-labelled line (e.g. "Certification : ...")
+    # even when there's no real standalone CERTIFICATIONS heading. On resumes with
+    # no blank lines between paragraphs, that independent split sometimes fails to
+    # stop at the next real heading and overruns into Education/Achievements —
+    # producing a field that's really just a duplicate of content already correct
+    # elsewhere. Detected by: the "certifications" text fully contains both the
+    # (already correct) Education and Achievements text.
+    _cert_val = result.get("certifications", "").strip()
+    if _cert_val:
+        _edu_val = result.get("education", "").strip()
+        _ach_val = result.get("achievements", "").strip()
+        if _edu_val and _ach_val and _edu_val in _cert_val and _ach_val in _cert_val:
+            logger.info(
+                "Certifications field duplicates Education+Achievements "
+                "(base-parse boundary overrun) — clearing"
+            )
+            result["certifications"] = ""
+
     # ── 2a-post. Reject title if it looks like a sentence fragment ────────────────
     _title_check = result.get("title", "").strip()
     if _title_check:
@@ -3859,14 +4399,52 @@ def parse_resume_with_llm_text(path):
                 result["title"] = _cand.title()
                 logger.info(f"Title from experience first line: '{result['title']}'")
 
+    # Same idea, generalized to Title-Case entries (e.g. "Senior Lead Design
+    # Engineer / Onsite Engineer | Onward Technologies Pvt Ltd for Caterpillar
+    # Inc") — the ALL-CAPS regex above only matches all-uppercase job lines;
+    # most resumes write the role in Title Case instead. Split on the same
+    # separator used elsewhere for title/name detection and take the segment
+    # before the company/date part.
+    if not result.get("title") and result.get("experience"):
+        _exp_fl2 = result["experience"].strip().split('\n')[0].strip()
+        _exp_title_seg = re.split(r'\s+[-–|]\s+', _exp_fl2, maxsplit=1)[0].strip()
+        if (_exp_title_seg and _exp_title_seg != _exp_fl2
+                and 1 <= len(_exp_title_seg.split()) <= 10
+                and not re.search(r'\d{4}|\d{1,2}/\d{1,2}', _exp_title_seg)
+                and _role_fragment_ok.search(_exp_title_seg)):
+            result["title"] = _exp_title_seg[:80]
+            logger.info(f"Title from experience first line (Title-Case): '{result['title']}'")
+
+    # ── 2c. Identity fields (name/email/phone/location/linkedin) via a dedicated
+    # LLM call, run BEFORE the content-field budget below starts. Previously these
+    # were mixed into the same budget-limited loop as summary/experience/skills —
+    # since those heavier fields ran first and could each take several seconds on
+    # the local model, the shared budget was usually exhausted before the loop
+    # reached email/phone, and full_name got only one shot gated by the same clock.
+    # location/linkedin had no AI fallback at all. This call is unconditional and
+    # untimed against that budget, so identity extraction always gets to run.
+    _missing_identity = [f for f in _IDENTITY_FIELDS if not result.get(f)]
+    if _missing_identity:
+        _identity_fill = _ollama_identity_extract(raw_text, _missing_identity)
+        for _id_field, _id_val in _identity_fill.items():
+            result[_id_field] = _id_val
+            logger.info(f"Identity AI filled '{_id_field}': {_id_val}")
+
+    # Labelled "City <x>" / "Country <y>" pair — a distinct format from the
+    # hardcoded-city-name scan in parse_resume_text, and one that can legitimately
+    # sit anywhere in the document (e.g. under a sidebar "OTHER PERSONAL DETAILS"
+    # heading well past the header), so it's checked here against the FULL text
+    # rather than the identity call's header-sized window.
+    if not result.get("location"):
+        _city_m = re.search(r'(?:^|\n)\s*City[ \t]+([^\n]+)', raw_text, re.I)
+        _country_m = re.search(r'(?:^|\n)\s*Country[ \t]+([^\n]+)', raw_text, re.I)
+        if _city_m or _country_m:
+            _loc_parts = [m.group(1).strip() for m in (_city_m, _country_m) if m]
+            result["location"] = ", ".join(_loc_parts)[:180]
+            logger.info(f"Location from City/Country label pair: {result['location']}")
+
     # ── 3. AI fallback — fires only when a field is still empty ─────────────────
-    # Email/phone also get AI fallback for icon-based contact bars where regex fails.
     _AI_FALLBACK = {
-        "full_name": (
-            "What is the full name of the person in this resume? "
-            "Return ONLY the name, nothing else.\n\nRESUME HEADER:\n",
-            raw_text[:600], False, 20, 512,
-        ),
         "title": (
             "What is the current professional job title of the person in this resume? "
             "Look for lines labelled 'Current Designation:', 'Designation:', 'Title:', "
@@ -3897,15 +4475,6 @@ def parse_resume_with_llm_text(path):
         "education": (
             "Extract the education section verbatim from this resume.\n\nRESUME:\n",
             raw_text, False, 300, 1024,
-        ),
-        "email": (
-            "Find the email address in this resume. Return ONLY the email address, nothing else.\n\nRESUME:\n",
-            raw_text[:800], False, 15, 512,
-        ),
-        "phone": (
-            "Find the phone number in this resume. Return ONLY the phone number "
-            "(include country code if present), nothing else.\n\nRESUME:\n",
-            raw_text[:800], False, 15, 512,
         ),
     }
 
@@ -3952,6 +4521,36 @@ def parse_resume_with_llm_text(path):
         if _ai_title_bad:
             logger.info(f"Post-AI: title '{_ai_title[:60]}' looks like paragraph — clearing")
             result["title"] = ""
+
+    # ── 3c. Post-AI content validation ─────────────────────────────────────────
+    # When the AI can't literally find a section (no matching heading in the
+    # text), a small model sometimes "helpfully" writes its own analysis or
+    # summary of the resume instead of admitting nothing was found — e.g. a
+    # numbered list like "5. **Technical Skills and Proficiency:**  - ..." for
+    # what was supposed to be a verbatim Education extract. That's generated
+    # commentary, not resume content, and must never be saved as if it were.
+    _ai_meta_phrase_re = re.compile(
+        r'\bbased on (?:the|this) resume\b|\bthe candidate\b|\bthis resume (?:shows|indicates|includes)\b'
+        r'|\bi (?:can see|found|couldn\'?t find)\b|\bhere(?:\'s| is) (?:the|a)\b|\bno (?:education|experience|'
+        r'summary|skills|certifications?) (?:section|information|details)? ?(?:found|available|listed)\b',
+        re.I,
+    )
+    for _cf in ("summary", "experience", "education", "skills", "certifications"):
+        _cv = result.get(_cf, "")
+        if not _cv:
+            continue
+        _cv_bad = (
+            "**" in _cv
+            or _cv.startswith("```")
+            or bool(re.search(r'(?:^|\n)\s*\d+\.\s+\*?\*?[A-Z][a-zA-Z ]+:\*?\*?', _cv))
+            or bool(_ai_meta_phrase_re.search(_cv))
+        )
+        if _cv_bad:
+            logger.warning(
+                f"Post-AI validation: '{_cf}' looks like generated commentary, not verbatim "
+                f"resume text — clearing ({_cv[:80]!r}...)"
+            )
+            result[_cf] = ""
 
     # ── 4. Post-AI contact validation ──────────────────────────────────────────
     # The AI model sometimes returns text fragments instead of real email/phone
@@ -4156,7 +4755,8 @@ def parse_resume_with_llm_text(path):
                     _em = re.search(
                         r'[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}', _r
                     )
-                    if _em and _valid_email_final.match(_em.group()):
+                    if (_em and _valid_email_final.match(_em.group())
+                            and _identity_value_grounded("email", _em.group(), _ollama_ctx)):
                         result["email"] = _em.group()
                         logger.info(f"Ollama step-7 email: {result['email']}")
             except Exception as exc:
@@ -4175,7 +4775,8 @@ def parse_resume_with_llm_text(path):
                     _ph = re.search(r'[\+]?\d[\d\s\-\.]{7,20}\d', _r)
                     if _ph and _valid_phone_final.match(_ph.group()):
                         _ph_digits = re.sub(r'\D', '', _ph.group())
-                        if 10 <= len(_ph_digits) <= 15:
+                        if (10 <= len(_ph_digits) <= 15
+                                and _identity_value_grounded("phone", _ph.group(), _ollama_ctx)):
                             result["phone"] = _ph.group().strip()
                             logger.info(f"Ollama step-7 phone: {result['phone']}")
             except Exception as exc:
@@ -4196,6 +4797,29 @@ def parse_resume_with_llm_text(path):
             if not result.get(_vf) and _vv:
                 result[_vf] = _vv
                 logger.info(f"Vision scan filled '{_vf}': {_vv}")
+
+    # Strip resume-builder-template watermarks (e.g. "webuildcv.com",
+    # "Powered by ...") from every text field. These templates place a bare
+    # branding line as its own paragraph, which then gets swept up verbatim
+    # into whichever section it happens to fall in. The two fragments
+    # ("webuildcv.com" and "Powered by") sometimes appear combined on a
+    # single line (e.g. table-cell layout joins them with a tab), so match
+    # any whole line made up of nothing but 1-3 repetitions of either
+    # fragment rather than requiring each to be alone on its own line.
+    _watermark_line_re = re.compile(
+        r'^\s*(?:(?:powered\s+by\b\s*)|(?:[\w-]+\.(?:com|io|co|net|ai)\b\s*)){1,3}$',
+        re.I,
+    )
+    for _wm_field in ("summary", "skills", "experience", "education",
+                      "certifications", "projects", "references"):
+        _wm_text = result.get(_wm_field)
+        if _wm_text:
+            _wm_lines = [l for l in _wm_text.splitlines() if not _watermark_line_re.match(l.strip())]
+            result[_wm_field] = "\n".join(_wm_lines).strip()
+
+    result["experience"], result["projects"] = _reassign_project_specific_bullets(
+        result.get("experience", ""), result.get("projects", "")
+    )
 
     return result, "llm_text"
 
@@ -4224,7 +4848,8 @@ def edit_resume(resume_id=None):
         if request.method == "POST":
             form_data = {k: request.form.get(k, "").strip() for k in [
                 "full_name", "title", "email", "phone", "linkedin", "location", "summary",
-                "skills", "experience", "education", "certifications", "projects",
+                "skills", "experience", "education", "certifications", "projects", "exp_yrs",
+                "department",
             ]}
 
             if form_data.get("title"):
@@ -4311,7 +4936,7 @@ def edit_resume(resume_id=None):
                         linkedin=%(linkedin)s, location=%(location)s, summary=%(summary)s, skills=%(skills)s,
                         experience=%(experience)s, education=%(education)s, certifications=%(certifications)s,
                         projects=%(projects)s, slug=%(slug)s, resume_file=%(resume_file)s,
-                        updated_at=NOW()
+                        exp_yrs=%(exp_yrs)s, department=%(department)s, updated_at=NOW()
                     WHERE id=%(id)s
                     """,
                     merged,
@@ -4319,17 +4944,51 @@ def edit_resume(resume_id=None):
                 sync_skills(conn, resume_id, merged.get("skills", ""))
                 return redirect(url_for("profile_detail", resume_id=resume_id))
 
+            # ── Mandatory field validation (new profiles only) ───────────
+            if not merged.get("exp_yrs", "").strip():
+                flash("Years of Experience is required. Please select a value before saving.", "error")
+                return redirect(url_for("edit_resume"))
+            if not merged.get("location", "").strip():
+                flash("Location is required. Please enter a location before saving.", "error")
+                return redirect(url_for("edit_resume"))
+            # ─────────────────────────────────────────────────────────────
+
+            # ── Duplicate guard (new profiles only) ──────────────────────
+            _dup_email = merged.get("email", "").strip()
+            _dup_phone = re.sub(r"[\s\-\(\)]", "", merged.get("phone", "").strip())
+            _dup_conds, _dup_params = [], []
+            if _dup_email:
+                _dup_conds.append("LOWER(TRIM(email)) = LOWER(TRIM(%s))")
+                _dup_params.append(_dup_email)
+            if _dup_phone:
+                _dup_conds.append("REGEXP_REPLACE(phone, '[\\s\\-\\(\\)]', '', 'g') = %s")
+                _dup_params.append(_dup_phone)
+            if _dup_conds:
+                _dup_row = conn.execute(
+                    "SELECT id, full_name FROM resume WHERE (" + " OR ".join(_dup_conds) + ") LIMIT 1",
+                    _dup_params,
+                ).fetchone()
+                if _dup_row:
+                    flash(
+                        f"A profile for \"{_dup_row['full_name']}\" already exists with the same "
+                        f"email or phone number (Profile ID: {_dup_row['id']}). "
+                        f"Please check before adding again.",
+                        "error",
+                    )
+                    return redirect(url_for("edit_resume"))
+            # ─────────────────────────────────────────────────────────────
+
             merged["slug"] = unique_slug(conn, merged.get("full_name") or "profile")
             cursor = conn.execute(
                 """
                 INSERT INTO resume (
                     full_name, title, email, phone, linkedin, location, summary, skills,
                     experience, education, certifications, projects, slug, resume_file,
-                    created_at, updated_at
+                    exp_yrs, department, created_at, updated_at
                 ) VALUES (
                     %(full_name)s, %(title)s, %(email)s, %(phone)s, %(linkedin)s, %(location)s, %(summary)s, %(skills)s,
                     %(experience)s, %(education)s, %(certifications)s, %(projects)s, %(slug)s, %(resume_file)s,
-                    NOW(), NOW()
+                    %(exp_yrs)s, %(department)s, NOW(), NOW()
                 )
                 RETURNING id
                 """,
@@ -4350,11 +5009,13 @@ def edit_resume(resume_id=None):
             resume = {k: "" for k in [
                 "full_name", "title", "email", "phone", "linkedin", "location",
                 "summary", "skills", "experience", "education", "certifications",
-                "projects", "slug", "resume_file",
+                "projects", "slug", "resume_file", "department",
             ]}
             resume["id"] = None
 
-    return render_template("edit.html", resume=resume)
+    # The "Bulk Upload" tab only applies to the Add Profile (new) flow, not editing.
+    raw_files, jds = ([], []) if resume_id else _get_raw_files_and_jds()
+    return render_template("edit.html", resume=resume, raw_files=raw_files, jds=jds)
 
 
 @app.route("/profile")
@@ -4402,7 +5063,9 @@ def profile_detail(resume_id):
         top_matches = matches[:3]
         is_weak = top_matches and top_matches[0]['match_percentage'] < 50
 
-    return render_template("profile.html", resume=resume, top_matches=top_matches, is_weak=is_weak)
+    return render_template("profile.html", resume=resume, top_matches=top_matches, is_weak=is_weak,
+                           l1_comments=resume_dict.get("l1_comments") or "",
+                           l2_comments=resume_dict.get("l2_comments") or "")
 
 
 @app.route("/profile/<int:resume_id>/export-top-matches")
@@ -5271,6 +5934,110 @@ def uploaded_file(filename):
     return send_from_directory(app.config["UPLOAD_FOLDER"], filename)
 
 
+# ── New: Auto-detect "Years of Experience" from summary/experience text ────────
+# Purely additive — feeds the exp_yrs dropdown a best-guess value; the user can
+# still review/override it before saving, same as every other auto-filled field.
+
+_EXP_YRS_BUCKETS = [
+    (1, "0-1 yrs"), (2, "1-2 yrs"), (3, "2-3 yrs"), (4, "3-4 yrs"),
+    (5, "4-5 yrs"), (6, "5-6 yrs"), (7, "6-7 yrs"), (8, "7-8 yrs"),
+    (10, "8-10 yrs"), (12, "10-12 yrs"), (15, "12-15 yrs"),
+]
+
+_EXP_YRS_PATTERNS = [
+    # "X+ years of [professional/relevant/total/work/industry] experience"
+    # — allow up to 2 filler words between "of" and "experience" since resumes
+    # phrase this many different ways ("of professional experience", "of
+    # relevant industry experience", etc.).
+    re.compile(r'(\d+(?:\.\d+)?)\s*\+\s*years?\s+(?:of\s+)?(?:\w+\s+){0,2}experience', re.I),
+    re.compile(r'(\d+(?:\.\d+)?)\s*\+\s*yrs?\b', re.I),
+    re.compile(r'(\d+(?:\.\d+)?)\s*\+\s*years?\b', re.I),
+    re.compile(r'over\s+(\d+(?:\.\d+)?)\s*years?', re.I),
+    re.compile(r'(\d+(?:\.\d+)?)\s*years?\s+(?:of\s+)?(?:\w+\s+){0,2}experience', re.I),
+]
+
+
+def _scan_for_exp_years(text):
+    """Return the first regex match's numeric years value, or None."""
+    for pattern in _EXP_YRS_PATTERNS:
+        m = pattern.search(text)
+        if m:
+            try:
+                return float(m.group(1))
+            except ValueError:
+                continue
+    return None
+
+
+def _years_to_bucket(years):
+    for cap, bucket in _EXP_YRS_BUCKETS:
+        if years < cap:
+            return bucket
+    return "15+ yrs"
+
+
+_EXP_DATE_TOKEN_RE = re.compile(
+    r'\b(?:JAN(?:UARY)?|FEB(?:RUARY)?|MAR(?:CH)?|APR(?:IL)?|MAY|JUN(?:E)?|'
+    r'JUL(?:Y)?|AUG(?:UST)?|SEP(?:TEMBER)?|OCT(?:OBER)?|NOV(?:EMBER)?|DEC(?:EMBER)?)'
+    r'\.?\s+(\d{4})\b'
+    r'|\b\d{1,2}/(\d{4})\b',
+    re.I,
+)
+_EXP_PRESENT_RE = re.compile(r'\b(?:present|current|till\s*date|to\s*date|ongoing|now)\b', re.I)
+
+
+def _estimate_years_from_dates(text):
+    """Fallback for resumes with no explicit "X years of experience" phrase:
+    estimate total experience from the earliest job-start year through the
+    latest end year (or the current year, if any entry says "Present" /
+    "Current" / etc.) found in the employment date ranges themselves —
+    e.g. "2/2018 — Present", "6/2013 – 4/2017". Returns None when there
+    aren't at least two distinct dated years to span.
+    """
+    years_found = [
+        int(m.group(1) or m.group(2))
+        for m in _EXP_DATE_TOKEN_RE.finditer(text)
+    ]
+    if len(years_found) < 2:
+        return None
+    earliest, latest = min(years_found), max(years_found)
+    if _EXP_PRESENT_RE.search(text):
+        from datetime import datetime as _dt
+        latest = max(latest, _dt.now().year)
+    span = latest - earliest
+    return float(span) if 0 < span <= 50 else None
+
+
+def _detect_years_of_experience(parsed, path=None, ext=None):
+    """Scan the parsed summary/experience text for phrases like "7+ years" or
+    "4+ years exp" and map the number to the closest exp_yrs dropdown bucket.
+
+    Many resumes state years-of-experience as a tagline right under the name/
+    title, BEFORE the first section heading — that text is intentionally
+    excluded from the "summary" field elsewhere in this codebase (treated as
+    an "introduction", not the summary), so it's invisible to the fast path
+    below. When the fast path finds nothing and a file path is supplied, fall
+    back to scanning the full raw extracted text (which does include that
+    intro tagline).
+
+    Returns "" when no confident match is found.
+    """
+    text = f"{parsed.get('summary', '')}\n{parsed.get('experience', '')}"[:2000]
+    years = _scan_for_exp_years(text) if text.strip() else None
+    if years is None and path is not None and ext is not None:
+        try:
+            full_text = extract_resume_text(path, ext)[:2000]
+            years = _scan_for_exp_years(full_text)
+        except Exception:
+            pass
+    if years is None:
+        # No explicit "X years of experience" phrase anywhere — estimate the
+        # span from the employment date ranges in the experience text itself,
+        # rather than leaving exp_yrs blank when dated work history exists.
+        years = _estimate_years_from_dates((parsed.get('experience', '') or '')[:4000])
+    return _years_to_bucket(years) if years is not None else ""
+
+
 @app.route("/api/parse-resume", methods=["POST"])
 def parse_resume_api():
     uploaded = request.files.get("resume_file")
@@ -5315,6 +6082,11 @@ def parse_resume_api():
                 text = extract_resume_text(temp_path, ext)
                 parsed = parse_resume_text(text)
                 parser_used = "text"
+            # New: auto-detect "X+ years of experience" from the parsed text and
+            # suggest a matching exp_yrs dropdown bucket (user can still override
+            # it). Runs before the temp file is deleted below, since the raw-text
+            # fallback needs to re-read it.
+            parsed["exp_yrs"] = _detect_years_of_experience(parsed, temp_path, ext)
         finally:
             temp_path.unlink(missing_ok=True)
         return jsonify({"success": True, "message": "Fields extracted from resume.", "data": parsed, "parser_used": parser_used})
@@ -5398,11 +6170,6 @@ def dashboard():
     with db_conn() as conn:
         total_resumes = conn.execute("SELECT COUNT(*) AS count FROM resume").fetchone()["count"]
 
-        today_resumes = conn.execute(
-            "SELECT id, full_name, title, created_at FROM resume"
-            " WHERE created_at::date = CURRENT_DATE ORDER BY created_at DESC"
-        ).fetchall()
-
         role_counts = conn.execute(
             """
             SELECT COALESCE(NULLIF(title, ''), 'No Title') AS role, COUNT(*) AS count
@@ -5418,14 +6185,12 @@ def dashboard():
             " FROM resume ORDER BY updated_at DESC LIMIT 10"
         ).fetchall()
 
-        total_roles = conn.execute(
-            "SELECT COUNT(DISTINCT NULLIF(title, '')) AS count FROM resume"
-        ).fetchone()["count"] or 0
-
         # ── NEW: Candidate details ─────────────────────────────────────────
         candidate_rows = conn.execute(
             "SELECT id, full_name, title, location, experience, summary, created_at,"
-            " COALESCE(status, 'New') AS status"
+            " COALESCE(status, 'New') AS status,"
+            " COALESCE(interview_status, 'To Be Interviewed') AS interview_status,"
+            " COALESCE(exp_yrs, '') AS exp_yrs"
             " FROM resume ORDER BY created_at DESC LIMIT 200"
         ).fetchall()
 
@@ -5439,6 +6204,90 @@ def dashboard():
             GROUP BY DATE(created_at)
             ORDER BY DATE(created_at)
             """
+        ).fetchall()
+
+        # ── NEW: HR-style dashboard metrics ─────────────────────────────────
+        ensure_requirement_table(conn)
+        ensure_interview_schedule_table(conn)
+
+        open_jobs_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM requirement WHERE status = 'Open'"
+        ).fetchone()["count"] or 0
+
+        interviews_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM interview_schedule"
+        ).fetchone()["count"] or 0
+
+        # "Offers" = candidates whose offer was actually released (regardless of
+        # whether they've since joined). Deliberately excludes plain "Selected by
+        # Client" — being selected doesn't yet mean an offer letter went out.
+        offers_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM resume WHERE interview_status IN"
+            " ('Client Offer Released', 'Joined Vaisesika')"
+        ).fetchone()["count"] or 0
+
+        hired_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM resume WHERE interview_status = 'Joined Vaisesika'"
+        ).fetchone()["count"] or 0
+
+        # "Profile Shared" — reached "Profile Shared With Client" or any later stage
+        # (including candidates the client later rejected, since they did get shared).
+        profile_shared_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM resume WHERE interview_status IN"
+            " ('Profile Shared With Client', 'Client Offer Released', 'Selected by Client',"
+            "  'Joined Vaisesika', 'Rejected By Client')"
+        ).fetchone()["count"] or 0
+
+        # "Client Selected" — reached "Selected by Client" or later (a narrower
+        # subset of Profile Shared, and a superset of Offer Released below).
+        client_selected_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM resume WHERE interview_status IN"
+            " ('Client Offer Released', 'Selected by Client', 'Joined Vaisesika')"
+        ).fetchone()["count"] or 0
+
+        # Funnel labels mirror the exact wording used in Interview Status /
+        # Candidate Details elsewhere on this dashboard, so the two agree.
+        funnel_stages = [
+            {"label": "Applied", "count": total_resumes},
+            {"label": "Profile Shared", "count": profile_shared_count},
+            {"label": "Client Selected", "count": client_selected_count},
+            {"label": "Offer Released", "count": offers_count},
+            {"label": "Joined", "count": hired_count},
+        ]
+
+        department_counts = conn.execute(
+            """
+            SELECT COALESCE(NULLIF(department, ''), 'Unassigned') AS dept, COUNT(*) AS count
+            FROM resume
+            GROUP BY COALESCE(NULLIF(department, ''), 'Unassigned')
+            ORDER BY count DESC
+            """
+        ).fetchall()
+
+        recent_interviews = conn.execute(
+            """
+            SELECT i.id, i.position, i.interviewer, i.interview_date, i.status,
+                   r.id AS resume_id, r.full_name
+            FROM interview_schedule i
+            JOIN resume r ON r.id = i.resume_id
+            ORDER BY i.created_at DESC
+            LIMIT 8
+            """
+        ).fetchall()
+
+        top_requirements = conn.execute(
+            """
+            SELECT id, requirement_code, requirement_name, client, division,
+                   num_requirement, status, profiles_shared
+            FROM requirement
+            WHERE status = 'Open'
+            ORDER BY created_at DESC
+            LIMIT 6
+            """
+        ).fetchall()
+
+        all_candidates_min = conn.execute(
+            "SELECT id, full_name FROM resume ORDER BY full_name"
         ).fetchall()
 
 
@@ -5465,8 +6314,9 @@ def dashboard():
             "full_name": r["full_name"] or "—",
             "title": r["title"] or "—",
             "location": r["location"] or "—",
-            "exp_years": _cd_exp_years(r["summary"], r["experience"]),
+            "exp_years": r["exp_yrs"] if r["exp_yrs"] else _cd_exp_years(r["summary"], r["experience"]),
             "status": r["status"] or "New",
+            "interview_status": r["interview_status"] or "To Be Interviewed",
             "initials": _initials(r["full_name"] or ""),
             "summary_snippet": (r["summary"] or "").strip()[:130],
             "created_at": r["created_at"].strftime("%Y-%m-%d") if r["created_at"] else "—",
@@ -5478,21 +6328,70 @@ def dashboard():
     for _c in candidate_details:
         status_counts[_c["status"]] = status_counts.get(_c["status"], 0) + 1
 
+    interview_status_counts = {}
+    for _c in candidate_details:
+        _ist = _c["interview_status"]
+        interview_status_counts[_ist] = interview_status_counts.get(_ist, 0) + 1
+
     return render_template(
         "dashboard.html",
         total_resumes=total_resumes,
-        today_resumes=list(today_resumes),
         role_counts=list(role_counts),
         recent_activity=list(recent_activity),
-        total_roles=total_roles,
-        all_jd_roles=ALL_JD_ROLES,
         candidate_details=candidate_details,
         upload_trend=list(upload_trend),
         status_counts=status_counts,
+        interview_status_counts=interview_status_counts,
+        interview_statuses=INTERVIEW_STATUSES,
+        open_jobs_count=open_jobs_count,
+        interviews_count=interviews_count,
+        offers_count=offers_count,
+        hired_count=hired_count,
+        funnel_stages=funnel_stages,
+        department_counts=list(department_counts),
+        recent_interviews=list(recent_interviews),
+        top_requirements=list(top_requirements),
+        all_candidates=list(all_candidates_min),
     )
 
 
 # ── New: Upload Files Route ───────────────────────────────────────────────────
+
+def _get_raw_files_and_jds():
+    """Shared context for the bulk-upload UI — used standalone at /upload-files
+    and embedded as the "Bulk Upload" tab on the Add Profile page."""
+    from datetime import datetime as _dt
+    meta = _load_raw_meta()
+    raw_files = []
+    if RAW_UPLOAD_FOLDER.exists():
+        for p in sorted(RAW_UPLOAD_FOLDER.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
+            if p.is_file() and p.suffix.lower().lstrip(".") in ALLOWED_EXTENSIONS:
+                st = p.stat()
+                fm = meta.get(p.name, {})
+                raw_files.append({
+                    "name": p.name,
+                    "size": st.st_size,
+                    "uploaded_at": fm.get("uploaded_at") or _dt.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M"),
+                    "ext": p.suffix.lower().lstrip("."),
+                    "source": fm.get("source", "direct"),
+                    "original": fm.get("original", p.name),
+                    "zip_name": fm.get("zip_name"),
+                })
+
+    # Pass JD list for the bulk-compare panel
+    jds = []
+    try:
+        with db_conn() as conn:
+            ensure_jd_table(conn)
+            seed_jds(conn)
+            jds = conn.execute(
+                "SELECT id, title, category FROM job_description ORDER BY category, title"
+            ).fetchall()
+    except Exception:
+        pass
+
+    return raw_files, list(jds)
+
 
 @app.route("/upload-files", methods=["GET", "POST"])
 def upload_files():
@@ -5518,7 +6417,10 @@ def upload_files():
                     with zipfile.ZipFile(tmp_zip, "r") as zf:
                         for member in zf.namelist():
                             member_name = Path(member).name
-                            if not member_name or member_name.startswith("."):
+                            # Skip hidden dotfiles and Office lock files (e.g.
+                            # "~$report.docx") — these are OS/app artifacts left
+                            # in the ZIP, not real resumes, and fail to parse.
+                            if not member_name or member_name.startswith(".") or member_name.startswith("~$"):
                                 continue
                             m_ext = member_name.rsplit(".", 1)[-1].lower() if "." in member_name else ""
                             if m_ext not in _RAW_UPLOAD_ALLOWED:
@@ -5573,37 +6475,8 @@ def upload_files():
         return redirect(url_for("upload_files"))
 
     # GET
-    from datetime import datetime as _dt
-    meta = _load_raw_meta()
-    raw_files = []
-    if RAW_UPLOAD_FOLDER.exists():
-        for p in sorted(RAW_UPLOAD_FOLDER.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
-            if p.is_file() and p.suffix.lower().lstrip(".") in ALLOWED_EXTENSIONS:
-                st = p.stat()
-                fm = meta.get(p.name, {})
-                raw_files.append({
-                    "name": p.name,
-                    "size": st.st_size,
-                    "uploaded_at": fm.get("uploaded_at") or _dt.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M"),
-                    "ext": p.suffix.lower().lstrip("."),
-                    "source": fm.get("source", "direct"),
-                    "original": fm.get("original", p.name),
-                    "zip_name": fm.get("zip_name"),
-                })
-
-    # Pass JD list for the bulk-compare panel
-    jds = []
-    try:
-        with db_conn() as conn:
-            ensure_jd_table(conn)
-            seed_jds(conn)
-            jds = conn.execute(
-                "SELECT id, title, category FROM job_description ORDER BY category, title"
-            ).fetchall()
-    except Exception:
-        pass
-
-    return render_template("upload_files.html", raw_files=raw_files, jds=list(jds))
+    raw_files, jds = _get_raw_files_and_jds()
+    return render_template("upload_files.html", raw_files=raw_files, jds=jds)
 
 
 @app.route("/uploads/raw/<path:filename>")
@@ -5639,6 +6512,144 @@ def delete_all_uploads():
                 deleted += 1
     _save_raw_meta({})
     return jsonify({"success": True, "deleted": deleted})
+
+
+@app.route("/api/process-raw-files", methods=["POST"])
+def process_raw_files():
+    """Parse all unprocessed files in RAW_UPLOAD_FOLDER and insert into resume DB."""
+    _req_data = request.get_json(silent=True) or {}
+    bulk_department = (_req_data.get("department") or "").strip()
+    meta = _load_raw_meta()
+    processed = []
+    errors = []
+
+    if not RAW_UPLOAD_FOLDER.exists():
+        return jsonify({"processed": 0, "errors": [], "skipped": 0})
+
+    files_to_process = []
+    for p in RAW_UPLOAD_FOLDER.iterdir():
+        if not p.is_file():
+            continue
+        if p.name.startswith('_') or p.suffix.lower() not in ('.pdf', '.docx', '.doc'):
+            continue
+        fm = meta.get(p.name, {})
+        if fm.get('parsed'):
+            continue
+        files_to_process.append(p)
+
+    skipped = []
+    for p in files_to_process:
+        ext = p.suffix.lower().lstrip('.')
+        try:
+            # Use the same "Resume Intelligence" (AI/verbatim) parser the
+            # single-profile Add Profile flow uses by default — falls back
+            # to the quick regex parser on failure, same pattern as
+            # /api/parse-resume, so bulk uploads get the same field-mapping
+            # accuracy as single uploads instead of the older quick-only path.
+            if ext in ('pdf', 'docx'):
+                try:
+                    parsed_data, _ = parse_resume_with_llm_text(p)
+                except Exception as e:
+                    logger.warning("Resume Intelligence failed for %s (%s); using Quick Parse.", p.name, e)
+                    if ext == 'pdf':
+                        parsed_data = _parse_pdf_quick(p)
+                    else:
+                        parsed_data = parse_resume_text(extract_resume_text(p, ext))
+            elif ext == 'pdf':
+                parsed_data = _parse_pdf_quick(p)
+            else:
+                parsed_data = parse_resume_text(extract_resume_text(p, ext))
+
+            form_data = {k: '' for k in [
+                'full_name', 'title', 'email', 'phone', 'linkedin', 'location', 'summary',
+                'skills', 'experience', 'education', 'certifications', 'projects',
+            ]}
+            merged = merge_resume_data(form_data, parsed_data, overwrite=False)
+            merged['resume_file'] = p.name
+            # New: auto-detect "X+ years of experience" for bulk uploads too,
+            # same as the single-profile Add Profile flow.
+            merged['exp_yrs'] = _detect_years_of_experience(merged, p, ext)
+            # New: apply the Department picked once for this bulk batch,
+            # same column the single-profile Add Profile flow already uses.
+            merged['department'] = bulk_department
+
+            if merged.get('title'):
+                _tc = re.split(r'[,|/\\–—]', merged['title'])[0].strip()
+                _tc = re.sub(r'[\(\[].*$', '', _tc).strip()
+                _tc = re.sub(
+                    r'^(experienced|skilled|dedicated|results.driven|dynamic|seasoned|'
+                    r'highly experienced|passionate|motivated|proactive|hands.on)\s+',
+                    '', _tc, flags=re.I,
+                ).strip()
+                _words = _tc.split()
+                if len(_words) > 5:
+                    _m = re.match(r'^((?:[A-Z][a-zA-Z]*(?:\s+|$)){1,5})', _tc)
+                    _tc = _m.group(1).strip() if _m else ' '.join(_words[:5])
+                merged['title'] = _tc[:80]
+
+            with db_conn() as conn:
+                # ── Duplicate guard (same as single-profile save) ────────
+                _dup_email = (merged.get('email') or '').strip()
+                _dup_phone = re.sub(r"[\s\-\(\)]", "", (merged.get('phone') or '').strip())
+                _dup_conds, _dup_params = [], []
+                if _dup_email:
+                    _dup_conds.append("LOWER(TRIM(email)) = LOWER(TRIM(%s))")
+                    _dup_params.append(_dup_email)
+                if _dup_phone:
+                    _dup_conds.append("REGEXP_REPLACE(phone, '[\\s\\-\\(\\)]', '', 'g') = %s")
+                    _dup_params.append(_dup_phone)
+                if _dup_conds:
+                    _dup_row = conn.execute(
+                        "SELECT id, full_name FROM resume WHERE (" + " OR ".join(_dup_conds) + ") LIMIT 1",
+                        _dup_params,
+                    ).fetchone()
+                    if _dup_row:
+                        meta[p.name] = dict(meta.get(p.name, {}), parsed=True, duplicate_of=_dup_row['id'])
+                        skipped.append({
+                            'file': p.name,
+                            'name': merged.get('full_name') or p.stem,
+                            'existing_id': _dup_row['id'],
+                            'existing_name': _dup_row['full_name'],
+                        })
+                        continue
+                # ─────────────────────────────────────────────────────────
+
+                merged['slug'] = unique_slug(conn, merged.get('full_name') or 'profile')
+                cursor = conn.execute(
+                    """
+                    INSERT INTO resume (
+                        full_name, title, email, phone, linkedin, location, summary, skills,
+                        experience, education, certifications, projects, slug, resume_file,
+                        exp_yrs, department, created_at, updated_at
+                    ) VALUES (
+                        %(full_name)s, %(title)s, %(email)s, %(phone)s, %(linkedin)s, %(location)s, %(summary)s, %(skills)s,
+                        %(experience)s, %(education)s, %(certifications)s, %(projects)s, %(slug)s, %(resume_file)s,
+                        %(exp_yrs)s, %(department)s, NOW(), NOW()
+                    )
+                    RETURNING id
+                    """,
+                    merged,
+                )
+                new_id = cursor.fetchone()['id']
+                sync_skills(conn, new_id, merged.get('skills', ''))
+
+            meta[p.name] = dict(meta.get(p.name, {}), parsed=True, resume_id=new_id)
+            processed.append({
+                'file': p.name,
+                'name': merged.get('full_name') or p.stem,
+                'id': new_id,
+            })
+        except Exception as e:
+            errors.append({'file': p.name, 'error': str(e)})
+
+    _save_raw_meta(meta)
+    return jsonify({
+        'processed': len(processed),
+        'skipped': len(skipped),
+        'duplicates': skipped,
+        'errors': errors,
+        'candidates': processed,
+    })
 
 
 @app.route("/api/export-compare-pdf", methods=["POST"])
@@ -6886,6 +7897,90 @@ def compare_result(resume_id, jd_id):
     )
 
 
+# ── NEW FEATURE: Top-matching resumes for a JD (reverse of Compare Resumes) ──
+# Given a JD, scores every stored resume against it with the same
+# calculate_match_score() used by the one-resume-at-a-time compare flow, and
+# returns the top 3. Purely additive — new route, new template, no existing
+# route/behavior touched.
+@app.route("/jd/<int:jd_id>/top-matches")
+def jd_top_matches(jd_id):
+    with db_conn() as conn:
+        ensure_jd_table(conn)
+        jd = conn.execute(
+            "SELECT * FROM job_description WHERE id = %s", (jd_id,)
+        ).fetchone()
+        if not jd:
+            return "Job Description not found", 404
+        resumes = conn.execute("SELECT * FROM resume").fetchall()
+
+    jd_dict = dict(jd)
+    scored = []
+    for r in resumes:
+        r_dict = dict(r)
+        score = calculate_match_score(r_dict, jd_dict)
+        scored.append({"resume": r_dict, "score": score})
+
+    scored.sort(key=lambda x: x["score"]["match_percentage"], reverse=True)
+    top_matches = scored[:3]
+
+    return render_template(
+        "jd_top_matches.html",
+        jd=jd_dict,
+        top_matches=top_matches,
+        total_scored=len(scored),
+    )
+
+
+# ── NEW: Candidate list API (used by dashboard refresh) ──────────────────────
+@app.route("/api/candidates")
+def api_candidates():
+    with db_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, full_name, title, location, experience, summary, created_at,"
+            " COALESCE(status, 'New') AS status,"
+            " COALESCE(interview_status, 'To Be Interviewed') AS interview_status,"
+            " COALESCE(exp_yrs, '') AS exp_yrs"
+            " FROM resume ORDER BY created_at DESC LIMIT 200"
+        ).fetchall()
+
+    def _ini(name):
+        parts = (name or "").split()
+        if not parts: return "?"
+        return (parts[0][0] + (parts[-1][0] if len(parts) > 1 else "")).upper()
+
+    def _exp(summary_txt, exp_txt):
+        txt = (summary_txt or "")[:600] + " " + (exp_txt or "")[:400]
+        m = re.search(r'(\d+)\s*\+?\s*years?\s+(?:of\s+)?(?:experience|exp\b)', txt, re.I)
+        if m: return m.group(1) + "+"
+        m = re.search(r'(\d+)\s*\+\s*years?', txt, re.I)
+        if m: return m.group(1) + "+"
+        return "—"
+
+    candidates = [
+        {
+            "id": r["id"],
+            "full_name": r["full_name"] or "—",
+            "title": r["title"] or "—",
+            "location": r["location"] or "—",
+            "exp_years": r["exp_yrs"] if r["exp_yrs"] else _exp(r["summary"], r["experience"]),
+            "status": r["status"] or "New",
+            "interview_status": r["interview_status"] or "To Be Interviewed",
+            "initials": _ini(r["full_name"] or ""),
+            "summary_snippet": (r["summary"] or "").strip()[:130],
+            "created_at": r["created_at"].strftime("%Y-%m-%d") if r["created_at"] else "—",
+        }
+        for r in rows
+    ]
+    status_counts = {"New": 0, "Reviewed": 0, "Shortlisted": 0}
+    for c in candidates:
+        status_counts[c["status"]] = status_counts.get(c["status"], 0) + 1
+    interview_status_counts = {}
+    for c in candidates:
+        _ist = c["interview_status"]
+        interview_status_counts[_ist] = interview_status_counts.get(_ist, 0) + 1
+    return jsonify({"candidates": candidates, "status_counts": status_counts, "interview_status_counts": interview_status_counts})
+
+
 # ── NEW: Candidate status update route ───────────────────────────────────────
 @app.route("/candidate-status", methods=["POST"])
 def update_candidate_status():
@@ -6913,6 +8008,491 @@ def _ensure_status_col():
         pass
 
 _ensure_status_col()
+
+
+# ── NEW: Interview Status column + route ─────────────────────────────────────
+
+INTERVIEW_STATUSES = [
+    "To Be Interviewed",
+    "Profile Shared With Client",
+    "Can be considered for Future Roles",
+    "Client Offer Released",
+    "Joined Vaisesika",
+    "Not Available Currently",
+    "Not Shortlisted",
+    "Position Closed",
+    "Rejected By Client",
+    "Rejected Internally",
+    "Selected by Client",
+]
+
+
+def _ensure_interview_status_col():
+    try:
+        with db_conn() as conn:
+            conn.execute(
+                "ALTER TABLE resume ADD COLUMN IF NOT EXISTS interview_status TEXT DEFAULT 'To Be Interviewed'"
+            )
+    except Exception:
+        pass
+
+
+_ensure_interview_status_col()
+
+
+def _ensure_comment_cols():
+    try:
+        with db_conn() as conn:
+            conn.execute("ALTER TABLE resume ADD COLUMN IF NOT EXISTS l1_comments TEXT DEFAULT ''")
+            conn.execute("ALTER TABLE resume ADD COLUMN IF NOT EXISTS l2_comments TEXT DEFAULT ''")
+    except Exception:
+        pass
+
+
+_ensure_comment_cols()
+
+
+def _ensure_exp_yrs_col():
+    try:
+        with db_conn() as conn:
+            conn.execute("ALTER TABLE resume ADD COLUMN IF NOT EXISTS exp_yrs TEXT DEFAULT ''")
+    except Exception:
+        pass
+
+
+_ensure_exp_yrs_col()
+
+
+def _ensure_department_col():
+    try:
+        with db_conn() as conn:
+            conn.execute("ALTER TABLE resume ADD COLUMN IF NOT EXISTS department TEXT DEFAULT ''")
+    except Exception:
+        pass
+
+
+_ensure_department_col()
+
+
+DEPARTMENTS = ["IT", "QA", "Finance", "HR", "Sales", "Marketing", "Operations", "Other"]
+
+REQUIREMENT_STATUSES = ["Open", "On Hold", "Filled", "Closed"]
+
+
+def ensure_requirement_table(conn):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS requirement (
+            id                SERIAL PRIMARY KEY,
+            requirement_code  TEXT NOT NULL,
+            requirement_name  TEXT NOT NULL,
+            client            TEXT DEFAULT '',
+            division          TEXT DEFAULT '',
+            num_requirement   INTEGER DEFAULT 1,
+            status            TEXT DEFAULT 'Open',
+            profiles_shared   INTEGER DEFAULT 0,
+            interviewed       INTEGER DEFAULT 0,
+            offered           INTEGER DEFAULT 0,
+            created_at        TIMESTAMPTZ DEFAULT NOW(),
+            updated_at        TIMESTAMPTZ DEFAULT NOW()
+        )
+        """
+    )
+
+
+def ensure_interview_schedule_table(conn):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS interview_schedule (
+            id              SERIAL PRIMARY KEY,
+            resume_id       INTEGER NOT NULL REFERENCES resume(id) ON DELETE CASCADE,
+            position        TEXT DEFAULT '',
+            interviewer     TEXT DEFAULT '',
+            interview_date  DATE,
+            status          TEXT DEFAULT 'Scheduled',
+            created_at      TIMESTAMPTZ DEFAULT NOW()
+        )
+        """
+    )
+
+
+# ── Requirement Management Routes ────────────────────────────────────────────
+
+@app.route("/requirement-management")
+def requirement_management():
+    with db_conn() as conn:
+        ensure_requirement_table(conn)
+        requirements = conn.execute(
+            "SELECT * FROM requirement ORDER BY created_at DESC"
+        ).fetchall()
+    return render_template("requirement_management.html", requirements=list(requirements))
+
+
+@app.route("/requirement/add", methods=["GET", "POST"])
+def requirement_add():
+    if request.method == "POST":
+        data = {k: request.form.get(k, "").strip() for k in
+                ["requirement_code", "requirement_name", "client", "division", "status"]}
+        for k in ["num_requirement", "profiles_shared", "interviewed", "offered"]:
+            try:
+                data[k] = int(request.form.get(k, "0") or "0")
+            except ValueError:
+                data[k] = 0
+        with db_conn() as conn:
+            ensure_requirement_table(conn)
+            conn.execute(
+                """
+                INSERT INTO requirement
+                    (requirement_code, requirement_name, client, division, num_requirement,
+                     status, profiles_shared, interviewed, offered)
+                VALUES
+                    (%(requirement_code)s, %(requirement_name)s, %(client)s, %(division)s,
+                     %(num_requirement)s, %(status)s, %(profiles_shared)s, %(interviewed)s, %(offered)s)
+                """,
+                data,
+            )
+        flash(f"Requirement '{data['requirement_name']}' added.", "success")
+        return redirect(url_for("requirement_management"))
+    return render_template("requirement_form.html", requirement=None,
+                            statuses=REQUIREMENT_STATUSES)
+
+
+@app.route("/requirement/<int:req_id>")
+def requirement_detail(req_id):
+    with db_conn() as conn:
+        ensure_requirement_table(conn)
+        requirement = conn.execute(
+            "SELECT * FROM requirement WHERE id = %s", (req_id,)
+        ).fetchone()
+        if not requirement:
+            return "Requirement not found", 404
+    return render_template("requirement_detail.html", requirement=dict(requirement))
+
+
+@app.route("/requirement/<int:req_id>/edit", methods=["GET", "POST"])
+def requirement_edit(req_id):
+    with db_conn() as conn:
+        ensure_requirement_table(conn)
+        if request.method == "POST":
+            data = {k: request.form.get(k, "").strip() for k in
+                    ["requirement_code", "requirement_name", "client", "division", "status"]}
+            for k in ["num_requirement", "profiles_shared", "interviewed", "offered"]:
+                try:
+                    data[k] = int(request.form.get(k, "0") or "0")
+                except ValueError:
+                    data[k] = 0
+            data["id"] = req_id
+            conn.execute(
+                """
+                UPDATE requirement SET
+                    requirement_code=%(requirement_code)s, requirement_name=%(requirement_name)s,
+                    client=%(client)s, division=%(division)s, num_requirement=%(num_requirement)s,
+                    status=%(status)s, profiles_shared=%(profiles_shared)s,
+                    interviewed=%(interviewed)s, offered=%(offered)s, updated_at=NOW()
+                WHERE id=%(id)s
+                """,
+                data,
+            )
+            flash("Requirement updated.", "success")
+            return redirect(url_for("requirement_detail", req_id=req_id))
+        requirement = conn.execute(
+            "SELECT * FROM requirement WHERE id = %s", (req_id,)
+        ).fetchone()
+        if not requirement:
+            return "Requirement not found", 404
+    return render_template("requirement_form.html", requirement=dict(requirement),
+                            statuses=REQUIREMENT_STATUSES)
+
+
+@app.route("/requirement/<int:req_id>/delete", methods=["POST"])
+def requirement_delete(req_id):
+    with db_conn() as conn:
+        ensure_requirement_table(conn)
+        conn.execute("DELETE FROM requirement WHERE id = %s", (req_id,))
+    flash("Requirement deleted.", "success")
+    return redirect(url_for("requirement_management"))
+
+
+@app.route("/api/schedule-interview", methods=["POST"])
+def schedule_interview():
+    data = request.get_json(silent=True) or {}
+    resume_id = data.get("resume_id")
+    interviewer = (data.get("interviewer") or "").strip()
+    interview_date = (data.get("interview_date") or "").strip() or None
+    status = (data.get("status") or "Scheduled").strip()
+    if not resume_id or not interviewer or not interview_date:
+        return jsonify({"ok": False, "error": "resume_id, interviewer, and interview_date are required"}), 400
+    with db_conn() as conn:
+        ensure_interview_schedule_table(conn)
+        resume_row = conn.execute(
+            "SELECT title FROM resume WHERE id = %s", (resume_id,)
+        ).fetchone()
+        if not resume_row:
+            return jsonify({"ok": False, "error": "Candidate not found"}), 404
+        conn.execute(
+            """
+            INSERT INTO interview_schedule (resume_id, position, interviewer, interview_date, status)
+            VALUES (%s, %s, %s, %s, %s)
+            """,
+            (resume_id, resume_row["title"] or "", interviewer, interview_date, status),
+        )
+    return jsonify({"ok": True})
+
+
+@app.route("/profile/<int:resume_id>/save-comments", methods=["POST"])
+def save_profile_comments(resume_id):
+    data = request.get_json(silent=True) or {}
+    l1 = data.get("l1_comments", "")
+    l2 = data.get("l2_comments", "")
+    with db_conn() as conn:
+        conn.execute(
+            "UPDATE resume SET l1_comments = %s, l2_comments = %s WHERE id = %s",
+            (l1, l2, resume_id),
+        )
+    return jsonify({"ok": True})
+
+
+@app.route("/api/check-duplicate", methods=["POST"])
+def check_duplicate_profile():
+    data = request.get_json(silent=True) or {}
+    email = (data.get("email") or "").strip()
+    phone = (data.get("phone") or "").strip()
+    exclude_id = data.get("exclude_id")
+
+    if not email and not phone:
+        return jsonify({"duplicate": False})
+
+    with db_conn() as conn:
+        conditions, params = [], []
+        if email:
+            conditions.append("LOWER(TRIM(email)) = LOWER(TRIM(%s))")
+            params.append(email)
+        if phone:
+            clean = re.sub(r"[\s\-\(\)]", "", phone)
+            conditions.append("REGEXP_REPLACE(phone, '[\\s\\-\\(\\)]', '', 'g') = %s")
+            params.append(clean)
+        query = (
+            "SELECT id, full_name, email, phone FROM resume WHERE ("
+            + " OR ".join(conditions) + ")"
+        )
+        if exclude_id:
+            query += " AND id != %s"
+            params.append(exclude_id)
+        query += " LIMIT 1"
+        row = conn.execute(query, params).fetchone()
+
+    if row:
+        return jsonify({
+            "duplicate": True,
+            "name": row["full_name"] or "Unknown",
+            "email": row["email"] or "",
+            "phone": row["phone"] or "",
+            "id": row["id"],
+        })
+    return jsonify({"duplicate": False})
+
+
+@app.route("/candidate-interview-status", methods=["POST"])
+def update_candidate_interview_status():
+    data = request.get_json(silent=True) or {}
+    resume_id = data.get("id")
+    status = data.get("status")
+    if not resume_id or status not in INTERVIEW_STATUSES:
+        return jsonify({"ok": False, "error": "invalid"}), 400
+    with db_conn() as conn:
+        conn.execute(
+            "UPDATE resume SET interview_status = %s WHERE id = %s", (status, resume_id)
+        )
+    return jsonify({"ok": True})
+
+
+# ── User Management & Authentication (new feature — additive only) ──────────
+
+USER_ROLES = ["admin", "user"]
+_DEFAULT_ADMIN_PASSWORD = "Admin@123"
+
+
+def ensure_users_table(conn):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_user (
+            id            SERIAL PRIMARY KEY,
+            username      TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            full_name     TEXT DEFAULT '',
+            email         TEXT DEFAULT '',
+            role          TEXT DEFAULT 'user',
+            is_active     BOOLEAN DEFAULT TRUE,
+            created_at    TIMESTAMPTZ DEFAULT NOW(),
+            updated_at    TIMESTAMPTZ DEFAULT NOW()
+        )
+        """
+    )
+    count = conn.execute("SELECT COUNT(*) AS count FROM app_user").fetchone()["count"]
+    if not count:
+        conn.execute(
+            """
+            INSERT INTO app_user (username, password_hash, full_name, role)
+            VALUES (%s, %s, %s, 'admin')
+            """,
+            ("admin", generate_password_hash(_DEFAULT_ADMIN_PASSWORD), "Administrator"),
+        )
+
+
+@app.context_processor
+def _inject_auth_context():
+    return {
+        "current_username": session.get("username"),
+        "current_full_name": session.get("full_name"),
+        "current_role": session.get("role"),
+    }
+
+
+_LOGIN_EXEMPT_ENDPOINTS = {"login", "static"}
+
+
+@app.before_request
+def _require_login():
+    if request.endpoint is None or request.endpoint in _LOGIN_EXEMPT_ENDPOINTS:
+        return None
+    if session.get("user_id"):
+        return None
+    return redirect(url_for("login", next=request.path))
+
+
+def _require_admin():
+    return session.get("role") == "admin"
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "")
+        with db_conn() as conn:
+            ensure_users_table(conn)
+            row = conn.execute(
+                "SELECT * FROM app_user WHERE LOWER(username) = LOWER(%s)", (username,)
+            ).fetchone()
+        if row and row["is_active"] and check_password_hash(row["password_hash"], password):
+            session["user_id"] = row["id"]
+            session["username"] = row["username"]
+            session["full_name"] = row["full_name"]
+            session["role"] = row["role"]
+            return redirect(request.form.get("next") or url_for("dashboard"))
+        flash("Invalid username or password.", "error")
+        return render_template("login.html", next=request.form.get("next", ""))
+    with db_conn() as conn:
+        ensure_users_table(conn)
+    return render_template("login.html", next=request.args.get("next", ""))
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
+
+# ── User Management routes (admin only) ──────────────────────────────────────
+
+@app.route("/users")
+def user_management():
+    if not _require_admin():
+        abort(403)
+    with db_conn() as conn:
+        ensure_users_table(conn)
+        users = conn.execute("SELECT * FROM app_user ORDER BY created_at ASC").fetchall()
+    return render_template("user_management.html", users=list(users))
+
+
+@app.route("/users/add", methods=["GET", "POST"])
+def user_add():
+    if not _require_admin():
+        abort(403)
+    if request.method == "POST":
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "")
+        full_name = request.form.get("full_name", "").strip()
+        email = request.form.get("email", "").strip()
+        role = request.form.get("role", "user")
+        if role not in USER_ROLES:
+            role = "user"
+        if not username or not password:
+            flash("Username and password are required.", "error")
+            return render_template("user_form.html", user=None, roles=USER_ROLES)
+        with db_conn() as conn:
+            ensure_users_table(conn)
+            existing = conn.execute(
+                "SELECT id FROM app_user WHERE LOWER(username) = LOWER(%s)", (username,)
+            ).fetchone()
+            if existing:
+                flash(f"Username '{username}' is already taken.", "error")
+                return render_template("user_form.html", user=None, roles=USER_ROLES)
+            conn.execute(
+                """
+                INSERT INTO app_user (username, password_hash, full_name, email, role)
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                (username, generate_password_hash(password), full_name, email, role),
+            )
+        flash(f"User '{username}' added.", "success")
+        return redirect(url_for("user_management"))
+    return render_template("user_form.html", user=None, roles=USER_ROLES)
+
+
+@app.route("/users/<int:user_id>/edit", methods=["GET", "POST"])
+def user_edit(user_id):
+    if not _require_admin():
+        abort(403)
+    with db_conn() as conn:
+        ensure_users_table(conn)
+        if request.method == "POST":
+            full_name = request.form.get("full_name", "").strip()
+            email = request.form.get("email", "").strip()
+            role = request.form.get("role", "user")
+            if role not in USER_ROLES:
+                role = "user"
+            is_active = bool(request.form.get("is_active"))
+            new_password = request.form.get("password", "")
+            if new_password:
+                conn.execute(
+                    """
+                    UPDATE app_user SET full_name=%s, email=%s, role=%s, is_active=%s,
+                        password_hash=%s, updated_at=NOW()
+                    WHERE id=%s
+                    """,
+                    (full_name, email, role, is_active, generate_password_hash(new_password), user_id),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE app_user SET full_name=%s, email=%s, role=%s, is_active=%s, updated_at=NOW()
+                    WHERE id=%s
+                    """,
+                    (full_name, email, role, is_active, user_id),
+                )
+            if session.get("user_id") == user_id:
+                session["full_name"] = full_name
+                session["role"] = role
+            flash("User updated.", "success")
+            return redirect(url_for("user_management"))
+        user = conn.execute("SELECT * FROM app_user WHERE id = %s", (user_id,)).fetchone()
+        if not user:
+            return "User not found", 404
+    return render_template("user_form.html", user=dict(user), roles=USER_ROLES)
+
+
+@app.route("/users/<int:user_id>/delete", methods=["POST"])
+def user_delete(user_id):
+    if not _require_admin():
+        abort(403)
+    if session.get("user_id") == user_id:
+        flash("You cannot delete your own account while logged in.", "error")
+        return redirect(url_for("user_management"))
+    with db_conn() as conn:
+        conn.execute("DELETE FROM app_user WHERE id = %s", (user_id,))
+    flash("User deleted.", "success")
+    return redirect(url_for("user_management"))
 
 
 if __name__ == "__main__":

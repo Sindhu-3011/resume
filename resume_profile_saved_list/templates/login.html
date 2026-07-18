@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Sign In | Resume Profile</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=13">
+</head>
+<body class="login-page">
+    <div class="login-shell">
+
+        <div class="login-brand-panel">
+            <div class="login-logo">
+                <span class="sidebar-logo-icon">&#128196;</span>
+                <span>Resume Profile</span>
+            </div>
+            <h1 class="login-brand-title">Hire faster, with clarity.</h1>
+            <p class="login-brand-sub">AI-assisted resume parsing, a live hiring pipeline, and requirement tracking — all in one place.</p>
+            <ul class="login-brand-points">
+                <li><span class="login-brand-icon">&#9989;</span> Automatic resume parsing &amp; dedupe</li>
+                <li><span class="login-brand-icon">&#128202;</span> Real-time hiring dashboard</li>
+                <li><span class="login-brand-icon">&#128188;</span> Client requirement tracking</li>
+            </ul>
+        </div>
+
+        <div class="login-form-panel">
+            <div class="login-card card">
+                <h2 class="login-card-title">Welcome back</h2>
+                <p class="muted" style="margin-bottom:24px;">Sign in to continue to your dashboard.</p>
+
+                {% with messages = get_flashed_messages(with_categories=true) %}
+                    {% if messages %}
+                        <section class="flash-wrap" aria-live="polite">
+                            {% for category, message in messages %}
+                                <div class="flash {{ category }}">{{ message }}</div>
+                            {% endfor %}
+                        </section>
+                    {% endif %}
+                {% endwith %}
+
+                <form method="post">
+                    <input type="hidden" name="next" value="{{ next or '' }}">
+                    <div>
+                        <label for="username">Username</label>
+                        <div class="login-input-wrap">
+                            <span class="login-input-icon">&#128100;</span>
+                            <input id="username" name="username" type="text" required autofocus autocomplete="username">
+                        </div>
+                    </div>
+                    <div style="margin-top:18px;">
+                        <label for="password">Password</label>
+                        <div class="login-input-wrap">
+                            <span class="login-input-icon">&#128274;</span>
+                            <input id="password" name="password" type="password" required autocomplete="current-password">
+                        </div>
+                    </div>
+                    <button class="button" type="submit" style="width:100%; margin-top:26px;">Sign In</button>
+                </form>
+            </div>
+        </div>
+
+    </div>
+</body>
+</html>

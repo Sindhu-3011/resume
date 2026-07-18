@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}{{ requirement.requirement_name }} | Resume Profile{% endblock %}
+{% block content %}
+
+<section class="hero card">
+    <div>
+        <p class="eyebrow">Requirement {{ requirement.requirement_code }}</p>
+        <h1>{{ requirement.requirement_name }}</h1>
+        <p class="muted">Client: {{ requirement.client or '—' }} &nbsp;·&nbsp; Division/Group: {{ requirement.division or '—' }}</p>
+    </div>
+    <div style="display:flex;gap:10px;">
+        <a class="button secondary" href="{{ url_for('requirement_edit', req_id=requirement.id) }}">Edit</a>
+        <a class="button secondary" href="{{ url_for('requirement_management') }}">&larr; Back</a>
+    </div>
+</section>
+
+<div class="dash-cards">
+    <div class="dash-card dash-card-blue">
+        <div class="dash-card-icon">&#128188;</div>
+        <div class="dash-card-body">
+            <p class="dash-card-label"># of Requirement</p>
+            <p class="dash-card-value">{{ requirement.num_requirement }}</p>
+        </div>
+    </div>
+    <div class="dash-card dash-card-green">
+        <div class="dash-card-icon">&#128203;</div>
+        <div class="dash-card-body">
+            <p class="dash-card-label">Profiles Shared</p>
+            <p class="dash-card-value">{{ requirement.profiles_shared }}</p>
+        </div>
+    </div>
+    <div class="dash-card dash-card-purple">
+        <div class="dash-card-icon">&#128100;</div>
+        <div class="dash-card-body">
+            <p class="dash-card-label">Interviewed</p>
+            <p class="dash-card-value">{{ requirement.interviewed }}</p>
+        </div>
+    </div>
+    <div class="dash-card dash-card-orange">
+        <div class="dash-card-icon">&#127942;</div>
+        <div class="dash-card-body">
+            <p class="dash-card-label">Offered</p>
+            <p class="dash-card-value">{{ requirement.offered }}</p>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="section-header" style="margin-bottom:14px;">
+        <div class="section-icon icon-experience">&#128196;</div>
+        <h2>Requirement Details</h2>
+    </div>
+    <div class="field-grid">
+        <div><label>Status</label><p>{{ requirement.status }}</p></div>
+        <div><label>Added On</label><p>{{ requirement.created_at.strftime('%Y-%m-%d') if requirement.created_at else '—' }}</p></div>
+        <div><label>Last Updated</label><p>{{ requirement.updated_at.strftime('%Y-%m-%d') if requirement.updated_at else '—' }}</p></div>
+    </div>
+</div>
+
+{% endblock %}

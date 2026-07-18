@@ -1,38 +1,365 @@
 {% extends "base.html" %}
-{% block title %}Dashboard | Resume Profile{% endblock %}
+{% block title %}Hiring Dashboard | Resume Profile{% endblock %}
 {% block content %}
 
-<!-- Summary Cards -->
-<div class="dash-cards">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+
+<!-- ══════════════ HR Overview (new) ══════════════ -->
+
+<div class="dash-page-hdr">
+    <h1>Hiring Dashboard</h1>
+    <p class="muted">Overview of hiring pipeline and key metrics</p>
+</div>
+
+<div class="dash-cards dash-cards-5">
     <div class="dash-card dash-card-blue">
-        <div class="dash-card-icon">&#128203;</div>
+        <div class="dash-card-icon">&#128188;</div>
         <div class="dash-card-body">
-            <p class="dash-card-label">Total Resumes</p>
-            <p class="dash-card-value">{{ total_resumes }}</p>
-        </div>
-    </div>
-    <div class="dash-card dash-card-green">
-        <div class="dash-card-icon">&#128197;</div>
-        <div class="dash-card-body">
-            <p class="dash-card-label">Uploaded Today</p>
-            <p class="dash-card-value">{{ today_resumes | length }}</p>
+            <p class="dash-card-label">Open Jobs</p>
+            <p class="dash-card-value">{{ open_jobs_count }}</p>
         </div>
     </div>
     <div class="dash-card dash-card-purple">
-        <div class="dash-card-icon">&#127970;</div>
+        <div class="dash-card-icon">&#128101;</div>
         <div class="dash-card-body">
-            <p class="dash-card-label">Unique Roles</p>
-            <p class="dash-card-value">{{ total_roles }}</p>
+            <p class="dash-card-label">Total Candidates</p>
+            <p class="dash-card-value">{{ total_resumes }}</p>
+        </div>
+    </div>
+    <div class="dash-card dash-card-teal">
+        <div class="dash-card-icon">&#128197;</div>
+        <div class="dash-card-body">
+            <p class="dash-card-label">Interviews</p>
+            <p class="dash-card-value">{{ interviews_count }}</p>
         </div>
     </div>
     <div class="dash-card dash-card-orange">
-        <div class="dash-card-icon">&#128196;</div>
+        <div class="dash-card-icon">&#127873;</div>
         <div class="dash-card-body">
-            <p class="dash-card-label">JD Categories</p>
-            <p class="dash-card-value">{{ all_jd_roles | length }}</p>
+            <p class="dash-card-label">Offers</p>
+            <p class="dash-card-value">{{ offers_count }}</p>
+        </div>
+    </div>
+    <div class="dash-card dash-card-green">
+        <div class="dash-card-icon">&#9989;</div>
+        <div class="dash-card-body">
+            <p class="dash-card-label">Hired</p>
+            <p class="dash-card-value">{{ hired_count }}</p>
         </div>
     </div>
 </div>
+
+<div class="hr-grid-3">
+    <!-- Hiring Pipeline funnel -->
+    <div class="card">
+        <div class="section-header" style="margin-bottom:14px;">
+            <div class="section-icon icon-experience">&#128200;</div>
+            <h2>Hiring Pipeline</h2>
+        </div>
+        <div class="funnel-wrap">
+            {% set _fmax = (funnel_stages | map(attribute='count') | list | max) or 1 %}
+            {% set _fcolors = ['#86b6ef', '#5598e7', '#2a78d6', '#1c5cab', '#104281'] %}
+            {% for stage in funnel_stages %}
+            {% set _pct = ((stage.count / _fmax * 100) if _fmax else 0) %}
+            <div class="funnel-row">
+                <span class="funnel-label">{{ stage.label }}</span>
+                <div class="funnel-track">
+                    <div class="funnel-bar" style="width:{{ [_pct, 6]|max }}%;background:{{ _fcolors[loop.index0 % _fcolors|length] }};"></div>
+                </div>
+                <span class="funnel-count">{{ stage.count }}</span>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+
+    <!-- Applications by Department -->
+    <div class="card">
+        <div class="section-header" style="margin-bottom:14px;">
+            <div class="section-icon icon-skills">&#127970;</div>
+            <h2>Applications by Department</h2>
+        </div>
+        <canvas id="deptChart" height="220"></canvas>
+    </div>
+
+    <!-- Candidate Status donut -->
+    <div class="card">
+        <div class="section-header" style="margin-bottom:14px;">
+            <div class="section-icon" style="background:#fef3c7;color:#d97706;">&#128202;</div>
+            <h2>Candidate Status</h2>
+        </div>
+        <canvas id="statusDonutChart" height="220"></canvas>
+    </div>
+</div>
+
+<!-- Top Open Requirements -->
+<div class="card">
+    <div class="section-header" style="margin-bottom:14px;">
+        <div class="section-icon icon-experience">&#128187;</div>
+        <h2>Top Open Requirements</h2>
+        <a class="dash-link" style="margin-left:auto;font-size:0.85rem;" href="{{ url_for('requirement_management') }}">View all &rarr;</a>
+    </div>
+    {% if top_requirements %}
+    <div style="overflow-x:auto;">
+    <table class="jdm-table">
+        <thead>
+            <tr><th>Requirement</th><th>Client / Division</th><th>Profiles Shared</th></tr>
+        </thead>
+        <tbody>
+        {% for r in top_requirements %}
+            <tr>
+                <td><a class="jdm-link" href="{{ url_for('requirement_detail', req_id=r.id) }}">{{ r.requirement_name }}</a></td>
+                <td>{{ r.client or '—' }}{% if r.division %} / {{ r.division }}{% endif %}</td>
+                <td>{{ r.profiles_shared }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    </div>
+    {% else %}
+    <p class="muted" style="text-align:center;padding:24px 0;">No open requirements yet. <a href="{{ url_for('requirement_add') }}">Add one</a>.</p>
+    {% endif %}
+</div>
+
+<!-- Recent Interviews -->
+<div class="card">
+    <div class="section-header" style="margin-bottom:14px;">
+        <div class="section-icon icon-experience">&#128100;</div>
+        <h2>Recent Interviews</h2>
+        <button class="button secondary" style="margin-left:auto;padding:6px 14px;font-size:0.85rem;" type="button" id="showScheduleBtn">+ Schedule Interview</button>
+    </div>
+
+    <div id="scheduleFormWrap" class="card" style="display:none;background:var(--surface-raised);margin-bottom:16px;box-shadow:none;border:1px dashed var(--border-s);">
+        <div class="field-grid">
+            <div>
+                <label for="schedCandidate">Candidate</label>
+                <select id="schedCandidate" class="form-select">
+                    <option value="">— Select candidate —</option>
+                    {% for c in all_candidates %}
+                    <option value="{{ c.id }}">{{ c.full_name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div>
+                <label for="schedInterviewer">Interviewer</label>
+                <input id="schedInterviewer" placeholder="e.g. David Lee">
+            </div>
+            <div>
+                <label for="schedDate">Date</label>
+                <input id="schedDate" type="date">
+            </div>
+            <div>
+                <label for="schedStatus">Status</label>
+                <select id="schedStatus" class="form-select">
+                    <option value="Scheduled">Scheduled</option>
+                    <option value="Completed">Completed</option>
+                    <option value="Pending">Pending</option>
+                    <option value="Cancelled">Cancelled</option>
+                </select>
+            </div>
+        </div>
+        <div class="actions" style="margin-top:14px;">
+            <button class="button" type="button" id="saveScheduleBtn">Save</button>
+            <button class="button secondary" type="button" id="cancelScheduleBtn">Cancel</button>
+        </div>
+        <p id="scheduleMsg" class="small" style="display:none;margin-top:8px;"></p>
+    </div>
+
+    {% if recent_interviews %}
+    <div style="overflow-x:auto;">
+    <table class="jdm-table">
+        <thead>
+            <tr><th>Candidate</th><th>Position</th><th>Interviewer</th><th>Date</th><th>Status</th></tr>
+        </thead>
+        <tbody>
+        {% for iv in recent_interviews %}
+            <tr>
+                <td><a class="jdm-link" href="{{ url_for('profile_detail', resume_id=iv.resume_id) }}">{{ iv.full_name }}</a></td>
+                <td>{{ iv.position or '—' }}</td>
+                <td>{{ iv.interviewer or '—' }}</td>
+                <td>{{ iv.interview_date.strftime('%Y-%m-%d') if iv.interview_date else '—' }}</td>
+                <td><span class="role-badge">{{ iv.status }}</span></td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    </div>
+    {% else %}
+    <p class="muted" style="text-align:center;padding:24px 0;">No interviews scheduled yet.</p>
+    {% endif %}
+</div>
+
+<script>
+(function () {
+    // Applications by Department (bar) — fixed categorical color per
+    // department (identity, not magnitude); "Unassigned" is a no-data
+    // bucket, not a real department, so it always gets the muted ink tone.
+    var deptCtx = document.getElementById('deptChart');
+    if (deptCtx && window.Chart) {
+        var deptColors = {
+            'IT':         '#2a78d6',
+            'QA':         '#1baf7a',
+            'Finance':    '#eda100',
+            'HR':         '#008300',
+            'Sales':      '#4a3aa7',
+            'Marketing':  '#e34948',
+            'Operations': '#e87ba4',
+            'Other':      '#eb6834',
+            'Unassigned': '#898781'
+        };
+        var deptLabels = {{ department_counts | map(attribute='dept') | list | tojson }};
+        new Chart(deptCtx, {
+            type: 'bar',
+            data: {
+                labels: deptLabels,
+                datasets: [{
+                    data: {{ department_counts | map(attribute='count') | list | tojson }},
+                    backgroundColor: deptLabels.map(function (d) { return deptColors[d] || '#898781'; }),
+                    borderRadius: 6,
+                    maxBarThickness: 40,
+                }]
+            },
+            options: {
+                plugins: { legend: { display: false } },
+                scales: { y: { beginAtZero: true, ticks: { precision: 0 } } }
+            }
+        });
+    }
+
+    // Candidate Status (donut) — reuses the same interview_status buckets as the
+    // "Interview Status" panel below, just rendered as a chart here.
+    var statusCtx = document.getElementById('statusDonutChart');
+    if (statusCtx && window.Chart) {
+        var istData = {{ interview_status_counts | tojson }};
+        // Fixed categorical order (8 hues max — see dataviz palette). The
+        // three rarest/least-actionable statuses fold into "Other" rather
+        // than generating a 9th hue; their breakdown still shows in the
+        // "Other" tooltip so no information is lost, just de-duplicated color.
+        var istColors = {
+            'To Be Interviewed':          '#2a78d6',
+            'Profile Shared With Client': '#1baf7a',
+            'Selected by Client':         '#eda100',
+            'Client Offer Released':      '#008300',
+            'Joined Vaisesika':           '#4a3aa7',
+            'Rejected By Client':         '#e34948',
+            'Not Shortlisted':            '#e87ba4',
+            'Position Closed':            '#eb6834'
+        };
+        var OTHER_COLOR = '#898781';
+        var rawLabels = Object.keys(istData);
+        var otherBreakdown = [];
+        var chartLabels = [];
+        var chartValues = [];
+        var chartColors = [];
+        rawLabels.forEach(function (l) {
+            if (istColors[l]) {
+                chartLabels.push(l);
+                chartValues.push(istData[l]);
+                chartColors.push(istColors[l]);
+            } else {
+                otherBreakdown.push(l + ': ' + istData[l]);
+            }
+        });
+        if (otherBreakdown.length) {
+            var otherTotal = otherBreakdown.reduce(function (sum, entry) {
+                return sum + Number(entry.split(': ')[1]);
+            }, 0);
+            chartLabels.push('Other');
+            chartValues.push(otherTotal);
+            chartColors.push(OTHER_COLOR);
+        }
+        var statusTotal = chartValues.reduce(function (sum, v) { return sum + v; }, 0);
+        function statusPct(count) {
+            return statusTotal ? Math.round((count / statusTotal) * 100) : 0;
+        }
+        new Chart(statusCtx, {
+            type: 'doughnut',
+            data: {
+                labels: chartLabels,
+                datasets: [{
+                    data: chartValues,
+                    backgroundColor: chartColors,
+                    borderWidth: 2,
+                    borderColor: '#fff'
+                }]
+            },
+            options: {
+                plugins: {
+                    legend: {
+                        position: 'bottom',
+                        labels: {
+                            boxWidth: 10,
+                            font: { size: 10 },
+                            generateLabels: function (chart) {
+                                var data = chart.data;
+                                return data.labels.map(function (label, i) {
+                                    var value = data.datasets[0].data[i];
+                                    return {
+                                        text: label + ' (' + statusPct(value) + '%)',
+                                        fillStyle: data.datasets[0].backgroundColor[i],
+                                        strokeStyle: data.datasets[0].backgroundColor[i],
+                                        index: i
+                                    };
+                                });
+                            }
+                        }
+                    },
+                    tooltip: {
+                        callbacks: {
+                            label: function (ctx) {
+                                if (ctx.label === 'Other') {
+                                    return otherBreakdown;
+                                }
+                                var value = ctx.parsed;
+                                return ctx.label + ': ' + value + ' (' + statusPct(value) + '%)';
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    // Schedule Interview mini-form
+    var showBtn = document.getElementById('showScheduleBtn');
+    var wrap = document.getElementById('scheduleFormWrap');
+    var msg = document.getElementById('scheduleMsg');
+    if (showBtn) {
+        showBtn.addEventListener('click', function () { wrap.style.display = 'block'; });
+        document.getElementById('cancelScheduleBtn').addEventListener('click', function () { wrap.style.display = 'none'; });
+        document.getElementById('saveScheduleBtn').addEventListener('click', function () {
+            var resumeId = document.getElementById('schedCandidate').value;
+            var interviewer = document.getElementById('schedInterviewer').value.trim();
+            var date = document.getElementById('schedDate').value;
+            var status = document.getElementById('schedStatus').value;
+            if (!resumeId || !interviewer || !date) {
+                msg.textContent = 'Please select a candidate, interviewer, and date.';
+                msg.style.color = '#dc2626';
+                msg.style.display = 'block';
+                return;
+            }
+            fetch('/api/schedule-interview', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ resume_id: parseInt(resumeId), interviewer: interviewer, interview_date: date, status: status })
+            }).then(function (r) { return r.json(); }).then(function (d) {
+                if (d.ok) {
+                    location.reload();
+                } else {
+                    msg.textContent = d.error || 'Could not schedule interview.';
+                    msg.style.color = '#dc2626';
+                    msg.style.display = 'block';
+                }
+            }).catch(function () {
+                msg.textContent = 'Network error. Please try again.';
+                msg.style.color = '#dc2626';
+                msg.style.display = 'block';
+            });
+        });
+    }
+})();
+</script>
+
+<!-- ══════════════ Candidate Records (existing) ══════════════ -->
 
 <div class="dash-two-col">
 
@@ -57,18 +384,11 @@
                 </div>
                 <div class="cand-toolbar-right">
                     <input class="cand-fi" id="qsInput" placeholder="Search name, role, location…" oninput="qsFilter()" style="width:220px;">
+                    <button class="button secondary" id="candRefreshBtn" style="padding:6px 14px;font-size:0.85rem;" onclick="candRefresh()">&#8635; Refresh</button>
                     <button class="button secondary" style="padding:6px 14px;font-size:0.85rem;" onclick="candClearSel()">Clear</button>
                 </div>
             </div>
 
-            <!-- Pipeline summary -->
-            <div class="pipeline-summary">
-                <span class="ps-item ps-new">&#9679; {{ status_counts.New }} New</span>
-                <span class="ps-dot">·</span>
-                <span class="ps-item ps-reviewed">&#9679; {{ status_counts.Reviewed }} Reviewed</span>
-                <span class="ps-dot">·</span>
-                <span class="ps-item ps-shortlisted">&#9679; {{ status_counts.Shortlisted }} Shortlisted</span>
-            </div>
 
             <!-- Table -->
             <div class="cand-table-wrap">
@@ -81,7 +401,7 @@
                             <th class="cand-sortable" onclick="candSort(3)">Role <span class="sort-ic">&#8597;</span></th>
                             <th class="cand-sortable" onclick="candSort(4)">Location <span class="sort-ic">&#8597;</span></th>
                             <th class="cand-sortable" onclick="candSort(5)">Added <span class="sort-ic">&#8597;</span></th>
-                            <th>Status</th>
+                            <th>Interview Status</th>
                             <th></th>
                         </tr>
                     </thead>
@@ -105,9 +425,13 @@
                             <td class="cand-td-loc" title="{{ c.location }}">{{ c.location }}</td>
                             <td class="text-muted cand-td-date">{{ c.created_at }}</td>
                             <td>
-                                <span class="status-badge status-{{ c.status | lower }}"
-                                      data-id="{{ c.id }}" data-status="{{ c.status }}"
-                                      onclick="cycleStatus(this)" title="Click to change status">{{ c.status }}</span>
+                                <select class="ist-select" data-id="{{ c.id }}"
+                                        onchange="setInterviewStatus(this)"
+                                        title="Set interview status">
+                                    {% for ist in interview_statuses %}
+                                    <option value="{{ ist }}" {% if c.interview_status == ist %}selected{% endif %}>{{ ist }}</option>
+                                    {% endfor %}
+                                </select>
                             </td>
                             <td><a class="button secondary" style="padding:4px 10px;font-size:0.82rem;" href="{{ url_for('profile_detail', resume_id=c.id) }}">View</a></td>
                         </tr>
@@ -155,6 +479,93 @@
                     badge.style.display = 'none';
                 }
             }
+
+            // ── Refresh candidate table ───────────────────────────────────
+            var _pal2 = ['#4f46e5','#7c3aed','#059669','#d97706','#dc2626','#0284c7','#db2777','#65a30d','#0891b2','#9333ea'];
+            function _nc2(n) { var h=0; for(var i=0;i<n.length;i++) h=(h*31+n.charCodeAt(i))>>>0; return _pal2[h%_pal2.length]; }
+
+            window.candRefresh = function () {
+                var btn = document.getElementById('candRefreshBtn');
+                btn.textContent = '⟳ Loading…';
+                btn.disabled = true;
+                fetch('/api/candidates')
+                    .then(function (r) { return r.json(); })
+                    .then(function (data) {
+                        var tbody = document.getElementById('candTbody');
+                        tbody.innerHTML = '';
+                        if (!data.candidates || !data.candidates.length) {
+                            tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:28px;color:var(--tx-muted);">No candidates yet.</td></tr>';
+                        } else {
+                            data.candidates.forEach(function (c) {
+                                var en = parseInt((c.exp_years || '').replace('+','')) || 0;
+                                var expCls = en >= 8 ? 'exp-high' : en >= 3 ? 'exp-mid' : 'exp-low';
+                                var tr = document.createElement('tr');
+                                tr.className = 'cand-row';
+                                tr.dataset.id = c.id;
+                                tr.innerHTML =
+                                    '<td class="cand-td-cb"><input type="checkbox" class="cand-cb cand-row-cb" value="' + c.id + '" onchange="candRowCheck(this)"></td>' +
+                                    '<td class="cand-td-name"><div class="cand-name-row">' +
+                                        '<span class="cand-avatar" style="background:' + _nc2(c.full_name) + '">' + c.initials + '</span>' +
+                                        '<a class="dash-link cand-preview-link" data-role="' + _esc(c.title) + '" data-loc="' + _esc(c.location) + '" data-summary="' + _esc(c.summary_snippet) + '" href="/profile/' + c.id + '">' + _esc(c.full_name) + '</a>' +
+                                    '</div></td>' +
+                                    '<td><span class="cand-exp-badge ' + expCls + '">' + c.exp_years + '</span></td>' +
+                                    '<td><span class="role-badge">' + _esc(c.title) + '</span></td>' +
+                                    '<td class="cand-td-loc" title="' + _esc(c.location) + '">' + _esc(c.location) + '</td>' +
+                                    '<td class="text-muted cand-td-date">' + c.created_at + '</td>' +
+                                    '<td>' + _istSelect(c.id, c.interview_status) + '</td>' +
+                                    '<td><a class="button secondary" style="padding:4px 10px;font-size:0.82rem;" href="/profile/' + c.id + '">View</a></td>';
+                                tbody.appendChild(tr);
+                            });
+                            // Re-wire tooltip listeners on new rows
+                            tbody.querySelectorAll('.cand-preview-link').forEach(function (a) {
+                                a.addEventListener('mouseenter', function (e) {
+                                    _tip.querySelector('.ct-role').textContent    = a.dataset.role    || '';
+                                    _tip.querySelector('.ct-loc').textContent     = a.dataset.loc     || '';
+                                    _tip.querySelector('.ct-summary').textContent = a.dataset.summary || '';
+                                    _tip.style.display = 'block'; _positionTip(e);
+                                });
+                                a.addEventListener('mousemove', _positionTip);
+                                a.addEventListener('mouseleave', function () { _tip.style.display = 'none'; });
+                            });
+                        }
+                        // Update pipeline summary
+                        var sc = data.status_counts || {};
+                        var ps = document.querySelector('.pipeline-summary');
+                        if (ps) {
+                            ps.querySelectorAll('.ps-item').forEach(function (el) {
+                                if (el.classList.contains('ps-new'))         el.innerHTML = '&#9679; ' + (sc.New         || 0) + ' New';
+                                if (el.classList.contains('ps-reviewed'))    el.innerHTML = '&#9679; ' + (sc.Reviewed    || 0) + ' Reviewed';
+                                if (el.classList.contains('ps-shortlisted')) el.innerHTML = '&#9679; ' + (sc.Shortlisted || 0) + ' Shortlisted';
+                            });
+                        }
+                        btn.textContent = '✓ Updated';
+                        setTimeout(function () { btn.textContent = '⟳ Refresh'; btn.disabled = false; }, 1500);
+                    })
+                    .catch(function () { btn.textContent = '⟳ Refresh'; btn.disabled = false; });
+            };
+
+            function _esc(s) {
+                return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+            }
+
+            var _istOptions = {{ interview_statuses | tojson }};
+
+            function _istSelect(id, current) {
+                var opts = _istOptions.map(function (o) {
+                    return '<option value="' + _esc(o) + '"' + (o === current ? ' selected' : '') + '>' + _esc(o) + '</option>';
+                }).join('');
+                return '<select class="ist-select" data-id="' + id + '" onchange="setInterviewStatus(this)" title="Set interview status">' + opts + '</select>';
+            }
+
+            window.setInterviewStatus = function (sel) {
+                var id = sel.dataset.id;
+                var status = sel.value;
+                fetch('/candidate-interview-status', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({id: parseInt(id), status: status})
+                }).catch(function () {});
+            };
 
             // ── Quick Search ──────────────────────────────────────────────
             window.qsFilter = function () {
@@ -237,87 +648,6 @@
             {% endif %}
         </div>
 
-
-        <!-- NEW: Upload Trend -->
-        <div class="card" style="margin-top:24px;">
-            <div class="section-header" style="margin-bottom:14px;">
-                <div class="section-icon icon-experience">&#128200;</div>
-                <h2>Upload Trend</h2>
-                <span class="section-note">Last 30 days</span>
-            </div>
-            {% if upload_trend %}
-                <div class="trend-chart-wrap">
-                    <canvas id="trendCanvas" class="trend-canvas"></canvas>
-                </div>
-                <script>
-                (function () {
-                    var data = [{% for d in upload_trend %}{ label: "{{ d.day_label }}", cnt: {{ d.cnt }} }{% if not loop.last %},{% endif %}{% endfor %}];
-                    var canvas = document.getElementById('trendCanvas');
-                    if (!canvas) return;
-                    var dpr = window.devicePixelRatio || 1;
-                    var W = canvas.parentElement.offsetWidth || 300;
-                    var H = 130;
-                    canvas.width  = W * dpr;
-                    canvas.height = H * dpr;
-                    canvas.style.width  = W + 'px';
-                    canvas.style.height = H + 'px';
-                    var ctx = canvas.getContext('2d');
-                    ctx.scale(dpr, dpr);
-
-                    var maxCnt = Math.max.apply(null, data.map(function (d) { return d.cnt; }));
-                    var padL = 28, padR = 8, padT = 12, padB = 30;
-                    var chartW = W - padL - padR;
-                    var chartH = H - padT - padB;
-                    var barW = Math.max(4, Math.floor(chartW / data.length) - 2);
-                    var gap  = (chartW - barW * data.length) / Math.max(data.length - 1, 1);
-
-                    // Gridlines
-                    ctx.strokeStyle = 'rgba(0,0,0,0.06)';
-                    ctx.lineWidth = 1;
-                    for (var g = 0; g <= 4; g++) {
-                        var gy = padT + chartH - (g / 4) * chartH;
-                        ctx.beginPath(); ctx.moveTo(padL, gy); ctx.lineTo(W - padR, gy); ctx.stroke();
-                    }
-
-                    // Bars
-                    data.forEach(function (d, i) {
-                        var bh = maxCnt > 0 ? (d.cnt / maxCnt) * chartH : 0;
-                        var x  = padL + i * (barW + gap);
-                        var y  = padT + chartH - bh;
-                        var grad = ctx.createLinearGradient(0, y, 0, y + bh);
-                        grad.addColorStop(0, '#4f46e5');
-                        grad.addColorStop(1, '#7c3aed');
-                        ctx.fillStyle = grad;
-                        ctx.beginPath();
-                        ctx.roundRect ? ctx.roundRect(x, y, barW, bh, 3) : ctx.rect(x, y, barW, bh);
-                        ctx.fill();
-
-                        // Value label on top
-                        if (bh > 14) {
-                            ctx.fillStyle = '#fff';
-                            ctx.font = 'bold 9px sans-serif';
-                            ctx.textAlign = 'center';
-                            ctx.fillText(d.cnt, x + barW / 2, y + 10);
-                        }
-                    });
-
-                    // X-axis labels (every ~5 bars)
-                    ctx.fillStyle = '#64748b';
-                    ctx.font = '9px sans-serif';
-                    ctx.textAlign = 'center';
-                    var step = Math.ceil(data.length / 6);
-                    data.forEach(function (d, i) {
-                        if (i % step === 0 || i === data.length - 1) {
-                            var x = padL + i * (barW + gap) + barW / 2;
-                            ctx.fillText(d.label, x, H - 6);
-                        }
-                    });
-                })();
-                </script>
-            {% else %}
-                <p class="muted" style="text-align:center;padding:24px 0;">No upload data yet.</p>
-            {% endif %}
-        </div>
 
     </div><!-- end right col -->
 

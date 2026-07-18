@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}{% if requirement %}Edit Requirement{% else %}Add Requirement{% endif %} | Resume Profile{% endblock %}
+{% block content %}
+
+<section class="hero card">
+    <div>
+        <p class="eyebrow">{% if requirement %}Edit{% else %}New{% endif %} Requirement</p>
+        <h1>{% if requirement %}Edit: {{ requirement.requirement_name }}{% else %}Add Requirement{% endif %}</h1>
+        <p class="muted">Fill in the client requisition details below.</p>
+    </div>
+    <a class="button secondary" href="{{ url_for('requirement_management') }}">&larr; Back to Requirements</a>
+</section>
+
+<form class="card form-grid" method="post">
+
+    <div>
+        <label for="requirement_code">Requirement ID <span style="color:#c0182c;">*</span></label>
+        <input id="requirement_code" name="requirement_code" required placeholder="e.g. REQ-1001"
+               value="{{ requirement.requirement_code if requirement else '' }}">
+    </div>
+
+    <div>
+        <label for="requirement_name">Requirement Name <span style="color:#c0182c;">*</span></label>
+        <input id="requirement_name" name="requirement_name" required placeholder="e.g. Senior QA Engineer"
+               value="{{ requirement.requirement_name if requirement else '' }}">
+    </div>
+
+    <div>
+        <label for="client">Client</label>
+        <input id="client" name="client" placeholder="e.g. Acme Pharma"
+               value="{{ requirement.client if requirement else '' }}">
+    </div>
+
+    <div>
+        <label for="division">Division/Group</label>
+        <input id="division" name="division" placeholder="e.g. IT, Validation, Finance"
+               value="{{ requirement.division if requirement else '' }}">
+    </div>
+
+    <div>
+        <label for="num_requirement"># of Requirement</label>
+        <input id="num_requirement" name="num_requirement" type="number" min="0" step="1"
+               value="{{ requirement.num_requirement if requirement else 1 }}">
+    </div>
+
+    <div>
+        <label for="status">Status</label>
+        <select id="status" name="status" class="form-select">
+            {% for s in statuses %}
+            <option value="{{ s }}" {% if requirement and requirement.status == s %}selected{% elif not requirement and s == 'Open' %}selected{% endif %}>{{ s }}</option>
+            {% endfor %}
+        </select>
+    </div>
+
+    <div>
+        <label for="profiles_shared"># of Profiles Shared</label>
+        <input id="profiles_shared" name="profiles_shared" type="number" min="0" step="1"
+               value="{{ requirement.profiles_shared if requirement else 0 }}">
+    </div>
+
+    <div>
+        <label for="interviewed">Interviewed</label>
+        <input id="interviewed" name="interviewed" type="number" min="0" step="1"
+               value="{{ requirement.interviewed if requirement else 0 }}">
+    </div>
+
+    <div>
+        <label for="offered">Offered</label>
+        <input id="offered" name="offered" type="number" min="0" step="1"
+               value="{{ requirement.offered if requirement else 0 }}">
+    </div>
+
+    <div class="full actions">
+        <button class="button" type="submit">{% if requirement %}Save Changes{% else %}Add Requirement{% endif %}</button>
+        <a class="button secondary" href="{{ url_for('requirement_management') }}">Cancel</a>
+    </div>
+
+</form>
+{% endblock %}
