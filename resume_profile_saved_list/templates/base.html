@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{% block title %}Resume Profile{% endblock %}</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=13">
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=14">
 </head>
 <body>
 <div class="app-layout">
@@ -49,6 +49,13 @@
             </a>
             {% endif %}
 
+            <a href="{{ url_for('ai_training_chat') }}"
+               class="nav-item {{ 'active' if request.endpoint and request.endpoint.startswith('ai_training') else '' }}"
+               title="AI Training">
+                <span class="nav-icon">&#129302;</span>
+                <span class="nav-label">AI Training</span>
+            </a>
+
             <p class="nav-section-label">Profiles</p>
 
             <a href="{{ url_for('profile_list') }}"
@@ -83,6 +90,7 @@
                     {% if current_role == 'admin' %}
                     <a href="{{ url_for('user_management') }}">&#128100; User Management</a>
                     {% endif %}
+                    <a href="{{ url_for('ai_training_chat') }}">&#129302; AI Training</a>
                     <a href="{{ url_for('profile_list') }}">&#128203; View Profiles</a>
                     <a href="{{ url_for('edit_resume') }}">&#8679; Add Profile</a>
                     {% if current_username %}

@@ -1458,3 +1458,52 @@ body.login-page {
     .login-brand-sub, .login-brand-points { display: none; }
     .login-form-panel { flex: 1; }
 }
+
+/* ── AI Training module (new — additive only) ─────────────────────────── */
+.training-chat-log {
+    max-height: 520px;
+    overflow-y: auto;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+.training-chat-row { display: flex; }
+.training-chat-user { justify-content: flex-end; }
+.training-chat-assistant { justify-content: flex-start; }
+.training-chat-bubble {
+    max-width: 70%;
+    padding: 12px 16px;
+    border-radius: 14px;
+    font-size: 0.98rem;
+    line-height: 1.55;
+}
+.training-chat-user .training-chat-bubble {
+    background: var(--clr-primary-light);
+    border-bottom-right-radius: 4px;
+}
+.training-chat-assistant .training-chat-bubble {
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    border-bottom-left-radius: 4px;
+}
+.training-chat-input {
+    display: flex;
+    gap: 12px;
+    align-items: flex-end;
+    padding: 16px 20px;
+    border-top: 1px solid var(--border);
+}
+.training-chat-input textarea {
+    flex: 1;
+    resize: vertical;
+    font-family: inherit;
+    font-size: 0.98rem;
+    padding: 10px 12px;
+    border: 1px solid var(--border-s);
+    border-radius: 8px;
+}
+@media (max-width: 700px) {
+    .training-chat-bubble { max-width: 88%; }
+    .training-chat-input { flex-direction: column; align-items: stretch; }
+}

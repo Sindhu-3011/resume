@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Rule History | AI Training{% endblock %}
+{% block content %}
+
+<section class="hero card">
+    <div>
+        <p class="eyebrow">Version History</p>
+        <h1>Rule #{{ rule.id }} — {{ rule.category }}</h1>
+        <p class="muted">Current (v{{ rule.version }}): {{ rule.rule_text }}</p>
+    </div>
+    <a class="button secondary" href="{{ url_for('ai_training_rules') }}">&larr; Back to Rules</a>
+</section>
+
+{% if versions %}
+<div class="card" style="padding:0; overflow:hidden;">
+    <div style="overflow-x:auto;">
+    <table class="jdm-table">
+        <thead>
+            <tr>
+                <th>Version</th>
+                <th>Category</th>
+                <th>Rule Text</th>
+                <th>Priority</th>
+                <th>Status</th>
+                <th>Changed By</th>
+                <th>Changed At</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for v in versions %}
+            <tr>
+                <td class="jdm-td-num">v{{ v.version }}</td>
+                <td>
+                    <span class="jdm-cat-badge {% if v.category != rule.category %}jdm-cat-val{% endif %}">{{ v.category }}</span>
+                </td>
+                <td style="max-width:360px; {% if v.rule_text != rule.rule_text %}font-weight:600;{% endif %}">{{ v.rule_text }}</td>
+                <td>{{ v.priority }}</td>
+                <td>{{ v.status }}</td>
+                <td>{{ v.changed_by or '—' }}</td>
+                <td>{{ v.changed_at.strftime('%Y-%m-%d %H:%M') if v.changed_at else '—' }}</td>
+                <td class="jdm-actions">
+                    {% if current_role == 'admin' %}
+                    <form method="post" action="{{ url_for('ai_training_rule_restore', rule_id=rule.id, version_id=v.id) }}" style="display:inline"
+                          onsubmit="return confirm('Restore rule to version {{ v.version }}?')">
+                        <button type="submit" class="button secondary jdm-btn">Restore</button>
+                    </form>
+                    {% endif %}
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    </div>
+</div>
+<p class="muted" style="margin-top:12px;">Bold rows show fields that differ from the current live version. Restoring a version creates a new version — history is never rewritten.</p>
+{% else %}
+<div class="card" style="text-align:center; padding:48px 24px;">
+    <p style="font-size:3rem; margin-bottom:12px;">&#128337;</p>
+    <h3>No changes yet</h3>
+    <p class="muted">This rule hasn't been edited, disabled, or restored since it was created.</p>
+</div>
+{% endif %}
+
+{% endblock %}

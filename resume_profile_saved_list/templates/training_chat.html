@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}AI Training | Resume Profile{% endblock %}
+{% block content %}
+
+<section class="hero card">
+    <div>
+        <p class="eyebrow">Prompt Feedback Loop</p>
+        <h1>AI Training</h1>
+        <p class="muted">Tell the parser how to handle a resume it got wrong. Accepted instructions become versioned rules that are automatically applied to every future parse — no code changes needed.</p>
+    </div>
+    <div style="display:flex; gap:10px; flex-wrap:wrap;">
+        <a class="button secondary" href="{{ url_for('ai_training_rules') }}">Rule Management</a>
+        <a class="button secondary" href="{{ url_for('ai_training_test') }}">Test Resume</a>
+        <a class="button secondary" href="{{ url_for('ai_training_analytics') }}">Analytics</a>
+    </div>
+</section>
+
+<div class="card" style="padding:0; overflow:hidden;">
+    <div class="training-chat-log">
+        {% if not turns %}
+            <div style="text-align:center; padding:48px 24px;">
+                <p style="font-size:3rem; margin-bottom:12px;">&#129302;</p>
+                <h3>No instructions yet</h3>
+                <p class="muted">Describe a parsing mistake below, e.g. "Treat 'Core Competencies' as Skills".</p>
+            </div>
+        {% endif %}
+        {% for turn in turns %}
+            <div class="training-chat-row training-chat-user">
+                <div class="training-chat-bubble">{{ turn.user.message }}</div>
+            </div>
+            {% if turn.assistant %}
+            <div class="training-chat-row training-chat-assistant">
+                <div class="training-chat-bubble">
+                    <p style="margin:0 0 8px;">{{ turn.assistant.message }}</p>
+                    <span class="jdm-cat-badge">{{ turn.assistant.suggested_category or 'General' }}</span>
+                    {% if turn.user.saved_as_rule_id %}
+                        <span class="jdm-cat-badge jdm-cat-val" style="margin-left:6px;">Saved as rule #{{ turn.user.saved_as_rule_id }}</span>
+                    {% elif current_role == 'admin' %}
+                        <form method="post" action="{{ url_for('ai_training_save_rule', message_id=turn.assistant.id) }}" style="display:inline-block; margin-left:6px;">
+                            <input type="hidden" name="category" value="{{ turn.assistant.suggested_category or 'General' }}">
+                            <button type="submit" class="button jdm-btn">Save as Rule</button>
+                        </form>
+                    {% endif %}
+                </div>
+            </div>
+            {% endif %}
+        {% endfor %}
+    </div>
+
+    {% if current_role == 'admin' %}
+    <form method="post" action="{{ url_for('ai_training_chat_send') }}" class="training-chat-input">
+        <textarea name="message" rows="2" required placeholder="e.g. Never populate Work Experience from Projects.">{{ prefill }}</textarea>
+        <button type="submit" class="button">Send</button>
+    </form>
+    {% else %}
+    <div class="training-chat-input">
+        <p class="muted" style="margin:0;">You have read-only access. Ask an administrator to add or change training instructions.</p>
+    </div>
+    {% endif %}
+</div>
+
+{% endblock %}

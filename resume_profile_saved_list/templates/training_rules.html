@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+{% block title %}Rule Management | AI Training{% endblock %}
+{% block content %}
+
+<section class="hero card">
+    <div>
+        <p class="eyebrow">AI Training</p>
+        <h1>Rule Management</h1>
+        <p class="muted">Every active rule below is injected into the Ollama parsing prompt, highest priority first (Priority 1 = highest).</p>
+    </div>
+    {% if current_role == 'admin' %}
+    <a class="button" href="{{ url_for('ai_training_rule_add') }}">+ Add New Rule</a>
+    {% endif %}
+</section>
+
+<div class="card">
+    <form method="get" style="display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end;">
+        <div>
+            <label for="q">Search</label>
+            <input id="q" name="q" placeholder="Search rule text" value="{{ search }}">
+        </div>
+        <div>
+            <label for="category">Category</label>
+            <select id="category" name="category" class="form-select">
+                <option value="">All categories</option>
+                {% for c in categories %}
+                <option value="{{ c }}" {% if category == c %}selected{% endif %}>{{ c }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div>
+            <label for="status">Status</label>
+            <select id="status" name="status" class="form-select">
+                <option value="">All statuses</option>
+                <option value="active" {% if status == 'active' %}selected{% endif %}>Active</option>
+                <option value="disabled" {% if status == 'disabled' %}selected{% endif %}>Disabled</option>
+            </select>
+        </div>
+        <div>
+            <button type="submit" class="button secondary">Filter</button>
+            <a class="button secondary" href="{{ url_for('ai_training_rules') }}">Reset</a>
+        </div>
+    </form>
+</div>
+
+{% if rules %}
+<div class="card" style="padding:0; overflow:hidden;">
+    <div style="overflow-x:auto;">
+    <table class="jdm-table">
+        <thead>
+            <tr>
+                <th>Priority</th>
+                <th>Category</th>
+                <th>Rule</th>
+                <th>Status</th>
+                <th>Version</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for r in rules %}
+            <tr>
+                <td class="jdm-td-num">{{ r.priority }}</td>
+                <td><span class="jdm-cat-badge">{{ r.category }}</span></td>
+                <td style="max-width:420px;">{{ r.rule_text }}</td>
+                <td>
+                    {% if r.status == 'active' %}
+                        <span class="jdm-cat-badge jdm-cat-val">Active</span>
+                    {% else %}
+                        <span class="jdm-cat-badge">Disabled</span>
+                    {% endif %}
+                </td>
+                <td>v{{ r.version }}</td>
+                <td class="jdm-actions">
+                    <a class="button secondary jdm-btn" href="{{ url_for('ai_training_rule_history', rule_id=r.id) }}">History</a>
+                    {% if current_role == 'admin' %}
+                        <a class="button secondary jdm-btn" href="{{ url_for('ai_training_rule_edit', rule_id=r.id) }}">Edit</a>
+                        <form method="post" action="{{ url_for('ai_training_rule_toggle', rule_id=r.id) }}" style="display:inline">
+                            <button type="submit" class="button secondary jdm-btn">{{ 'Disable' if r.status == 'active' else 'Enable' }}</button>
+                        </form>
+                        <form method="post" action="{{ url_for('ai_training_rule_delete', rule_id=r.id) }}" style="display:inline"
+                              onsubmit="return confirm('Delete this rule? This cannot be undone.')">
+                            <button type="submit" class="button danger jdm-btn">Delete</button>
+                        </form>
+                    {% endif %}
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    </div>
+</div>
+{% else %}
+<div class="card" style="text-align:center; padding:48px 24px;">
+    <p style="font-size:3rem; margin-bottom:12px;">&#128220;</p>
+    <h3>No rules match</h3>
+    <p class="muted">Add a rule directly, or accept one from the AI Training chat.</p>
+</div>
+{% endif %}
+
+{% endblock %}

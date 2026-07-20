@@ -1642,6 +1642,68 @@ def extract_resume_text(path, ext):
     raise ValueError("Unsupported file type")
 
 
+_PROJECT_TABLE_HEADER_ALIASES = frozenset({
+    "project details", "project detail", "project description",
+})
+_RESPONSIBILITY_TABLE_HEADER_ALIASES = frozenset({
+    "role and responsibilities", "roles and responsibilities",
+    "role and responsibility", "roles & responsibilities",
+    "role & responsibilities", "role & responsibility",
+    "responsibilities", "responsibility",
+})
+
+
+def _pdfplumber_project_table_text(path):
+    """Detect a 2-column 'Project Details | Role and Responsibilities' PDF
+    table and reconstruct it row by row, keeping each project paired with its
+    own responsibilities.
+
+    Plain linear text extraction reads a table cell-by-cell in content-stream
+    order, which works fine for short single-line cells but scrambles a table
+    once cells wrap across several lines — the two columns' lines interleave
+    unpredictably, project descriptions get truncated, and unrelated nearby
+    text (e.g. an Education line elsewhere on the page) can bleed in. pdfplumber
+    reads each table cell as a whole, so rows stay correctly paired.
+
+    Returns "" if pdfplumber is unavailable or no matching table is found —
+    this only overrides the Projects field for this specific table shape;
+    every other resume layout is completely unaffected.
+    """
+    if not HAS_PDFPLUMBER:
+        return ""
+    blocks = []
+    try:
+        import pdfplumber
+        with pdfplumber.open(str(path)) as pdf:
+            for page in pdf.pages:
+                for table in (page.extract_tables() or []):
+                    if not table or len(table) < 2 or len(table[0]) != 2:
+                        continue
+                    header = [(c or "").strip().lower() for c in table[0]]
+                    if not (header[0] in _PROJECT_TABLE_HEADER_ALIASES
+                            and header[1] in _RESPONSIBILITY_TABLE_HEADER_ALIASES):
+                        continue
+                    for row in table[1:]:
+                        if len(row) != 2:
+                            continue
+                        details = (row[0] or "").strip()
+                        resp = (row[1] or "").strip()
+                        if not details:
+                            continue
+                        block = details
+                        if resp:
+                            resp_lines = [
+                                "- " + rl.strip().lstrip("•●▪◦-*").strip()
+                                for rl in resp.splitlines() if rl.strip()
+                            ]
+                            block += "\nRoles & Responsibilities:\n" + "\n".join(resp_lines)
+                        blocks.append(block)
+    except Exception as e:
+        logger.warning(f"pdfplumber project-table extraction failed: {e}")
+        return ""
+    return "\n\n".join(blocks)
+
+
 # ── Resume parsing ─────────────────────────────────────────────────────────────
 
 def normalize_lines(text):
@@ -1875,6 +1937,23 @@ def parse_label_value(lines, labels):
     return ""
 
 
+def _fix_ocr_zero_o_confusion(email):
+    """Correct EasyOCR's frequent digit/letter mix-up in email local parts: a
+    tightly-kerned '0' (zero) in an image-based contact header is very often
+    read back as the letter 'o'. Only touch an 'o'/'O' that sits directly
+    between two digits, or right before '@' with a digit just before it — a
+    real local part essentially never has a bare letter in exactly that
+    position, but a misread '0' commonly does, so this is safe to apply
+    unconditionally rather than only for OCR-sourced text.
+    """
+    if "@" not in email:
+        return email
+    local, domain = email.split("@", 1)
+    local = re.sub(r"(?<=\d)[oO](?=\d)", "0", local)
+    local = re.sub(r"(?<=\d)[oO]$", "0", local)
+    return f"{local}@{domain}"
+
+
 def _extract_email(text):
     """Return the first valid email found in text, handling common OCR artifacts."""
     # Pre-pass: join lines where an email wraps mid-TLD (e.g. "foo@gmail.c\nom").
@@ -1889,7 +1968,7 @@ def _extract_email(text):
     # Pass 1: standard clean email
     m = re.search(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}", text)
     if m:
-        return m.group().strip().rstrip(".,;)")
+        return _fix_ocr_zero_o_confusion(m.group().strip().rstrip(".,;)"))
 
     # Pass 2: scan lines — rebuild from the @ position handling OCR noise
     for line in text.splitlines():
@@ -1918,7 +1997,7 @@ def _extract_email(text):
         )
 
         if local and domain and "." in domain and len(domain.split(".")[-1]) >= 2:
-            return f"{local}@{domain}"
+            return _fix_ocr_zero_o_confusion(f"{local}@{domain}")
     return ""
 
 
@@ -2438,32 +2517,43 @@ def parse_resume_text(text, name_hint=None):
     # Name fallback: look for a line that actually looks like a person's name.
     # Prevents professional summary sentences from being assigned as the name.
     # Prioritize all-caps names (likely to be actual names in resume headers)
+    #
+    # Never consider a line at/after the first recognized section heading (e.g.
+    # a "CORE COMPETENCIES" sub-heading like "Document Control") as a name
+    # candidate — mirrors the same section-heading boundary already used for
+    # title extraction just below, applied here too since a short Title-Case
+    # skill-category label can otherwise pass the same 2-word name heuristic
+    # as a real name once scanning runs past the resume's actual header.
+    _name_scan_limit = next(
+        (i for i, l in enumerate(useful_top_lines) if canonical_section_name(l)),
+        len(useful_top_lines),
+    )
     if not parsed["full_name"]:
         # Pass 0: the name is sometimes combined with a degree/title on one line
         # (e.g. "GURUVIGNESH Y - B.E MBA(PM) Senior Engineer (R&D Medical Device)").
         # The parentheses/hyphen make the whole line fail the name check, but the
         # segment before the first " - "/"–"/"|" separator is often just the name.
-        for _nl in useful_top_lines[:3]:
+        for _nl in useful_top_lines[:min(3, _name_scan_limit)]:
             _seg = re.split(r'\s+[-–|]\s+', _nl, maxsplit=1)[0].strip()
             if _seg and _seg != _nl and _looks_like_name(_seg):
                 parsed["full_name"] = _seg[:80]
                 break
         # First pass: look for all-caps names in FIRST 10 lines (e.g., "SIVARANJANI D")
         if not parsed["full_name"]:
-            for _nl in useful_top_lines[:10]:
+            for _nl in useful_top_lines[:min(10, _name_scan_limit)]:
                 _nl_clean = _strip_degree_suffix(_nl)
                 if _nl_clean.isupper() and _looks_like_name(_nl_clean):
                     parsed["full_name"] = _nl_clean[:80]
                     break
         # First pass: look for all-caps names in FIRST 10 lines (e.g., "SIVARANJANI D")
         if not parsed["full_name"]:
-            for _nl in useful_top_lines[:10]:
+            for _nl in useful_top_lines[:min(10, _name_scan_limit)]:
                 if _nl.isupper() and _looks_like_name(_nl):
                     parsed["full_name"] = _nl[:80]
                     break
         # Second pass: look for TWO-WORD names (common name pattern) in first 15 lines
         if not parsed["full_name"]:
-            for _nl in useful_top_lines[:15]:
+            for _nl in useful_top_lines[:min(15, _name_scan_limit)]:
                 _nl_clean = _strip_degree_suffix(_nl)
                 _words = _nl_clean.split()
                 if len(_words) == 2 and _looks_like_name(_nl_clean):
@@ -2471,14 +2561,14 @@ def parse_resume_text(text, name_hint=None):
                     break
         # Third pass: look for any proper-cased name in all useful lines
         if not parsed["full_name"]:
-            for _nl in useful_top_lines:
+            for _nl in useful_top_lines[:_name_scan_limit]:
                 _nl_clean = _strip_degree_suffix(_nl)
                 if _looks_like_name(_nl_clean):
                     parsed["full_name"] = _nl_clean[:80]
                     break
         if not parsed["full_name"]:
             # Looser pass: short proper-cased line with 2-5 words and no stopwords
-            for _nl in useful_top_lines:
+            for _nl in useful_top_lines[:_name_scan_limit]:
                 _nwords = _nl.split()
                 if (2 <= len(_nwords) <= 5 and _nl[:1].isupper() and len(_nl) <= 50
                         and not {w.lower().strip(".,;:-") for w in _nwords} & _NAME_STOPWORDS):
@@ -2904,7 +2994,7 @@ def _identity_value_grounded(field, value, source_text):
     return any(w in text_lower for w in words) if words else False
 
 
-def _ollama_identity_extract(text, missing_fields):
+def _ollama_identity_extract(text, missing_fields, rules_text=""):
     """Ask the local LLM for identity fields the rule-based parser couldn't find.
 
     Runs on its own — independent of the content-field AI budget below — so heavy
@@ -2913,10 +3003,15 @@ def _ollama_identity_extract(text, missing_fields):
     resume layouts that don't match any of the rule-based heuristics, and the ONLY
     fallback at all for location/linkedin, which the regex-only pass can miss
     whenever they aren't behind an explicit label.
+
+    rules_text: optional block of admin-authored parsing instructions from the
+    AI Training module (see _active_training_rules_block); empty by default so
+    behavior is unchanged when no training rules exist.
     """
     if not missing_fields:
         return {}
     prompt = (
+        rules_text +
         "Extract the candidate's identity details from this resume header/contact "
         "area. Return ONLY this JSON, using an empty string for anything not "
         'present:\n{"full_name": "", "email": "", "phone": "", "location": "", '
@@ -4467,9 +4562,17 @@ def parse_resume_with_llm_text(path):
     # reached email/phone, and full_name got only one shot gated by the same clock.
     # location/linkedin had no AI fallback at all. This call is unconditional and
     # untimed against that budget, so identity extraction always gets to run.
+    # AI Training module: load any admin-authored parsing instructions once per
+    # parse and thread them into every Ollama prompt below. Empty when no rules
+    # exist (the default), so this is a no-op until rules are added.
+    import time as _time
+    _train_t0 = _time.monotonic()
+    _training_rules_text, _training_rule_ids = _active_training_rules_block()
+    _training_ai_responses = []
+
     _missing_identity = [f for f in _IDENTITY_FIELDS if not result.get(f)]
     if _missing_identity:
-        _identity_fill = _ollama_identity_extract(raw_text, _missing_identity)
+        _identity_fill = _ollama_identity_extract(raw_text, _missing_identity, _training_rules_text)
         for _id_field, _id_val in _identity_fill.items():
             result[_id_field] = _id_val
             logger.info(f"Identity AI filled '{_id_field}': {_id_val}")
@@ -4533,8 +4636,9 @@ def parse_resume_with_llm_text(path):
             break
         logger.info(f"AI fallback for '{field}'")
         try:
-            raw = _ollama_chat(prompt + ctx_text, as_json=as_json,
+            raw = _ollama_chat(_training_rules_text + prompt + ctx_text, as_json=as_json,
                                num_predict=num_predict, num_ctx=num_ctx)
+            _training_ai_responses.append(f"{field}: {str(raw)[:200]}")
             if as_json:
                 items = raw.get("skills", []) if isinstance(raw, dict) else []
                 if items:
@@ -4863,6 +4967,55 @@ def parse_resume_with_llm_text(path):
 
     result["experience"], result["projects"] = _reassign_project_specific_bullets(
         result.get("experience", ""), result.get("projects", "")
+    )
+
+    # If this PDF has a real 'Project Details | Role and Responsibilities' table,
+    # the linear text extraction above scrambles it once a cell wraps across
+    # several lines (see _pdfplumber_project_table_text docstring), and that
+    # scrambled duplicate content can also leak into Experience via the
+    # "Responsibilities" heading match and get shuffled back into Projects by
+    # the reassignment step just above. Runs last so the clean, row-paired
+    # reconstruction always has the final say — no-op (returns "") for every
+    # other resume layout.
+    if _path_ext == "pdf":
+        _table_projects = _pdfplumber_project_table_text(path)
+        if _table_projects:
+            result["projects"] = _table_projects
+            logger.info(f"Projects overridden from pdfplumber table extraction ({len(_table_projects)} chars)")
+
+    # AI Training: Experience/Projects are extracted verbatim above and never
+    # otherwise reach Ollama (they aren't in _AI_FALLBACK), so a saved rule about
+    # how they should be organized would otherwise never take effect. Only runs
+    # when active rules exist AND there's still time left in the same AI budget
+    # every other fallback call above respects — without this check, a bulk
+    # upload processing many resumes in one request could each spend extra,
+    # uncapped time here and stall the whole batch. Keeps the original verbatim
+    # text on any failure, budget exhaustion, or unsafe-looking output, so this
+    # can reorganize but never drop content or block indefinitely.
+    if _training_rules_text and _time.monotonic() - _ai_budget_start <= _OLLAMA_BUDGET_SECS:
+        result["experience"], _exp_note = _apply_training_rules_to_verbatim_field(
+            "Work Experience", result.get("experience", ""), _training_rules_text
+        )
+        if _exp_note:
+            _training_ai_responses.append(_exp_note)
+        if _time.monotonic() - _ai_budget_start <= _OLLAMA_BUDGET_SECS:
+            result["projects"], _proj_note = _apply_training_rules_to_verbatim_field(
+                "Project Details", result.get("projects", ""), _training_rules_text
+            )
+        else:
+            logger.info("AI budget exhausted — skipping training-rule refinement of Projects")
+            _proj_note = None
+        if _proj_note:
+            _training_ai_responses.append(_proj_note)
+
+    _log_training_parse(
+        resume_name=os.path.basename(str(path)),
+        rule_ids=_training_rule_ids,
+        prompt_excerpt=_training_rules_text,
+        response_excerpt=" | ".join(_training_ai_responses),
+        final_json=result,
+        duration_ms=int((_time.monotonic() - _train_t0) * 1000),
+        success=True,
     )
 
     return result, "llm_text"
@@ -7023,21 +7176,14 @@ def process_raw_files():
     for p in files_to_process:
         ext = p.suffix.lower().lstrip('.')
         try:
-            # Use the same "Resume Intelligence" (AI/verbatim) parser the
-            # single-profile Add Profile flow uses by default — falls back
-            # to the quick regex parser on failure, same pattern as
-            # /api/parse-resume, so bulk uploads get the same field-mapping
-            # accuracy as single uploads instead of the older quick-only path.
-            if ext in ('pdf', 'docx'):
-                try:
-                    parsed_data, _ = parse_resume_with_llm_text(p)
-                except Exception as e:
-                    logger.warning("Resume Intelligence failed for %s (%s); using Quick Parse.", p.name, e)
-                    if ext == 'pdf':
-                        parsed_data = _parse_pdf_quick(p)
-                    else:
-                        parsed_data = parse_resume_text(extract_resume_text(p, ext))
-            elif ext == 'pdf':
+            # Bulk uploads use the fast regex/heading parser only — no Ollama
+            # calls at all. A bulk batch runs every file sequentially inside
+            # one request, so per-file AI latency (identity extraction is
+            # unconditional, plus _AI_FALLBACK) multiplies across the whole
+            # batch; skipping AI here restores the original bulk-upload speed.
+            # Single-profile uploads (Add Profile) and the Test Resume sandbox
+            # are unaffected and still get full AI-assisted parsing.
+            if ext == 'pdf':
                 parsed_data = _parse_pdf_quick(p)
             else:
                 parsed_data = parse_resume_text(extract_resume_text(p, ext))
@@ -8897,7 +9043,6 @@ def user_management():
         users = conn.execute("SELECT * FROM app_user ORDER BY created_at ASC").fetchall()
     return render_template("user_management.html", users=list(users))
 
-
 @app.route("/users/add", methods=["GET", "POST"])
 def user_add():
     if not _require_admin():
@@ -8986,6 +9131,595 @@ def user_delete(user_id):
         conn.execute("DELETE FROM app_user WHERE id = %s", (user_id,))
     flash("User deleted.", "success")
     return redirect(url_for("user_management"))
+
+
+# ── AI Training / Prompt Management (new module — additive only, isolated) ──
+#
+# Lets an admin give plain-English parsing instructions ("treat 'Core
+# Competencies' as Skills") through a chat UI. Accepted instructions are
+# stored as versioned, prioritized rules and injected into the existing
+# Ollama prompts at parse time via _active_training_rules_block(), called
+# from _ollama_identity_extract and from the _AI_FALLBACK loop inside
+# parse_resume_with_llm_text. When no rules exist, those prompts are
+# byte-identical to before this module existed, so there is zero behavior
+# change until an admin actually adds a rule. This is prompt augmentation
+# only — it never touches Ollama model weights.
+
+TRAINING_CATEGORIES = [
+    "Work Experience", "Skills", "Projects", "Education", "Certifications",
+    "Personal Details", "Summary", "Role Detection", "Section Mapping",
+    "Parsing Rules", "General",
+]
+
+
+def ensure_training_tables(conn):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS training_chat_message (
+            id                 SERIAL PRIMARY KEY,
+            role               TEXT NOT NULL,
+            message            TEXT NOT NULL,
+            suggested_category TEXT DEFAULT '',
+            saved_as_rule_id   INTEGER,
+            created_by         TEXT DEFAULT '',
+            created_at         TIMESTAMPTZ DEFAULT NOW()
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS training_rule (
+            id             SERIAL PRIMARY KEY,
+            category       TEXT NOT NULL,
+            rule_text      TEXT NOT NULL,
+            priority       INTEGER DEFAULT 100,
+            status         TEXT DEFAULT 'active',
+            version        INTEGER DEFAULT 1,
+            source_chat_id INTEGER REFERENCES training_chat_message(id),
+            created_by     TEXT DEFAULT '',
+            created_at     TIMESTAMPTZ DEFAULT NOW(),
+            updated_at     TIMESTAMPTZ DEFAULT NOW()
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS training_rule_version (
+            id          SERIAL PRIMARY KEY,
+            rule_id     INTEGER NOT NULL REFERENCES training_rule(id) ON DELETE CASCADE,
+            version     INTEGER NOT NULL,
+            category    TEXT NOT NULL,
+            rule_text   TEXT NOT NULL,
+            priority    INTEGER NOT NULL,
+            status      TEXT NOT NULL,
+            changed_by  TEXT DEFAULT '',
+            changed_at  TIMESTAMPTZ DEFAULT NOW()
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS training_parse_log (
+            id               SERIAL PRIMARY KEY,
+            resume_name      TEXT DEFAULT '',
+            rules_applied    INTEGER[] DEFAULT '{}',
+            prompt_excerpt   TEXT DEFAULT '',
+            response_excerpt TEXT DEFAULT '',
+            final_json       TEXT,
+            duration_ms      INTEGER DEFAULT 0,
+            success          BOOLEAN DEFAULT TRUE,
+            error_detail     TEXT DEFAULT '',
+            created_at       TIMESTAMPTZ DEFAULT NOW()
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS training_rule_usage (
+            rule_id      INTEGER PRIMARY KEY REFERENCES training_rule(id) ON DELETE CASCADE,
+            usage_count  INTEGER DEFAULT 0,
+            last_used_at TIMESTAMPTZ
+        )
+        """
+    )
+
+
+def _active_training_rules_block():
+    """Return (instruction_block, rule_ids) for all active training rules,
+    highest priority first. Empty ("", []) when no rules exist, so prompts
+    at every call site are unaffected until an admin adds a rule."""
+    try:
+        with db_conn() as conn:
+            ensure_training_tables(conn)
+            rules = conn.execute(
+                "SELECT id, category, rule_text FROM training_rule "
+                "WHERE status = 'active' ORDER BY priority ASC, id ASC"
+            ).fetchall()
+    except Exception as e:
+        logger.warning(f"Could not load training rules: {e}")
+        return "", []
+    if not rules:
+        return "", []
+    lines = ["Additional parsing instructions (apply strictly, highest priority first):"]
+    for r in rules:
+        lines.append(f"- [{r['category']}] {r['rule_text']}")
+    return "\n".join(lines) + "\n\n", [r["id"] for r in rules]
+
+
+_TRAINING_META_PHRASE_RE = re.compile(
+    r'\bbased on (?:the|this) resume\b|\bthe candidate\b|\bthis resume (?:shows|indicates|includes)\b'
+    r'|\bi (?:can see|found|couldn\'?t find)\b|\bhere(?:\'s| is) (?:the|a)\b'
+    # Self-referential closing remarks about the reformatting itself, e.g.
+    # "Note that this reformatting strictly adheres only to applying the
+    # instructions above... all facts were preserved." — small local models
+    # commonly append this after otherwise-good output, and it must never be
+    # saved as if it were resume content.
+    r'|\bnote that this\b|\bthis reformatting\b|\bthis (?:summary|response|output)\s+(?:strictly\s+)?adheres\b'
+    r'|\b(?:was not|were not) (?:summarized|invented|omitted)\b|\ball facts were preserved\b'
+    r'|\binstructions? (?:above|provided)\b',
+    re.I,
+)
+
+
+def _strip_trailing_meta_paragraph(raw):
+    """Drop a trailing paragraph that's the model explaining what it just did
+    (e.g. a closing 'Note that this reformatting...' disclaimer) rather than
+    actual resume content, while keeping the genuinely reorganized content
+    before it. Only touches the last paragraph — never rejects the whole
+    response over a stray closing remark.
+    """
+    parts = raw.rsplit("\n\n", 1)
+    if len(parts) == 2 and _TRAINING_META_PHRASE_RE.search(parts[1]):
+        return parts[0].strip()
+    return raw
+
+
+def _apply_training_rules_to_verbatim_field(field_label, text, rules_text):
+    """Optionally refine a verbatim-extracted resume section (Work Experience,
+    Project Details) using active AI Training rules.
+
+    Experience/Projects are normally copied verbatim from the resume and never
+    reach Ollama at all (see _AI_FALLBACK, which doesn't cover them) — so a
+    saved rule about how they should be organized would otherwise never take
+    effect. This is opt-in per parse (only called when active rules exist) and
+    fails safe: on any error, empty output, or output that looks like invented
+    commentary rather than reorganized resume content, the original verbatim
+    text is kept unchanged. Returns (text, usage_note_or_None).
+    """
+    if not text or not text.strip() or not rules_text:
+        return text, None
+    prompt = (
+        rules_text +
+        f"You are given the exact verbatim '{field_label}' section extracted from a "
+        "resume, together with parsing instructions above. Apply only the "
+        "instructions that are relevant to this section, and return the corrected "
+        "version. Preserve every fact, project, company, date, and bullet point "
+        "from the original — only reorganize or reformat per the instructions. "
+        "Do not summarize, invent, or omit any detail. If no instruction applies, "
+        "return the original text unchanged. Return ONLY the resume section text "
+        "itself — no preamble, no closing remarks, and no explanation of what you "
+        "did or which instructions you applied.\n\n"
+        f"ORIGINAL {field_label.upper()} SECTION:\n" + text[:4000]
+    )
+    try:
+        raw = _ollama_chat(prompt, as_json=False, num_predict=1800, num_ctx=4096)
+    except Exception as e:
+        logger.warning(f"Training-rule refinement of '{field_label}' failed: {e}")
+        return text, None
+    raw = _strip_trailing_meta_paragraph((raw or "").strip())
+    looks_unsafe = (
+        not raw
+        or "**" in raw
+        or raw.startswith("```")
+        or bool(_TRAINING_META_PHRASE_RE.search(raw))
+        or len(raw) < 0.4 * len(text)
+    )
+    if looks_unsafe:
+        logger.warning(f"Training-rule refinement of '{field_label}' looked unsafe — keeping verbatim text")
+        return text, None
+    return raw, f"{field_label}: refined via active rules ({len(raw)} chars)"
+
+
+def _record_training_rule_usage(conn, rule_ids):
+    for rid in rule_ids:
+        conn.execute(
+            """
+            INSERT INTO training_rule_usage (rule_id, usage_count, last_used_at)
+            VALUES (%s, 1, NOW())
+            ON CONFLICT (rule_id) DO UPDATE SET
+                usage_count = training_rule_usage.usage_count + 1,
+                last_used_at = NOW()
+            """,
+            (rid,),
+        )
+
+
+def _log_training_parse(resume_name, rule_ids, prompt_excerpt, response_excerpt,
+                         final_json, duration_ms, success, error_detail=""):
+    """Best-effort logging for the AI Training analytics/logs pages. Never raises —
+    a logging failure must not affect the resume parse that triggered it."""
+    try:
+        with db_conn() as conn:
+            ensure_training_tables(conn)
+            conn.execute(
+                """
+                INSERT INTO training_parse_log
+                    (resume_name, rules_applied, prompt_excerpt, response_excerpt,
+                     final_json, duration_ms, success, error_detail)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (resume_name, rule_ids, (prompt_excerpt or "")[:2000], (response_excerpt or "")[:2000],
+                 json.dumps(final_json) if final_json is not None else None,
+                 duration_ms, success, (error_detail or "")[:2000]),
+            )
+            _record_training_rule_usage(conn, rule_ids)
+    except Exception as e:
+        logger.warning(f"Could not write training parse log: {e}")
+
+
+def _snapshot_rule_version(conn, rule):
+    """Append the rule's current state to its version history before it's changed."""
+    conn.execute(
+        """
+        INSERT INTO training_rule_version
+            (rule_id, version, category, rule_text, priority, status, changed_by)
+        VALUES (%(id)s, %(version)s, %(category)s, %(rule_text)s, %(priority)s, %(status)s, %(changed_by)s)
+        """,
+        {**rule, "changed_by": session.get("username", "")},
+    )
+
+
+def _training_chat_reply(user_message):
+    """Ask Ollama to acknowledge a parsing instruction and suggest a category.
+
+    This is a separate, lightweight chat-style call — distinct from the resume
+    parsing prompts — so a slow/odd reply here can never affect parsing.
+    """
+    categories_list = ", ".join(TRAINING_CATEGORIES)
+    prompt = (
+        "You are a resume-parsing assistant helping a human refine parsing rules "
+        "for future resumes. The human will give you an instruction about how "
+        "resumes should be parsed. Acknowledge it in 1-2 short sentences, restating "
+        "what you understood in your own words, so the human can confirm before it "
+        "is saved as a rule. Do not ask questions, do not add extra commentary.\n\n"
+        f"Pick exactly ONE category for this instruction from this fixed list: "
+        f"{categories_list}.\n\n"
+        'Return ONLY this JSON: {"reply": "<your acknowledgement>", "category": "<one category>"}'
+        f"\n\nInstruction: {user_message}"
+    )
+    try:
+        raw = _ollama_chat(prompt, as_json=True, num_predict=150, num_ctx=1024)
+    except Exception as e:
+        logger.warning(f"Training chat reply failed: {e}")
+        raw = {}
+    if not isinstance(raw, dict) or not str(raw.get("reply", "")).strip():
+        return (f'Understood — I will apply this for future parsing: "{user_message.strip()}"', "General")
+    category = raw.get("category", "General")
+    if category not in TRAINING_CATEGORIES:
+        category = "General"
+    return str(raw["reply"]).strip(), category
+
+
+# ── AI Training Routes ───────────────────────────────────────────────────────
+
+@app.route("/ai-training")
+def ai_training_chat():
+    with db_conn() as conn:
+        ensure_training_tables(conn)
+        rows = list(conn.execute(
+            "SELECT * FROM training_chat_message ORDER BY id ASC"
+        ).fetchall())
+    # Pair up user/assistant rows into turns for the template. Both rows of a
+    # turn are inserted inside one db_conn transaction in ai_training_chat_send,
+    # so they always land together; this just handles it defensively.
+    turns = []
+    i = 0
+    while i < len(rows):
+        if rows[i]["role"] == "user" and i + 1 < len(rows) and rows[i + 1]["role"] == "assistant":
+            turns.append({"user": dict(rows[i]), "assistant": dict(rows[i + 1])})
+            i += 2
+        else:
+            turns.append({"user": dict(rows[i]), "assistant": None})
+            i += 1
+    return render_template("training_chat.html", turns=turns,
+                           prefill=request.args.get("prefill", ""))
+
+
+@app.route("/ai-training/chat", methods=["POST"])
+def ai_training_chat_send():
+    if not _require_admin():
+        abort(403)
+    user_message = request.form.get("message", "").strip()
+    if not user_message:
+        flash("Please enter an instruction.", "error")
+        return redirect(url_for("ai_training_chat"))
+    reply, category = _training_chat_reply(user_message)
+    with db_conn() as conn:
+        ensure_training_tables(conn)
+        conn.execute(
+            "INSERT INTO training_chat_message (role, message, created_by) VALUES ('user', %s, %s)",
+            (user_message, session.get("username", "")),
+        )
+        conn.execute(
+            "INSERT INTO training_chat_message (role, message, suggested_category, created_by) "
+            "VALUES ('assistant', %s, %s, %s)",
+            (reply, category, session.get("username", "")),
+        )
+    return redirect(url_for("ai_training_chat"))
+
+
+@app.route("/ai-training/chat/<int:message_id>/save-rule", methods=["POST"])
+def ai_training_save_rule(message_id):
+    if not _require_admin():
+        abort(403)
+    with db_conn() as conn:
+        ensure_training_tables(conn)
+        msg = conn.execute(
+            "SELECT * FROM training_chat_message WHERE id = %s", (message_id,)
+        ).fetchone()
+        if not msg:
+            flash("Chat message not found.", "error")
+            return redirect(url_for("ai_training_chat"))
+        # The rule text always comes from the user's own instruction, regardless
+        # of whether the user or assistant bubble was clicked.
+        if msg["role"] == "assistant":
+            user_msg = conn.execute(
+                "SELECT * FROM training_chat_message WHERE id < %s AND role = 'user' "
+                "ORDER BY id DESC LIMIT 1",
+                (message_id,),
+            ).fetchone()
+        else:
+            user_msg = msg
+        if not user_msg:
+            flash("Could not find the original instruction to save.", "error")
+            return redirect(url_for("ai_training_chat"))
+        category = request.form.get("category") or msg.get("suggested_category") or "General"
+        if category not in TRAINING_CATEGORIES:
+            category = "General"
+        new_rule = conn.execute(
+            """
+            INSERT INTO training_rule (category, rule_text, priority, source_chat_id, created_by)
+            VALUES (%s, %s, 100, %s, %s) RETURNING id
+            """,
+            (category, user_msg["message"], user_msg["id"], session.get("username", "")),
+        ).fetchone()
+        conn.execute(
+            "UPDATE training_chat_message SET saved_as_rule_id = %s WHERE id = %s",
+            (new_rule["id"], user_msg["id"]),
+        )
+    flash("Saved as a new parsing rule.", "success")
+    return redirect(url_for("ai_training_rules"))
+
+
+@app.route("/ai-training/rules")
+def ai_training_rules():
+    search = request.args.get("q", "").strip()
+    category = request.args.get("category", "").strip()
+    status = request.args.get("status", "").strip()
+    query = "SELECT * FROM training_rule WHERE 1=1"
+    params = []
+    if search:
+        query += " AND rule_text ILIKE %s"
+        params.append(f"%{search}%")
+    if category:
+        query += " AND category = %s"
+        params.append(category)
+    if status:
+        query += " AND status = %s"
+        params.append(status)
+    query += " ORDER BY priority ASC, id ASC"
+    with db_conn() as conn:
+        ensure_training_tables(conn)
+        rules = conn.execute(query, tuple(params)).fetchall()
+    return render_template("training_rules.html", rules=list(rules), categories=TRAINING_CATEGORIES,
+                           search=search, category=category, status=status)
+
+
+@app.route("/ai-training/rules/add", methods=["GET", "POST"])
+def ai_training_rule_add():
+    if not _require_admin():
+        abort(403)
+    if request.method == "POST":
+        category = request.form.get("category", "General")
+        if category not in TRAINING_CATEGORIES:
+            category = "General"
+        rule_text = request.form.get("rule_text", "").strip()
+        try:
+            priority = int(request.form.get("priority", "100") or "100")
+        except ValueError:
+            priority = 100
+        if not rule_text:
+            flash("Rule text is required.", "error")
+            return render_template("training_rule_form.html", rule=None, categories=TRAINING_CATEGORIES)
+        with db_conn() as conn:
+            ensure_training_tables(conn)
+            conn.execute(
+                "INSERT INTO training_rule (category, rule_text, priority, created_by) VALUES (%s, %s, %s, %s)",
+                (category, rule_text, priority, session.get("username", "")),
+            )
+        flash("Rule added.", "success")
+        return redirect(url_for("ai_training_rules"))
+    return render_template("training_rule_form.html", rule=None, categories=TRAINING_CATEGORIES)
+
+
+@app.route("/ai-training/rules/<int:rule_id>/edit", methods=["GET", "POST"])
+def ai_training_rule_edit(rule_id):
+    if not _require_admin():
+        abort(403)
+    with db_conn() as conn:
+        ensure_training_tables(conn)
+        rule = conn.execute("SELECT * FROM training_rule WHERE id = %s", (rule_id,)).fetchone()
+        if not rule:
+            return "Rule not found", 404
+        if request.method == "POST":
+            category = request.form.get("category", rule["category"])
+            if category not in TRAINING_CATEGORIES:
+                category = rule["category"]
+            rule_text = request.form.get("rule_text", "").strip() or rule["rule_text"]
+            try:
+                priority = int(request.form.get("priority", rule["priority"]))
+            except ValueError:
+                priority = rule["priority"]
+            _snapshot_rule_version(conn, dict(rule))
+            conn.execute(
+                """
+                UPDATE training_rule SET category=%s, rule_text=%s, priority=%s,
+                    version = version + 1, updated_at = NOW()
+                WHERE id = %s
+                """,
+                (category, rule_text, priority, rule_id),
+            )
+            flash("Rule updated.", "success")
+            return redirect(url_for("ai_training_rules"))
+    return render_template("training_rule_form.html", rule=dict(rule), categories=TRAINING_CATEGORIES)
+
+
+@app.route("/ai-training/rules/<int:rule_id>/toggle", methods=["POST"])
+def ai_training_rule_toggle(rule_id):
+    if not _require_admin():
+        abort(403)
+    with db_conn() as conn:
+        ensure_training_tables(conn)
+        rule = conn.execute("SELECT * FROM training_rule WHERE id = %s", (rule_id,)).fetchone()
+        if not rule:
+            return "Rule not found", 404
+        new_status = "disabled" if rule["status"] == "active" else "active"
+        _snapshot_rule_version(conn, dict(rule))
+        conn.execute(
+            "UPDATE training_rule SET status=%s, version = version + 1, updated_at = NOW() WHERE id = %s",
+            (new_status, rule_id),
+        )
+    flash(f"Rule {new_status}.", "success")
+    return redirect(url_for("ai_training_rules"))
+
+
+@app.route("/ai-training/rules/<int:rule_id>/delete", methods=["POST"])
+def ai_training_rule_delete(rule_id):
+    if not _require_admin():
+        abort(403)
+    with db_conn() as conn:
+        ensure_training_tables(conn)
+        conn.execute("DELETE FROM training_rule WHERE id = %s", (rule_id,))
+    flash("Rule deleted.", "success")
+    return redirect(url_for("ai_training_rules"))
+
+
+@app.route("/ai-training/rules/<int:rule_id>/history")
+def ai_training_rule_history(rule_id):
+    with db_conn() as conn:
+        ensure_training_tables(conn)
+        rule = conn.execute("SELECT * FROM training_rule WHERE id = %s", (rule_id,)).fetchone()
+        if not rule:
+            return "Rule not found", 404
+        versions = conn.execute(
+            "SELECT * FROM training_rule_version WHERE rule_id = %s ORDER BY version DESC",
+            (rule_id,),
+        ).fetchall()
+    return render_template("training_rule_history.html", rule=dict(rule), versions=list(versions))
+
+
+@app.route("/ai-training/rules/<int:rule_id>/restore/<int:version_id>", methods=["POST"])
+def ai_training_rule_restore(rule_id, version_id):
+    if not _require_admin():
+        abort(403)
+    with db_conn() as conn:
+        ensure_training_tables(conn)
+        rule = conn.execute("SELECT * FROM training_rule WHERE id = %s", (rule_id,)).fetchone()
+        version = conn.execute(
+            "SELECT * FROM training_rule_version WHERE id = %s AND rule_id = %s",
+            (version_id, rule_id),
+        ).fetchone()
+        if not rule or not version:
+            return "Not found", 404
+        _snapshot_rule_version(conn, dict(rule))
+        conn.execute(
+            """
+            UPDATE training_rule SET category=%s, rule_text=%s, priority=%s, status=%s,
+                version = version + 1, updated_at = NOW()
+            WHERE id = %s
+            """,
+            (version["category"], version["rule_text"], version["priority"], version["status"], rule_id),
+        )
+    flash(f"Restored version {version['version']}.", "success")
+    return redirect(url_for("ai_training_rule_history", rule_id=rule_id))
+
+
+@app.route("/ai-training/test", methods=["GET", "POST"])
+def ai_training_test():
+    result = None
+    prompt_preview = ""
+    if request.method == "POST":
+        uploaded = request.files.get("resume_file")
+        if not uploaded or not uploaded.filename:
+            flash("Please choose a resume file.", "error")
+            return redirect(url_for("ai_training_test"))
+        if not allowed_file(uploaded.filename):
+            flash("Please upload a PDF or DOCX file only.", "error")
+            return redirect(url_for("ai_training_test"))
+        name = secure_filename(uploaded.filename)
+        ext = name.rsplit(".", 1)[1].lower()
+        temp_path = UPLOAD_FOLDER / f"tmp-training-test.{ext}"
+        uploaded.save(str(temp_path))
+        try:
+            result, _parser_used = parse_resume_with_llm_text(temp_path)
+        except Exception as e:
+            flash(f"Parsing failed: {e}", "error")
+            result = None
+        finally:
+            temp_path.unlink(missing_ok=True)
+        prompt_preview, _ids = _active_training_rules_block()
+        if not prompt_preview:
+            prompt_preview = "(no active rules — base parsing prompts only)"
+    return render_template("training_test.html", result=result, prompt_preview=prompt_preview,
+                           categories=TRAINING_CATEGORIES)
+
+
+@app.route("/ai-training/analytics")
+def ai_training_analytics():
+    with db_conn() as conn:
+        ensure_training_tables(conn)
+        total = conn.execute("SELECT COUNT(*) AS c FROM training_rule").fetchone()["c"]
+        active = conn.execute("SELECT COUNT(*) AS c FROM training_rule WHERE status='active'").fetchone()["c"]
+        most_used = conn.execute(
+            """
+            SELECT r.id, r.category, r.rule_text, u.usage_count, u.last_used_at
+            FROM training_rule_usage u JOIN training_rule r ON r.id = u.rule_id
+            ORDER BY u.usage_count DESC LIMIT 10
+            """
+        ).fetchall()
+        total_parses = conn.execute("SELECT COUNT(*) AS c FROM training_parse_log").fetchone()["c"]
+        failed_parses = conn.execute(
+            "SELECT COUNT(*) AS c FROM training_parse_log WHERE success = FALSE"
+        ).fetchone()["c"]
+        recent_failures = conn.execute(
+            "SELECT * FROM training_parse_log WHERE success = FALSE ORDER BY created_at DESC LIMIT 10"
+        ).fetchall()
+    success_rate = round(100 * (total_parses - failed_parses) / total_parses, 1) if total_parses else None
+    return render_template(
+        "training_analytics.html",
+        total=total, active=active, disabled=total - active,
+        most_used=list(most_used), total_parses=total_parses,
+        failed_parses=failed_parses, recent_failures=list(recent_failures),
+        success_rate=success_rate,
+    )
+
+
+@app.route("/ai-training/logs")
+def ai_training_logs():
+    try:
+        page = max(int(request.args.get("page", 1) or 1), 1)
+    except ValueError:
+        page = 1
+    per_page = 25
+    with db_conn() as conn:
+        ensure_training_tables(conn)
+        total = conn.execute("SELECT COUNT(*) AS c FROM training_parse_log").fetchone()["c"]
+        logs = conn.execute(
+            "SELECT * FROM training_parse_log ORDER BY id DESC LIMIT %s OFFSET %s",
+            (per_page, (page - 1) * per_page),
+        ).fetchall()
+    total_pages = max((total + per_page - 1) // per_page, 1)
+    return render_template("training_logs.html", logs=list(logs), page=page, total_pages=total_pages)
 
 
 if __name__ == "__main__":

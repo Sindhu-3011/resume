@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}{% if rule %}Edit Rule{% else %}Add Rule{% endif %} | AI Training{% endblock %}
+{% block content %}
+
+<section class="hero card">
+    <div>
+        <p class="eyebrow">{% if rule %}Edit{% else %}New{% endif %} Rule</p>
+        <h1>{% if rule %}Edit Rule #{{ rule.id }}{% else %}Add Parsing Rule{% endif %}</h1>
+        <p class="muted">This instruction is injected into the Ollama prompt for every future resume parse while it stays active.</p>
+    </div>
+    <a class="button secondary" href="{{ url_for('ai_training_rules') }}">&larr; Back to Rules</a>
+</section>
+
+<form class="card form-grid" method="post">
+
+    <div>
+        <label for="category">Category</label>
+        <select id="category" name="category" class="form-select">
+            {% for c in categories %}
+            <option value="{{ c }}" {% if rule and rule.category == c %}selected{% endif %}>{{ c }}</option>
+            {% endfor %}
+        </select>
+    </div>
+
+    <div>
+        <label for="priority">Priority (1 = highest)</label>
+        <input id="priority" name="priority" type="number" min="1" step="1"
+               value="{{ rule.priority if rule else 100 }}">
+    </div>
+
+    <div class="full">
+        <label for="rule_text">Instruction <span style="color:#c0182c;">*</span></label>
+        <textarea id="rule_text" name="rule_text" rows="4" required
+                  placeholder="e.g. Never populate Work Experience from Projects.">{{ rule.rule_text if rule else '' }}</textarea>
+    </div>
+
+    <div class="full actions">
+        <button class="button" type="submit">{% if rule %}Save Changes{% else %}Add Rule{% endif %}</button>
+        <a class="button secondary" href="{{ url_for('ai_training_rules') }}">Cancel</a>
+    </div>
+
+</form>
+{% endblock %}

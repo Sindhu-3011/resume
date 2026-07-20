@@ -749,12 +749,24 @@
             e.preventDefault();
             e.stopImmediatePropagation();
 
-            /* ── Mandatory field checks: exp_yrs + location ── */
+            /* ── Mandatory field checks: groups + exp_yrs + location ── */
+            var groupsSel = document.getElementById('groups_select');
+            var groupsErr = document.getElementById('groups_error');
             var expSel   = document.getElementById('exp_yrs_select');
             var expErr   = document.getElementById('exp_yrs_error');
             var locInput = document.getElementById('location');
             var locErr   = document.getElementById('location_error');
             var blocked  = false;
+
+            if (groupsSel && !groupsSel.value) {
+                groupsSel.classList.add('field-error');
+                if (groupsErr) groupsErr.style.display = 'block';
+                if (!blocked) { groupsSel.scrollIntoView({behavior:'smooth',block:'center'}); groupsSel.focus(); }
+                blocked = true;
+            } else if (groupsSel) {
+                groupsSel.classList.remove('field-error');
+                if (groupsErr) groupsErr.style.display = 'none';
+            }
 
             if (expSel && !expSel.value) {
                 expSel.classList.add('field-error');

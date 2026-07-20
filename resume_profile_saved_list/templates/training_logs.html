@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}Parse Logs | AI Training{% endblock %}
+{% block content %}
+
+<section class="hero card">
+    <div>
+        <p class="eyebrow">AI Training</p>
+        <h1>Parse Logs</h1>
+        <p class="muted">Every AI-assisted parse, with the rules that were active at the time.</p>
+    </div>
+    <a class="button secondary" href="{{ url_for('ai_training_analytics') }}">&larr; Back to Analytics</a>
+</section>
+
+{% if logs %}
+<div class="card" style="padding:0; overflow:hidden;">
+    <div style="overflow-x:auto;">
+    <table class="jdm-table">
+        <thead>
+            <tr>
+                <th>Resume</th>
+                <th>Rules Applied</th>
+                <th>Duration</th>
+                <th>Status</th>
+                <th>When</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for l in logs %}
+            <tr>
+                <td>{{ l.resume_name }}</td>
+                <td>{{ l.rules_applied|length if l.rules_applied else 0 }}</td>
+                <td>{{ l.duration_ms }} ms</td>
+                <td>
+                    {% if l.success %}
+                        <span class="jdm-cat-badge jdm-cat-val">Success</span>
+                    {% else %}
+                        <span class="jdm-cat-badge">Failed</span>
+                    {% endif %}
+                </td>
+                <td>{{ l.created_at.strftime('%Y-%m-%d %H:%M') if l.created_at else '—' }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    </div>
+</div>
+<div style="display:flex; justify-content:center; gap:10px; margin-top:16px;">
+    {% if page > 1 %}
+    <a class="button secondary" href="{{ url_for('ai_training_logs', page=page-1) }}">&larr; Newer</a>
+    {% endif %}
+    <span class="muted">Page {{ page }} of {{ total_pages }}</span>
+    {% if page < total_pages %}
+    <a class="button secondary" href="{{ url_for('ai_training_logs', page=page+1) }}">Older &rarr;</a>
+    {% endif %}
+</div>
+{% else %}
+<div class="card" style="text-align:center; padding:48px 24px;">
+    <p style="font-size:3rem; margin-bottom:12px;">&#128203;</p>
+    <h3>No parses logged yet</h3>
+    <p class="muted">Parse a resume via the normal upload flow or the Test Resume sandbox to see logs here.</p>
+</div>
+{% endif %}
+
+{% endblock %}

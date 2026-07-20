@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Test Resume | AI Training{% endblock %}
+{% block content %}
+
+<section class="hero card">
+    <div>
+        <p class="eyebrow">AI Training</p>
+        <h1>Test Resume</h1>
+        <p class="muted">Parse a sample resume with the current active rules applied, inspect the result, and turn any mistake into a new rule.</p>
+    </div>
+    <a class="button secondary" href="{{ url_for('ai_training_chat') }}">&larr; Back to AI Training</a>
+</section>
+
+<form class="card" method="post" enctype="multipart/form-data" style="display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap;">
+    <div style="flex:1; min-width:240px;">
+        <label for="resume_file">Resume file (PDF or DOCX)</label>
+        <input id="resume_file" name="resume_file" type="file" accept=".pdf,.docx" required>
+    </div>
+    <button type="submit" class="button">Parse with Active Rules</button>
+</form>
+
+<div class="card">
+    <h3 style="margin-top:0;">Active Rules Applied to This Parse</h3>
+    <pre style="white-space:pre-wrap; background:var(--surface-raised); padding:14px; border-radius:8px; font-size:0.92rem;">{{ prompt_preview or '(upload a resume to see the rules that would be applied)' }}</pre>
+</div>
+
+{% if result %}
+<div class="card">
+    <h3 style="margin-top:0;">Extracted Fields</h3>
+    <p class="muted">If a field looks wrong, describe the fix and send it to AI Training as a new instruction.</p>
+    <div style="display:flex; flex-direction:column; gap:16px;">
+        {% for field in ['full_name','title','email','phone','location','linkedin','summary','experience','skills','education','certifications','projects'] %}
+        <div style="border:1px solid var(--border); border-radius:8px; padding:14px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
+                <strong style="text-transform:capitalize;">{{ field.replace('_',' ') }}</strong>
+                {% if current_role == 'admin' %}
+                <form method="get" action="{{ url_for('ai_training_chat') }}" style="display:flex; gap:6px;">
+                    <input type="hidden" name="prefill" value="">
+                    <button type="button" class="button secondary jdm-btn"
+                            onclick="var f=this.closest('form'); var v=prompt('What should the parser do differently for {{ field }}?'); if(v){ f.querySelector('input[name=prefill]').value=v; f.submit(); }">
+                        &#10060; Incorrect — Save as Rule
+                    </button>
+                </form>
+                {% endif %}
+            </div>
+            <pre style="white-space:pre-wrap; margin:10px 0 0; font-size:0.92rem;">{{ result.get(field) or '(empty)' }}</pre>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+
+{% endblock %}
