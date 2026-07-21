@@ -118,6 +118,12 @@ SECTION_ALIASES = {
         "brief about me", "career statement", "profile",
         "value proposition", "professional pitch",
         "personal pitch", "candidate summary",
+        # "Applications Summary" is a tools/software list, not prose — matches
+        # _heading_field's mapping in parse_resume_with_llm_text (AI path) so
+        # Quick Parse (which has no equivalent AI-path override) doesn't lose
+        # it, and so it never also gets classified as "skills" below, which
+        # used to duplicate this content into both Summary and Skills.
+        "applications summary", "application summary",
         "skills summary profile", "background",
         # abbreviated forms: "Prof. Summary" → "prof summary"
         "prof summary", "exec summary", "prof profile",
@@ -140,7 +146,7 @@ SECTION_ALIASES = {
         "expertise", "domain expertise", "domain skills",
         "technical expertise", "professional expertise",
         "technical proficiencies", "proficiencies",
-        "applications summary", "application summary", "applications",
+        "applications",
         "it skills", "skills overview", "technical skill set",
         "skills and frameworks", "skills and technologies",
         "technical knowledge", "knowledge and skills",
@@ -651,16 +657,18 @@ def _get_ocr_reader():
 
 
 def _ocr_contact_strip(path):
-    """OCR only the top 25 % of page 1 to recover email/phone from icon headers.
-    Returns a short string with whatever text EasyOCR finds in that strip.
+    """OCR the top 45 % of page 1 to recover email/phone from icon headers, and
+    (further down the same strip) an About Me/objective paragraph that a
+    column-based text extraction can split apart. 45% comfortably covers a
+    header plus a several-line objective statement without OCR-ing the whole
+    page. Returns a short string with whatever text EasyOCR finds in that strip.
     """
     try:
         import pymupdf as fitz
         import numpy as np
         doc = fitz.open(str(path))
         pg  = doc[0]
-        # Clip to top quarter of the page (where contact bars live)
-        clip = fitz.Rect(0, 0, pg.rect.width, pg.rect.height * 0.25)
+        clip = fitz.Rect(0, 0, pg.rect.width, pg.rect.height * 0.45)
         mat  = fitz.Matrix(150 / 72, 150 / 72)   # 150 DPI — fast enough for OCR
         pix  = pg.get_pixmap(matrix=mat, clip=clip)
         img  = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
@@ -1350,6 +1358,31 @@ def extract_text_from_pdf(path):
                                     contact_lines.append(f"Location: {_ol}")
                                     logger.info(f"OCR location extracted: {_ol}")
                                     break
+                    # Recover a column-split "About Me"/objective paragraph. OCR reads
+                    # the page in true visual (line-by-line, cross-column) order, so
+                    # when the text layer's own column-block extraction splits this
+                    # paragraph in two — one half staying near the header, the other
+                    # half's continuation landing elsewhere after a sidebar section —
+                    # the OCR strip still has the whole thing in one coherent read.
+                    _obj_m = re.search(
+                        r'(?im)^\s*(?:about\s*me|about\s*myself|objective|career\s*objective)\s*$',
+                        ocr_text,
+                    )
+                    if _obj_m:
+                        _obj_lines = []
+                        for _ol in ocr_text[_obj_m.end():].splitlines():
+                            _ol = _ol.strip()
+                            if not _ol:
+                                if _obj_lines:
+                                    break
+                                continue
+                            if re.match(r'^[A-Z][A-Z\s&/]{2,}$', _ol) or len(_obj_lines) >= 40:
+                                break
+                            _obj_lines.append(_ol)
+                        _obj_text = " ".join(_obj_lines).strip()
+                        if len(_obj_text) >= 60:
+                            contact_lines.append(f"About Me: {_obj_text}")
+                            logger.info(f"OCR About Me paragraph recovered ({len(_obj_text)} chars)")
                     if contact_lines:
                         text = "\n".join(contact_lines) + "\n" + text
                         logger.info(f"OCR contact injected: {contact_lines}")
@@ -1811,6 +1844,14 @@ def find_sections(lines):
                         _word0_bare = words[0].rstrip('.,;:!?')
                         if n == 1 and remainder and not words[0].endswith(':') and not _word0_bare.isupper():
                             break  # "Experience on all ALM modules" → content, not heading
+                        # "Project:" / "Projects:" mid-Experience is a per-job metadata
+                        # label (the client/project name for the entry, same idea as
+                        # "Designation:"/"Duration:", already handled by _work_meta_re
+                        # elsewhere) — not the start of a separate Projects section that
+                        # swallows the rest of the person's whole work history.
+                        if (current == "experience" and n == 1
+                                and _word0_bare.lower() in ("project", "projects")):
+                            break
                         section = prefix_section
                         inline_remainder = remainder if remainder else None
                         break
@@ -2366,10 +2407,18 @@ def parse_resume_text(text, name_hint=None):
     # Strategy: scan every line; take first candidate whose digit-only count >= 10.
     parsed["phone"] = _extract_phone(text)
 
-    # Join LinkedIn URLs that wrap across lines (e.g. "malthesh-\nkarnam-29a6b416a")
+    # Join LinkedIn URLs that wrap across lines. The wrap can land at an
+    # arbitrary character — after a hyphen ("malthesh-\nkarnam-29a6b416a"), or
+    # mid-word right inside "in/" itself ("linkedin.com/i\nn/handle") — so
+    # rather than only handling the hyphen case, join the URL fragment on the
+    # first line with the continuation on the very next line whenever both
+    # sides are made only of URL-safe characters. Restricted to a single line
+    # hop (each side's character class stops at the newline) so this can't
+    # accidentally swallow an unrelated line further down (e.g. a "WWW"
+    # label or a different URL right after).
     _lnk_text = re.sub(
-        r'(linkedin\.com/in/[a-zA-Z0-9\-_%]*)-[ \t]*\n[ \t]*([a-zA-Z0-9])',
-        lambda m: m.group(1) + '-' + m.group(2),
+        r'(linkedin\.com/?[a-zA-Z0-9/\-_%]*)[ \t]*\n[ \t]*([a-zA-Z0-9][a-zA-Z0-9\-_%]*)',
+        lambda m: m.group(1) + m.group(2),
         text, flags=re.I,
     )
     linkedin_match = re.search(
@@ -2385,8 +2434,16 @@ def parse_resume_text(text, name_hint=None):
         )
         if _bare_match:
             _handle = _bare_match.group(1).strip('-').strip()
-            # Must look like a handle (not a common word)
-            if len(_handle) >= 3 and not re.match(r'^(profile|handle|id|url|link|page|account)$', _handle, re.I):
+            # Must look like a handle, not a common word OR the start of a URL
+            # this same fallback failed to fully parse (e.g. "https", "www") —
+            # without this, a LinkedIn URL that wraps somewhere the de-wrap
+            # above doesn't catch falls through to here and the fallback
+            # mistakes the URL's own scheme/host for the handle itself.
+            if (len(_handle) >= 3
+                    and not re.match(
+                        r'^(profile|handle|id|url|link|page|account|https?|www|com|linkedin)$',
+                        _handle, re.I,
+                    )):
                 parsed["linkedin"] = "https://www.linkedin.com/in/" + _handle
 
     # Remove all LinkedIn URLs and fragments from text
@@ -2461,19 +2518,25 @@ def parse_resume_text(text, name_hint=None):
                 if _nl.isupper() and _looks_like_name(_nl):
                     parsed["full_name"] = _nl[:80]
                     break
-        # Second pass: look for TWO-WORD names (common name pattern) in first 15 lines
+        # Second pass: look for any proper-cased name in all useful lines. Runs
+        # before the two-word-only pass below so a real multi-word name earlier
+        # in the header (e.g. "Selva Subramanian Anand") wins over a coincidental
+        # two-word phrase found later (e.g. a "Document Control" skills-section
+        # subheading within the same top-lines window) — see the resume that
+        # surfaced this: the two-word pass used to grab that subheading before
+        # this broader, earlier-line-preferring pass ever got to run.
+        if not parsed["full_name"]:
+            for _nl in useful_top_lines:
+                _nl_clean = _strip_degree_suffix(_nl)
+                if _looks_like_name(_nl_clean):
+                    parsed["full_name"] = _nl_clean[:80]
+                    break
+        # Third pass: look for TWO-WORD names (common name pattern) in first 15 lines
         if not parsed["full_name"]:
             for _nl in useful_top_lines[:15]:
                 _nl_clean = _strip_degree_suffix(_nl)
                 _words = _nl_clean.split()
                 if len(_words) == 2 and _looks_like_name(_nl_clean):
-                    parsed["full_name"] = _nl_clean[:80]
-                    break
-        # Third pass: look for any proper-cased name in all useful lines
-        if not parsed["full_name"]:
-            for _nl in useful_top_lines:
-                _nl_clean = _strip_degree_suffix(_nl)
-                if _looks_like_name(_nl_clean):
                     parsed["full_name"] = _nl_clean[:80]
                     break
         if not parsed["full_name"]:
@@ -3391,6 +3454,57 @@ def _looks_like_proper_noun_token(tok):
     return any(c.isupper() for c in tok[1:])
 
 
+_GROUP_START_ACTION_RE = re.compile(
+    r'^(analy[sz]ed|develop(ed|ing)?|perform(ed|ing)?|involved?|prepar(ed|ing)?|'
+    r'review(ed|ing)?|conduct(ed|ing)?|manag(ed|ing)?|support(ed|ing)?|'
+    r'draft(ed|ing)?|led\b|leading|creat(ed|ing)?|design(ed|ing)?|maintain(ed|ing)?|'
+    r'execut(ed|ing)?|coordinat(ed|ing)?|collaborat(ed|ing)?|responsible|'
+    r'work(ed|ing)?|handl(ed|ing)?|ensur(ed|ing)?|assist(ed|ing)?|issue|preparation)',
+    re.IGNORECASE,
+)
+
+
+def _is_responsibility_group_start(bullet_segment):
+    """True if *bullet_segment* looks like it restates a role title (e.g.
+    "Validation Lead", "Team Member") rather than describing an action —
+    the common pattern for how each new project's responsibilities list
+    restarts on resumes that repeat the same role across several projects.
+    """
+    first_line = bullet_segment.split('\n', 1)[0].lstrip('•').strip()
+    words = first_line.split()
+    if not words:
+        return False
+    # Longer role restatements ("Performed a team lead role from offshore")
+    # still count as a restart if they explicitly say "role" — a stronger,
+    # more specific signal than the short-phrase shape check below, so it's
+    # allowed a looser length cap without weakening the length check itself.
+    if len(words) <= 8 and re.search(r'\brole\b', first_line, re.IGNORECASE):
+        return True
+    if not (1 <= len(words) <= 3):
+        return False
+    if _GROUP_START_ACTION_RE.match(first_line):
+        return False
+    return all(w[:1].isupper() or not w[:1].isalpha() for w in words)
+
+
+def _split_into_responsibility_groups(bullet_segments):
+    """Split a flat, ordered list of '•' bullet segments into per-project groups
+    at each role-title restart. Returns a list of groups (each a list of
+    segments) — length 1 means no clean split was found.
+    """
+    groups = []
+    current = []
+    for seg in bullet_segments:
+        if current and _is_responsibility_group_start(seg):
+            groups.append(current)
+            current = [seg]
+        else:
+            current.append(seg)
+    if current:
+        groups.append(current)
+    return groups
+
+
 def _reassign_project_specific_bullets(experience_text, projects_text):
     """Move Experience bullets that are clearly about ONE specific listed project
     into that project's block in Projects, instead of leaving them as generic
@@ -3415,6 +3529,51 @@ def _reassign_project_specific_bullets(experience_text, projects_text):
     if len(blocks) < 2:
         return experience_text, projects_text  # nothing to disambiguate against
 
+    # Split Experience into bullet segments (each starting at a "•" marker);
+    # non-bullet lines (e.g. the company/title/dates table) are left untouched.
+    lines = experience_text.split('\n')
+    segments = []
+    current = None
+    for line in lines:
+        if line.strip().startswith('•'):
+            if current is not None:
+                segments.append(current)
+            current = [line]
+        elif current is not None:
+            current.append(line)
+        else:
+            segments.append([line])
+    if current is not None:
+        segments.append(current)
+
+    kept_experience = [
+        '\n'.join(seg) for seg in segments if not '\n'.join(seg).strip().startswith('•')
+    ]
+    bullet_segments = [
+        '\n'.join(seg) for seg in segments if '\n'.join(seg).strip().startswith('•')
+    ]
+
+    # Try positional pairing first: on resumes that give each project its own
+    # Project Details + Responsibilities pair, the responsibilities commonly
+    # restart with a short role-title bullet ("Validation Lead", "Team
+    # Member") rather than a full action sentence — a project-boundary marker
+    # even when the bullets share no keyword unique to one project. Only
+    # trusted when it divides the bullets into EXACTLY as many groups as there
+    # are project blocks; anything else is too ambiguous to act on and falls
+    # through to the keyword-based approach below.
+    if bullet_segments:
+        _groups = _split_into_responsibility_groups(bullet_segments)
+        if len(_groups) == len(blocks):
+            new_blocks = [
+                block.rstrip() + "\nResponsibilities:\n" + "\n".join(group)
+                for block, group in zip(blocks, _groups)
+            ]
+            logger.info(
+                "Paired %d Experience bullet group(s) to %d Project block(s) by position",
+                len(_groups), len(blocks),
+            )
+            return "\n".join(kept_experience).strip(), "\n".join(new_blocks).strip()
+
     # Uniqueness must be computed over ALL case variants of a word, not just the
     # shape-qualified ones — otherwise a word that's overwhelmingly common but
     # happens to appear in ALL CAPS once (e.g. a stray "ABBOTT" in one project's
@@ -3434,23 +3593,6 @@ def _reassign_project_specific_bullets(experience_text, projects_text):
     if not any(distinctive):
         return experience_text, projects_text
 
-    # Split Experience into bullet segments (each starting at a "•" marker);
-    # non-bullet lines (e.g. the company/title/dates table) are left untouched.
-    lines = experience_text.split('\n')
-    segments = []
-    current = None
-    for line in lines:
-        if line.strip().startswith('•'):
-            if current is not None:
-                segments.append(current)
-            current = [line]
-        elif current is not None:
-            current.append(line)
-        else:
-            segments.append([line])
-    if current is not None:
-        segments.append(current)
-
     # When a resume has its own distinct Projects section (2+ blocks, confirmed
     # above) AND Experience contains bullet points at all, those bullets did not
     # come from the Work Experience heading itself — that heading's own content is
@@ -3459,14 +3601,9 @@ def _reassign_project_specific_bullets(experience_text, projects_text):
     # (see the heading loop above). So here ALL bullets are routed into Projects:
     # to the one specific project they name if identifiable, otherwise to a
     # general trailing section — never left mixed into the Experience table.
-    kept_experience = []
     appended_to_block = [[] for _ in blocks]
     unmatched_bullets = []
-    for seg in segments:
-        seg_text = '\n'.join(seg)
-        if not seg_text.strip().startswith('•'):
-            kept_experience.append(seg_text)
-            continue
+    for seg_text in bullet_segments:
         seg_tokens = {t.lower() for t in _TOKEN_RE.findall(seg_text)}
         matches = [i for i, dist in enumerate(distinctive) if seg_tokens & dist]
         if len(matches) == 1:
@@ -3530,6 +3667,8 @@ def parse_resume_with_llm_text(path):
         _ocr_name_line = _m_ocr_name.group(1).strip() if _m_ocr_name else ""
         _m_ocr_loc = re.search(r'(?m)^\s*[Ll]ocation\s*:\s*(.+)$', raw_text)
         _ocr_loc_line = _m_ocr_loc.group(1).strip() if _m_ocr_loc else ""
+        _m_ocr_about = re.search(r'(?m)^\s*About\s*Me\s*:\s*(.+)$', raw_text)
+        _ocr_about_line = _m_ocr_about.group(1).strip() if _m_ocr_about else ""
         two_col = _pdfplumber_two_col_text(path)
         if two_col and len(two_col.strip()) >= len(raw_text.strip()) * 0.5:
             _tc = two_col
@@ -3570,6 +3709,8 @@ def parse_resume_with_llm_text(path):
                 _post.append(f"Email: {_ocr_email}")
             if _ocr_phone and _ocr_phone not in raw_text:
                 _post.append(f"Phone: {_ocr_phone}")
+            if _ocr_about_line and not re.search(r'(?m)^\s*About\s*Me\s*:', raw_text, re.I):
+                _post.append(f"About Me: {_ocr_about_line}")
             if _post:
                 raw_text = "\n".join(_post) + "\n" + raw_text
 
@@ -3672,6 +3813,16 @@ def parse_resume_with_llm_text(path):
         "ROLE AND RESPONSIBILITIES", "Role and Responsibilities",
         "KEY RESPONSIBILITIES", "Key Responsibilities",
         "RESPONSIBILITIES", "Responsibilities",
+        # Without these recognized, their content silently bleeds into whichever
+        # section happens to precede them in the linear text — e.g. a sidebar's
+        # "Contact" block (phone/address/email) or a name/title restated at a
+        # column boundary ending up inside "Skills" just because no heading
+        # boundary existed to stop it there.
+        "ABOUT ME", "About Me", "ABOUT MYSELF", "About Myself",
+        "CONTACT", "Contact", "CONTACT INFORMATION", "Contact Information",
+        "CONTACT DETAILS", "Contact Details",
+        "TECHNICAL EXPERTISE", "Technical Expertise",
+        "CERTIFICATES COURSES", "Certificates Courses",
     ]
     _section_heading_re = re.compile(
         r'(?:^|(?<=\n))\s*('
@@ -3686,8 +3837,11 @@ def parse_resume_with_llm_text(path):
         u = h.strip().upper()
         if u in ("SUMMARY", "PROFILE SUMMARY", "PROFESSIONAL SUMMARY",
                  "APPLICATIONS SUMMARY", "CAREER SUMMARY",
-                 "PROFESSIONAL SUMMARY & SKILL SET"):
+                 "PROFESSIONAL SUMMARY & SKILL SET",
+                 "ABOUT ME", "ABOUT MYSELF"):
             return "summary"
+        if u in ("CONTACT", "CONTACT INFORMATION", "CONTACT DETAILS"):
+            return None  # recognized only to stop it bleeding into the section before it
         if u in ("EXPERIENCE", "PROFESSIONAL EXPERIENCE", "WORK EXPERIENCE",
                  "EMPLOYMENT HISTORY", "EMPLOYMENT",
                  "EARLY CAREER EXPERIENCE", "EARLY CAREER",
@@ -3697,7 +3851,7 @@ def parse_resume_with_llm_text(path):
         if u in ("SKILLS", "TECHNICAL SKILLS", "KEY SKILLS", "CORE COMPETENCIES",
                  "AREAS OF EXPERTISE",
                  "TECHNICAL SKILLS & TOOLS", "TECHNICAL SKILLS AND TOOLS",
-                 "TECHNICAL & OTHER PROFICIENCY"):
+                 "TECHNICAL & OTHER PROFICIENCY", "TECHNICAL EXPERTISE"):
             return "skills"
         if u in ("EDUCATION", "QUALIFICATIONS", "ACADEMIC BACKGROUND",
                  "ACADEMIC QUALIFICATIONS", "EDUCATIONAL QUALIFICATIONS",
@@ -3713,7 +3867,7 @@ def parse_resume_with_llm_text(path):
                  "CERTIFICATIONS & TRAINING", "CERTIFICATION & TRAINING",
                  "CERTIFICATIONS & PROFESSIONAL DEVELOPMENT",
                  "CERTIFICATIONS AND PROFESSIONAL DEVELOPMENT",
-                 "PROFESSIONAL DEVELOPMENT", "TRAINING"):
+                 "PROFESSIONAL DEVELOPMENT", "TRAINING", "CERTIFICATES COURSES"):
             return "certifications"
         if u in ("ACHIEVEMENTS", "ACHIEVEMENT", "AWARDS", "AWARD",
                  "AWARDS & RECOGNITION", "AWARDS AND RECOGNITION",
@@ -3755,6 +3909,13 @@ def parse_resume_with_llm_text(path):
         'CERTIFICATIONS', 'CERTIFICATION', 'ACHIEVEMENTS', 'ACHIEVEMENT',
         'AWARDS', 'AWARD', 'REFERENCES', 'PROJECTS', 'QUALIFICATIONS',
         'EDUCATION', 'RESPONSIBILITIES', 'HOBBIES',
+        # Common single-word sidebar headings ("Skills", "Contact") in mixed-case
+        # 2-column resumes — these never have a blank line before them (the
+        # sidebar stacks straight from one label into the next), so without
+        # being trusted unconditionally they fail validation and their content
+        # (a phone number, a skills list) bleeds into whatever section happens
+        # to precede them in the linear reading order instead of being its own.
+        'SKILLS', 'CONTACT', 'LANGUAGES',
     ])
 
     # Normalise sidebar-label lines where heading is merged with content on the same line
@@ -3807,12 +3968,47 @@ def parse_resume_with_llm_text(path):
 
     verbatim = {}
     _ambiguous_field_source = set()
+    _unmapped_chunks = []
     for i, (pos, heading) in enumerate(headings):
         field = _heading_field(heading)
         nl_pos = raw_text.find("\n", pos)
         content_start = nl_pos + 1 if nl_pos != -1 else pos + len(heading)
         content_end = headings[i + 1][0] if i + 1 < len(headings) else len(raw_text)
         text = raw_text[content_start:content_end].strip()
+
+        # Some templates render a table row of column headers — e.g. "Relevant
+        # Project/Organizational Details" | "Project/Organizational Details" |
+        # "Roles and Responsibilities" — as three consecutive heading lines with
+        # nothing between them, and the actual project write-ups land under the
+        # last one purely because it's positionally last. In that case there are
+        # no distinct project blocks yet for anything to match against, so route
+        # this content to Project Details directly. But when the preceding
+        # Project Details heading already has real content (distinct "Client:"
+        # project blocks), leave this as Experience instead — the dedicated
+        # _reassign_project_specific_bullets pass further down does a better job,
+        # matching each responsibility bullet to the specific project it names
+        # (e.g. a bullet mentioning "LSPath") rather than dumping everything as
+        # one undifferentiated blob at the end.
+        if field == "experience" and heading.upper() in (
+            "ROLES AND RESPONSIBILITIES", "ROLE AND RESPONSIBILITIES",
+            "RESPONSIBILITIES", "KEY RESPONSIBILITIES",
+        ):
+            _j = i - 1
+            while _j >= 0:
+                _prev_pos, _prev_heading = headings[_j]
+                _prev_nl = raw_text.find("\n", _prev_pos)
+                _prev_content_start = _prev_nl + 1 if _prev_nl != -1 else _prev_pos + len(_prev_heading)
+                _prev_content_end = headings[_j + 1][0]
+                if raw_text[_prev_content_start:_prev_content_end].strip():
+                    break  # has its own real content — chain ends here, leave as Experience
+                if _heading_field(_prev_heading) == "projects":
+                    field = "projects"
+                    logger.info(
+                        f"Routing '{heading}' content to Project Details — "
+                        f"immediately follows empty '{_prev_heading}' heading"
+                    )
+                    break
+                _j -= 1
 
         # "Qualifications" headings are ambiguous — inspect content before routing.
         if heading.upper() == "QUALIFICATIONS" and text:
@@ -3897,6 +4093,14 @@ def parse_resume_with_llm_text(path):
             continue
 
         if not field:
+            # Heading has no canonical field mapping (e.g. "Extra Curricular") — its
+            # content is usually genuinely irrelevant, but on 2-column PDFs a numbered
+            # Work Experience list can get physically split across pages so that its
+            # tail bullets land after an unrelated sidebar heading like this one. Keep
+            # the text around so the rescue pass below can check for that specific case
+            # instead of silently discarding it.
+            if text:
+                _unmapped_chunks.append(text)
             continue
         if field in verbatim:
             # A field can legitimately recur multiple times in one resume — multiple
@@ -3929,6 +4133,105 @@ def parse_resume_with_llm_text(path):
 
     for field, text in verbatim.items():
         result[field] = text
+
+    # ── 2a-pre: rescue Experience content stranded past a Skills heading. On
+    # 2-column resumes where a Contact+Skills sidebar sits mid-page, its
+    # heading's own content span runs right into whatever Experience bullets
+    # happen to follow it before the next real heading (e.g. Education) —
+    # nothing marks where the sidebar's own skill items end and the
+    # continuation of the interrupted job entry begins. Genuine Skills entries
+    # in every format this parser recognizes are short phrases, never
+    # "•"-prefixed full sentences, so the first bulleted line inside Skills is
+    # a reliable signal that everything from there on is stray Experience
+    # content, not more skills.
+    if result.get("skills"):
+        _sk_lines = result["skills"].split("\n")
+        _bullet_idx = next(
+            (i for i, l in enumerate(_sk_lines) if l.strip().startswith(("•", "●", "▪", "◦"))),
+            None,
+        )
+        if _bullet_idx is not None and _bullet_idx > 0:
+            _stray = "\n".join(_sk_lines[_bullet_idx:]).strip()
+            result["skills"] = "\n".join(_sk_lines[:_bullet_idx]).strip()
+            if _stray:
+                result["experience"] = (result.get("experience", "").rstrip() + "\n" + _stray).strip()
+                logger.info(
+                    "Rescued %d line(s) of stray Experience content stranded past Skills",
+                    len(_sk_lines) - _bullet_idx,
+                )
+
+    # ── 2a-pre-2: same idea, symmetric case — stray Skills content stranded
+    # past an Education heading (e.g. a sidebar Skills list wraps onto a
+    # second column/page and its tail lands after Education's own content,
+    # before the next real heading). Genuine Education lines always carry a
+    # year, a degree abbreviation, a CGPA/GPA marker, or an institution
+    # keyword; once those stop appearing, trailing lines with none of those
+    # signals are stray tool/skill names, not more education.
+    if result.get("education"):
+        _edu_marker_re = re.compile(
+            r'\b(19|20)\d{2}\b|'
+            r'\b(b\.?\s?e|b\.?\s?tech|m\.?\s?tech|mba|mca|bca|b\.?\s?sc|m\.?\s?sc|'
+            r'b\.?\s?com|m\.?\s?com|phd|ph\.?d|cgpa|gpa)\b|'
+            r'\b(university|college|institute|school|academy)\b',
+            re.IGNORECASE,
+        )
+        _edu_lines = result["education"].split("\n")
+        _last_marker_idx = None
+        for _ei, _el in enumerate(_edu_lines):
+            if _edu_marker_re.search(_el):
+                _last_marker_idx = _ei
+        if _last_marker_idx is not None and _last_marker_idx < len(_edu_lines) - 1:
+            _edu_tail = [
+                l for l in _edu_lines[_last_marker_idx + 1:]
+                if len(l.strip(" .")) > 1  # drop stray punctuation-only artifact lines
+            ]
+            _edu_stray = "\n".join(_edu_tail).strip()
+            if _edu_stray:
+                result["education"] = "\n".join(_edu_lines[:_last_marker_idx + 1]).strip()
+                result["skills"] = (result.get("skills", "").rstrip() + "\n" + _edu_stray).strip()
+                logger.info(
+                    "Rescued %d line(s) of stray Skills content stranded past Education",
+                    len(_edu_tail),
+                )
+
+    # ── 2b-pre: prefer the OCR-recovered About Me paragraph over a column-split,
+    # fragmented native extraction. OCR reads the page in true visual order, so
+    # when the text layer's own extraction splits this paragraph across a column
+    # boundary (half stays near the header, the other half lands elsewhere after
+    # a sidebar section), the native "summary" ends up short and grammatically
+    # broken while the OCR version reconstructs the whole sentence correctly.
+    _m_about_ocr = re.search(r'(?m)^\s*About\s*Me\s*:\s*(.+)$', raw_text)
+    if _m_about_ocr:
+        _about_ocr_text = _m_about_ocr.group(1).strip()
+        if len(_about_ocr_text) > len(result.get("summary", "").replace("\n", " ").strip()):
+            result["summary"] = _about_ocr_text
+            logger.info(
+                "Summary replaced with OCR-recovered About Me paragraph (%d chars)",
+                len(_about_ocr_text),
+            )
+
+    # ── 2c-pre: rescue a numbered Work Experience tail stranded past an unmapped
+    # heading. On 2-column PDFs, page 2's sidebar (Other Personal Details/Hobbies/
+    # Languages/Extra Curricular) sometimes gets read before the main column's
+    # continuation of Experience, landing the last bullets right after one of
+    # those unrecognized headings — where they'd otherwise be silently dropped
+    # since the heading has no field to attach to. Detected by: Experience ends
+    # on a numbered bullet "N." and an unmapped chunk contains bullet "N+1.".
+    if result.get("experience") and _unmapped_chunks:
+        _exp_nums = re.findall(r'(?:^|\n)\s*(\d+)\.\s', result["experience"])
+        if _exp_nums:
+            _next_num = int(_exp_nums[-1]) + 1
+            for _chunk in _unmapped_chunks:
+                _m = re.search(rf'(?:^|\n)\s*{_next_num}\.\s', _chunk)
+                if _m:
+                    _continuation = _chunk[_m.start():].strip()
+                    result["experience"] = result["experience"].rstrip() + "\n" + _continuation
+                    logger.info(
+                        "Rescued numbered Work Experience continuation (from #%d) "
+                        "stranded past an unmapped heading",
+                        _next_num,
+                    )
+                    break
 
     # ── 2a-preamble: No summary heading found — look for a professional paragraph in the
     # preamble (text before the first recognised section heading). Covers CVs that use a
@@ -3965,6 +4268,13 @@ def parse_resume_with_llm_text(path):
             r"^(https?://|www\.|linkedin|github|gitlab|portfolio|website|blog)\S*$",
             re.I,
         )
+        # A URL anywhere in the line means the whole line is a links-section
+        # artifact, not a skill — even when a heading label like "Websites,
+        # Portfolios" is jammed onto the same physical line as the link itself
+        # (common when the label and URL wrap together in the source PDF),
+        # which the anchored checks above don't catch since the line isn't a
+        # bare URL and doesn't reduce to just the heading text once stripped.
+        _vskill_url_anywhere = re.compile(r"https?://\S+|www\.\S+|linkedin\.com/\S+", re.I)
         _vskill_hdr = re.compile(
             r"^(websites?(\s*,\s*|\s+)portfolios?(\s+and\s+profiles?)?|websites?|"
             r"portfolios?\s+and\s+profiles?|and\s+profiles?|profiles?\s+and|"
@@ -3977,7 +4287,7 @@ def parse_resume_with_llm_text(path):
             s = sl.strip()
             if not s:
                 continue
-            if _vskill_url.match(s):
+            if _vskill_url.match(s) or _vskill_url_anywhere.search(s):
                 continue
             bare = re.sub(r"[^a-zA-Z\s]", " ", s).strip()
             if _vskill_hdr.match(bare):
@@ -4430,6 +4740,37 @@ def parse_resume_with_llm_text(path):
                 logger.info(f"Title from Designation regex: '{_desig_val}'")
                 break
 
+    # ── 2d-skills-tail: drop an orphaned "Designation" fragment stranded at the
+    # end of Skills. On some 2-column PDFs a header line like "Current
+    # Designation : Product" is truncated at the column boundary, and its
+    # continuation (e.g. "Regulatory Analyst") lands later in the raw text
+    # stream — right at the tail of the Key Skills block — rather than back
+    # where the truncated header line is. The full value is independently
+    # restated elsewhere in the resume (that's what the regex above just used
+    # to fill Title), so a short role-keyword line sitting at the very end of
+    # Skills is duplicate header overflow, not a real skill. Scoped tightly:
+    # only fires when the header line itself actually looks truncated (<=3
+    # words), and only strips a short, unpunctuated trailing line — genuine
+    # skill entries in this resume's own list are longer or contain
+    # &/()/:  punctuation, so this shouldn't touch real skills.
+    _desig_header_m = re.search(
+        r'(?:current\s+)?designation\s*[:\-]\s*(.+)', raw_text[:800], re.IGNORECASE
+    )
+    if _desig_header_m and result.get("skills"):
+        _desig_header_val = _desig_header_m.group(1).strip().split('\n')[0].strip()
+        if _desig_header_val and len(_desig_header_val.split()) <= 3:
+            _skill_lines = result["skills"].split("\n")
+            if _skill_lines:
+                _tail = _skill_lines[-1].strip()
+                _tail_words = _tail.split()
+                if (_tail and 1 <= len(_tail_words) <= 3
+                        and not re.search(r'[&/():,]', _tail)
+                        and _role_fragment_ok.search(_tail)):
+                    result["skills"] = "\n".join(_skill_lines[:-1]).strip()
+                    logger.info(
+                        f"Dropped orphaned Designation fragment '{_tail}' from Skills tail"
+                    )
+
     # Title last-resort before AI: ALL-CAPS role title at the top of experience
     # (e.g. "VALIDATION ENGINEER, 11/2021-Current") — avoids an AI call entirely.
     if not result.get("title") and result.get("experience"):
@@ -4467,8 +4808,14 @@ def parse_resume_with_llm_text(path):
     # reached email/phone, and full_name got only one shot gated by the same clock.
     # location/linkedin had no AI fallback at all. This call is unconditional and
     # untimed against that budget, so identity extraction always gets to run.
+    # Don't let a missing "linkedin" alone trigger this call — it's legitimately
+    # absent from most resumes, and the model has no chance of finding a URL
+    # that was never there, so that alone isn't worth the round trip. Only fire
+    # when one of the fields it's actually likely to recover is still missing;
+    # linkedin still gets requested (and filled) whenever the call runs anyway.
     _missing_identity = [f for f in _IDENTITY_FIELDS if not result.get(f)]
-    if _missing_identity:
+    _identity_worth_asking = {"full_name", "email", "phone", "location"}
+    if any(f in _identity_worth_asking for f in _missing_identity):
         _identity_fill = _ollama_identity_extract(raw_text, _missing_identity)
         for _id_field, _id_val in _identity_fill.items():
             result[_id_field] = _id_val
@@ -4511,11 +4858,12 @@ def parse_resume_with_llm_text(path):
             "Do NOT return the profile summary or certifications.\n\nRESUME:\n",
             raw_text, False, 1600, 4096,
         ),
-        "skills": (
-            "Extract all skills and tools from this resume. "
-            'Return ONLY JSON: {"skills":["s1","s2",...]}.\n\nRESUME:\n',
-            raw_text[:3000], True, 400, 1024,
-        ),
+        # No "skills" AI fallback: when the resume has no dedicated skills/tools
+        # heading, asking the model to "extract skills" makes it paraphrase
+        # responsibility sentences from Experience into skill-shaped bullets
+        # (e.g. "Developing validation protocols for software applications") —
+        # not real, list-style skills. Better to leave the field blank than
+        # show synthesized text that isn't actually in the resume.
         "education": (
             "Extract the education section verbatim from this resume.\n\nRESUME:\n",
             raw_text, False, 300, 1024,
@@ -6996,9 +7344,119 @@ def delete_all_uploads():
     return jsonify({"success": True, "deleted": deleted})
 
 
+def _process_one_raw_file(p, bulk_department):
+    """Parse + save a single bulk-upload file. Returns a result dict describing
+    the outcome; does NOT touch shared state (meta/processed/etc.) so it's safe
+    to run concurrently across files — the caller applies the result serially.
+    """
+    ext = p.suffix.lower().lstrip('.')
+    try:
+        # Use the same "Resume Intelligence" (AI/verbatim) parser the
+        # single-profile Add Profile flow uses by default — falls back
+        # to the quick regex parser on failure, same pattern as
+        # /api/parse-resume, so bulk uploads get the same field-mapping
+        # accuracy as single uploads instead of the older quick-only path.
+        if ext in ('pdf', 'docx'):
+            try:
+                parsed_data, _ = parse_resume_with_llm_text(p)
+            except Exception as e:
+                logger.warning("Resume Intelligence failed for %s (%s); using Quick Parse.", p.name, e)
+                if ext == 'pdf':
+                    parsed_data = _parse_pdf_quick(p)
+                else:
+                    parsed_data = parse_resume_text(extract_resume_text(p, ext))
+        elif ext == 'pdf':
+            parsed_data = _parse_pdf_quick(p)
+        else:
+            parsed_data = parse_resume_text(extract_resume_text(p, ext))
+
+        form_data = {k: '' for k in [
+            'full_name', 'title', 'email', 'phone', 'linkedin', 'location', 'summary',
+            'skills', 'experience', 'education', 'certifications', 'projects',
+        ]}
+        merged = merge_resume_data(form_data, parsed_data, overwrite=False)
+        merged['resume_file'] = p.name
+        # New: auto-detect "X+ years of experience" for bulk uploads too,
+        # same as the single-profile Add Profile flow.
+        merged['exp_yrs'] = _detect_years_of_experience(merged, p, ext)
+        # New: apply the Department picked once for this bulk batch,
+        # same column the single-profile Add Profile flow already uses.
+        merged['department'] = bulk_department
+
+        if merged.get('title'):
+            _tc = re.split(r'[,|/\\–—]', merged['title'])[0].strip()
+            _tc = re.sub(r'[\(\[].*$', '', _tc).strip()
+            _tc = re.sub(
+                r'^(experienced|skilled|dedicated|results.driven|dynamic|seasoned|'
+                r'highly experienced|passionate|motivated|proactive|hands.on)\s+',
+                '', _tc, flags=re.I,
+            ).strip()
+            _words = _tc.split()
+            if len(_words) > 5:
+                _m = re.match(r'^((?:[A-Z][a-zA-Z]*(?:\s+|$)){1,5})', _tc)
+                _tc = _m.group(1).strip() if _m else ' '.join(_words[:5])
+            merged['title'] = _tc[:80]
+
+        with db_conn() as conn:
+            # ── Duplicate guard (same as single-profile save) ────────
+            _dup_email = (merged.get('email') or '').strip()
+            _dup_phone = re.sub(r"[\s\-\(\)]", "", (merged.get('phone') or '').strip())
+            _dup_conds, _dup_params = [], []
+            if _dup_email:
+                _dup_conds.append("LOWER(TRIM(email)) = LOWER(TRIM(%s))")
+                _dup_params.append(_dup_email)
+            if _dup_phone:
+                _dup_conds.append("REGEXP_REPLACE(phone, '[\\s\\-\\(\\)]', '', 'g') = %s")
+                _dup_params.append(_dup_phone)
+            if _dup_conds:
+                _dup_row = conn.execute(
+                    "SELECT id, full_name FROM resume WHERE (" + " OR ".join(_dup_conds) + ") LIMIT 1",
+                    _dup_params,
+                ).fetchone()
+                if _dup_row:
+                    return {
+                        'status': 'duplicate',
+                        'file': p.name,
+                        'name': merged.get('full_name') or p.stem,
+                        'existing_id': _dup_row['id'],
+                        'existing_name': _dup_row['full_name'],
+                    }
+            # ─────────────────────────────────────────────────────────
+
+            merged['slug'] = unique_slug(conn, merged.get('full_name') or 'profile')
+            cursor = conn.execute(
+                """
+                INSERT INTO resume (
+                    full_name, title, email, phone, linkedin, location, summary, skills,
+                    experience, education, certifications, projects, slug, resume_file,
+                    exp_yrs, department, created_at, updated_at
+                ) VALUES (
+                    %(full_name)s, %(title)s, %(email)s, %(phone)s, %(linkedin)s, %(location)s, %(summary)s, %(skills)s,
+                    %(experience)s, %(education)s, %(certifications)s, %(projects)s, %(slug)s, %(resume_file)s,
+                    %(exp_yrs)s, %(department)s, NOW(), NOW()
+                )
+                RETURNING id
+                """,
+                merged,
+            )
+            new_id = cursor.fetchone()['id']
+            sync_skills(conn, new_id, merged.get('skills', ''))
+
+        return {
+            'status': 'processed',
+            'file': p.name,
+            'name': merged.get('full_name') or p.stem,
+            'id': new_id,
+        }
+    except Exception as e:
+        return {'status': 'error', 'file': p.name, 'error': str(e)}
+
+
 @app.route("/api/process-raw-files", methods=["POST"])
 def process_raw_files():
     """Parse all unprocessed files in RAW_UPLOAD_FOLDER and insert into resume DB."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     _req_data = request.get_json(silent=True) or {}
     bulk_department = (_req_data.get("department") or "").strip()
     meta = _load_raw_meta()
@@ -7020,109 +7478,30 @@ def process_raw_files():
         files_to_process.append(p)
 
     skipped = []
-    for p in files_to_process:
-        ext = p.suffix.lower().lstrip('.')
-        try:
-            # Use the same "Resume Intelligence" (AI/verbatim) parser the
-            # single-profile Add Profile flow uses by default — falls back
-            # to the quick regex parser on failure, same pattern as
-            # /api/parse-resume, so bulk uploads get the same field-mapping
-            # accuracy as single uploads instead of the older quick-only path.
-            if ext in ('pdf', 'docx'):
-                try:
-                    parsed_data, _ = parse_resume_with_llm_text(p)
-                except Exception as e:
-                    logger.warning("Resume Intelligence failed for %s (%s); using Quick Parse.", p.name, e)
-                    if ext == 'pdf':
-                        parsed_data = _parse_pdf_quick(p)
-                    else:
-                        parsed_data = parse_resume_text(extract_resume_text(p, ext))
-            elif ext == 'pdf':
-                parsed_data = _parse_pdf_quick(p)
+    # Each file's Ollama/OCR work is dominated by blocking network/CPU calls to
+    # a separate process (Ollama), not Python-level CPU work, so running a few
+    # files concurrently overlaps their wait time instead of paying it N times
+    # in a row. meta/processed/skipped/errors are only ever mutated here, in
+    # the main thread, as each future completes — never inside the worker —
+    # so there's no concurrent-write race on them or on raw_meta.json.
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {executor.submit(_process_one_raw_file, p, bulk_department): p for p in files_to_process}
+        for fut in as_completed(futures):
+            p = futures[fut]
+            result = fut.result()
+            if result['status'] == 'processed':
+                meta[result['file']] = dict(meta.get(result['file'], {}), parsed=True, resume_id=result['id'])
+                processed.append({'file': result['file'], 'name': result['name'], 'id': result['id']})
+            elif result['status'] == 'duplicate':
+                meta[result['file']] = dict(meta.get(result['file'], {}), parsed=True, duplicate_of=result['existing_id'])
+                skipped.append({
+                    'file': result['file'],
+                    'name': result['name'],
+                    'existing_id': result['existing_id'],
+                    'existing_name': result['existing_name'],
+                })
             else:
-                parsed_data = parse_resume_text(extract_resume_text(p, ext))
-
-            form_data = {k: '' for k in [
-                'full_name', 'title', 'email', 'phone', 'linkedin', 'location', 'summary',
-                'skills', 'experience', 'education', 'certifications', 'projects',
-            ]}
-            merged = merge_resume_data(form_data, parsed_data, overwrite=False)
-            merged['resume_file'] = p.name
-            # New: auto-detect "X+ years of experience" for bulk uploads too,
-            # same as the single-profile Add Profile flow.
-            merged['exp_yrs'] = _detect_years_of_experience(merged, p, ext)
-            # New: apply the Department picked once for this bulk batch,
-            # same column the single-profile Add Profile flow already uses.
-            merged['department'] = bulk_department
-
-            if merged.get('title'):
-                _tc = re.split(r'[,|/\\–—]', merged['title'])[0].strip()
-                _tc = re.sub(r'[\(\[].*$', '', _tc).strip()
-                _tc = re.sub(
-                    r'^(experienced|skilled|dedicated|results.driven|dynamic|seasoned|'
-                    r'highly experienced|passionate|motivated|proactive|hands.on)\s+',
-                    '', _tc, flags=re.I,
-                ).strip()
-                _words = _tc.split()
-                if len(_words) > 5:
-                    _m = re.match(r'^((?:[A-Z][a-zA-Z]*(?:\s+|$)){1,5})', _tc)
-                    _tc = _m.group(1).strip() if _m else ' '.join(_words[:5])
-                merged['title'] = _tc[:80]
-
-            with db_conn() as conn:
-                # ── Duplicate guard (same as single-profile save) ────────
-                _dup_email = (merged.get('email') or '').strip()
-                _dup_phone = re.sub(r"[\s\-\(\)]", "", (merged.get('phone') or '').strip())
-                _dup_conds, _dup_params = [], []
-                if _dup_email:
-                    _dup_conds.append("LOWER(TRIM(email)) = LOWER(TRIM(%s))")
-                    _dup_params.append(_dup_email)
-                if _dup_phone:
-                    _dup_conds.append("REGEXP_REPLACE(phone, '[\\s\\-\\(\\)]', '', 'g') = %s")
-                    _dup_params.append(_dup_phone)
-                if _dup_conds:
-                    _dup_row = conn.execute(
-                        "SELECT id, full_name FROM resume WHERE (" + " OR ".join(_dup_conds) + ") LIMIT 1",
-                        _dup_params,
-                    ).fetchone()
-                    if _dup_row:
-                        meta[p.name] = dict(meta.get(p.name, {}), parsed=True, duplicate_of=_dup_row['id'])
-                        skipped.append({
-                            'file': p.name,
-                            'name': merged.get('full_name') or p.stem,
-                            'existing_id': _dup_row['id'],
-                            'existing_name': _dup_row['full_name'],
-                        })
-                        continue
-                # ─────────────────────────────────────────────────────────
-
-                merged['slug'] = unique_slug(conn, merged.get('full_name') or 'profile')
-                cursor = conn.execute(
-                    """
-                    INSERT INTO resume (
-                        full_name, title, email, phone, linkedin, location, summary, skills,
-                        experience, education, certifications, projects, slug, resume_file,
-                        exp_yrs, department, created_at, updated_at
-                    ) VALUES (
-                        %(full_name)s, %(title)s, %(email)s, %(phone)s, %(linkedin)s, %(location)s, %(summary)s, %(skills)s,
-                        %(experience)s, %(education)s, %(certifications)s, %(projects)s, %(slug)s, %(resume_file)s,
-                        %(exp_yrs)s, %(department)s, NOW(), NOW()
-                    )
-                    RETURNING id
-                    """,
-                    merged,
-                )
-                new_id = cursor.fetchone()['id']
-                sync_skills(conn, new_id, merged.get('skills', ''))
-
-            meta[p.name] = dict(meta.get(p.name, {}), parsed=True, resume_id=new_id)
-            processed.append({
-                'file': p.name,
-                'name': merged.get('full_name') or p.stem,
-                'id': new_id,
-            })
-        except Exception as e:
-            errors.append({'file': p.name, 'error': str(e)})
+                errors.append({'file': result['file'], 'error': result['error']})
 
     _save_raw_meta(meta)
     return jsonify({
@@ -8989,4 +9368,4 @@ def user_delete(user_id):
 
 
 if __name__ == "__main__":
-    app.run(debug=True, use_reloader=False, port=5001, host='0.0.0.0')
+    app.run(debug=True, use_reloader=False, port=5001, host='0.0.0.0', threaded=True)
