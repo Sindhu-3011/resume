@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Get-Process python 2>$null | Select-Object Id, CPU, @{N='RunMins';E={[math]::Round\\(\\(\\(Get-Date\\) - $_.StartTime\\).TotalMinutes, 1\\)}} | Format-Table -AutoSize)",
+      "PowerShell(Get-Process python 2>$null)",
+      "PowerShell(Invoke-WebRequest http://127.0.0.1:5000 -TimeoutSec 5 -UseBasicParsing 2>$null)",
+      "PowerShell(Start-Process -FilePath \"python\" -ArgumentList \"app.py\" -WorkingDirectory \"d:\\\\Development\\\\resume\\\\resume_profile_saved_list\" -RedirectStandardOutput \"C:\\\\Users\\\\SINDHU~1.SUN\\\\AppData\\\\Local\\\\Temp\\\\flask_out.log\" -RedirectStandardError \"C:\\\\Users\\\\SINDHU~1.SUN\\\\AppData\\\\Local\\\\Temp\\\\flask_err.log\" -WindowStyle Hidden)",
+      "Read(//c/Users/SINDHU~1.SUN/AppData/Local/Temp/**)",
+      "PowerShell(netstat -ano)",
+      "PowerShell(head -5)",
+      "PowerShell(Stop-Process -Name python -Force -ErrorAction SilentlyContinue)",
+      "PowerShell(Start-Process -FilePath \"python\" -ArgumentList \"d:\\\\Development\\\\resume\\\\resume_profile_saved_list\\\\app.py\" -WorkingDirectory \"d:\\\\Development\\\\resume\\\\resume_profile_saved_list\" -WindowStyle Hidden)",
+      "Bash(curl -s http://127.0.0.1:5001/ -o /dev/null -w \"%{http_code}\")",
+      "Read(//c/Users/sindhu.sundara/AppData/Local/Temp/**)"
+    ]
+  }
+}
