@@ -26,9 +26,11 @@
     {% for entry in top_matches %}
     {% set resume = entry.resume %}
     {% set result = entry.score %}
-    {% set stroke_color = '#15803d' if result.match_level_color == 'green'
-                     else '#1d4ed8' if result.match_level_color == 'blue'
-                     else '#d97706' if result.match_level_color == 'orange'
+    {% set holistic = entry.holistic %}
+    {% set verdict = holistic.verdict %}
+    {% set stroke_color = '#15803d' if 'strong' in verdict.lower()
+                     else '#1d4ed8' if 'good' in verdict.lower()
+                     else '#d97706' if 'partial' in verdict.lower()
                      else '#dc2626' %}
     {% set shown_matched = result.matched_skills[:10] %}
     {% set shown_missing = result.missing_skills[:10] %}
@@ -52,9 +54,9 @@
                 {% endif %}
             </div>
 
-            <div style="text-align:center; min-width:90px;">
-                <div style="font-size:1.4rem; font-weight:700; color:{{ stroke_color }};">{{ result.match_percentage }}%</div>
-                <div class="cmr-level-badge cmr-level-{{ result.match_level_color }}" style="font-size:0.75rem;">{{ result.match_level }}</div>
+            <div style="text-align:center; min-width:160px;">
+                <div class="cmr-level-badge" style="font-size:0.8rem; background:{{ stroke_color }}1a; color:{{ stroke_color }};">{{ holistic.tier_label }}</div>
+                <div style="font-size:0.78rem; font-weight:700; color:{{ stroke_color }}; margin-top:5px;">{{ holistic.recommendation }}</div>
             </div>
 
             <div style="display:flex; gap:8px; flex-wrap:wrap;">
@@ -65,25 +67,8 @@
             </div>
         </div>
 
-        <!-- Sub-score bars -->
-        <div class="cmr-sub-scores" style="margin-top:16px;">
-            <div class="cmr-sub-row">
-                <span class="cmr-sub-label">Skills Match</span>
-                <div class="cmr-sub-bar-track">
-                    <div class="cmr-sub-bar-fill" style="width:{{ result.skills_match_percentage }}%; background:{{ stroke_color }};"></div>
-                </div>
-                <span class="cmr-sub-pct">{{ result.skills_match_percentage }}%</span>
-            </div>
-            <div class="cmr-sub-row">
-                <span class="cmr-sub-label">Experience</span>
-                <div class="cmr-sub-bar-track">
-                    <div class="cmr-sub-bar-fill" style="width:{{ result.experience_match_percentage }}%; background:#7c3aed;"></div>
-                </div>
-                <span class="cmr-sub-pct">{{ result.experience_match_percentage }}%</span>
-            </div>
-        </div>
-        {% if result.experience_note %}
-        <p class="muted" style="font-size:0.82rem; margin-top:6px;">{{ result.experience_note }}</p>
+        {% if holistic.rationale %}
+        <p class="muted" style="font-size:0.85rem; margin-top:14px;">{{ holistic.rationale }}</p>
         {% endif %}
 
         <!-- Matched / missing skill tags -->

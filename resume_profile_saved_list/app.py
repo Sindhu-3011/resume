@@ -15,6 +15,8 @@ except ImportError:
 from psycopg2.extras import RealDictCursor
 from pathlib import Path
 import re
+import math
+from collections import Counter
 import zipfile
 import json
 import logging
@@ -1554,6 +1556,17 @@ def _extract_canvas_docx(body):
     return "\n".join(parts)
 
 
+# A short Title-Case label (no digits — excludes "Project 1:", "Client 2:" etc.)
+# followed by a colon and a comma-separated list — "SIEM Tools: Splunk, QRadar,
+# Microsoft Sentinel", "Firewalls: Palo Alto, Fortinet, Check Point". Matches
+# the tool/skill-category lines common in a "Technical Skills" box, without
+# matching narrative lines like "Role: SOC Analyst / Cyber Security Engineer"
+# (no comma) or "Project 1: ..." (digit in the label).
+_SKILL_CATEGORY_LINE_RE = re.compile(
+    r'^[A-Z][A-Za-z/&\s]{1,30}:\s*[A-Za-z0-9].*(?:,\s*[A-Za-z0-9][^,:]*){1,}$'
+)
+
+
 def extract_text_from_docx(path):
     try:
         logger.info(f"Extracting text from DOCX: {path}")
@@ -1613,17 +1626,35 @@ def extract_text_from_docx(path):
                 return canvas_text
         else:
             # Even when body text exists, supplement with canvas text boxes — some
-            # templates have a sidebar (skills, contact) in floating boxes not in body.
+            # templates have a sidebar (skills, contact) in floating boxes not in
+            # body. A floating box's extracted text can be a large mixed blob (a
+            # skills tool-list AND unrelated Project narrative bundled together),
+            # so don't relocate the whole thing as one unit — that just moves the
+            # misplacement instead of fixing it. Only lines that are clearly
+            # shaped like a skill-category list ("SIEM Tools: Splunk, QRadar, ...")
+            # get moved next to the nearest Skills heading; everything else keeps
+            # the previous, safe default of landing at the end.
             try:
                 canvas_text = _extract_canvas_docx(doc.element.body)
                 if canvas_text.strip():
-                    # Add only lines that are not already present in the body
                     existing = set(l.strip().lower() for l in parts if l.strip())
-                    for canvas_line in canvas_text.split('\n'):
-                        cl = canvas_line.strip()
-                        if cl and cl.lower() not in existing:
-                            parts.append(cl)
-                            existing.add(cl.lower())
+                    new_lines = [
+                        cl.strip() for cl in canvas_text.split('\n')
+                        if cl.strip() and cl.strip().lower() not in existing
+                    ]
+                    skill_lines = [l for l in new_lines if _SKILL_CATEGORY_LINE_RE.match(l)]
+                    other_lines = [l for l in new_lines if not _SKILL_CATEGORY_LINE_RE.match(l)]
+                    if skill_lines:
+                        insert_at = None
+                        for _pi in range(len(parts) - 1, -1, -1):
+                            if canonical_section_name(parts[_pi]) == "skills":
+                                insert_at = _pi + 1
+                                break
+                        if insert_at is not None:
+                            parts[insert_at:insert_at] = skill_lines
+                        else:
+                            parts.extend(skill_lines)
+                    parts.extend(other_lines)
             except Exception:
                 pass
 
@@ -2903,8 +2934,14 @@ _HEADING_FIELD = {
 }
 
 
-def _ollama_chat(prompt, *, as_json, num_predict, num_ctx=8192):
-    """Single Ollama call. Returns the raw assistant string (or {} dict if as_json)."""
+def _ollama_chat(prompt, *, as_json, num_predict, num_ctx=8192, timeout=None):
+    """Single Ollama call. Returns the raw assistant string (or {} dict if as_json).
+
+    `timeout` overrides the module-wide _OLLAMA_TEXT_TIMEOUT default for
+    callers that are known to legitimately run longer — kept opt-in so every
+    other existing caller (resume parsing, identity extraction, etc.) keeps
+    its original 60s ceiling unchanged.
+    """
     body = {
         "model": _TEXT_MODEL,
         "messages": [{"role": "user", "content": prompt}],
@@ -2914,14 +2951,14 @@ def _ollama_chat(prompt, *, as_json, num_predict, num_ctx=8192):
     if as_json:
         body["format"] = "json"
     url = f"{_OLLAMA_BASE}/api/chat"
-    logger.info(f"Ollama call → {url} model={_TEXT_MODEL}")
+    logger.info(f"Ollama call → {url} model={body['model']}")
     req = urllib.request.Request(
         url,
         data=json.dumps(body).encode(),
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=_OLLAMA_TEXT_TIMEOUT) as r:
+    with urllib.request.urlopen(req, timeout=timeout or _OLLAMA_TEXT_TIMEOUT) as r:
         content = json.loads(r.read()).get("message", {}).get("content", "").strip()
     if not as_json:
         return content
@@ -4024,6 +4061,123 @@ def parse_resume_with_llm_text(path):
 
     for field, text in verbatim.items():
         result[field] = text
+
+    # ── 2a-pre-0: don't let the base regex parser's independent "projects"
+    # guess survive next to a heading-loop-recognized Experience section. The
+    # base parser (parse_resume_text, run earlier as the fast first pass) uses
+    # its own, separate heading-alias table and can classify some Experience
+    # content as "projects" via a heading/pattern the heading-loop doesn't
+    # recognize as project-specific — since the loop found real structure
+    # here (it set "experience") but nothing it saw mapped to "projects",
+    # whatever the base parser guessed is very often the same content already
+    # sitting in Experience, just duplicated. Matches the standing rule: no
+    # heading-loop-recognized Project Details heading → Projects stays empty.
+    if "experience" in verbatim and "projects" not in verbatim and result.get("projects"):
+        logger.info(
+            "Clearing base-parser 'projects' guess (%d chars) — no Project "
+            "Details heading recognized by the heading loop",
+            len(result["projects"]),
+        )
+        result["projects"] = ""
+
+    # ── 2a-pre: rescue Experience content stranded past a Skills heading. On
+    # 2-column resumes where a Contact+Skills sidebar sits mid-page, its
+    # heading's own content span runs right into whatever Experience bullets
+    # happen to follow it before the next real heading (e.g. Education) —
+    # nothing marks where the sidebar's own skill items end and the
+    # continuation of the interrupted job entry begins. Genuine Skills entries
+    # in every format this parser recognizes are short phrases, never
+    # "•"-prefixed full sentences, so the first bulleted line inside Skills is
+    # a reliable signal that everything from there on is stray Experience
+    # content, not more skills.
+    if result.get("skills"):
+        _sk_lines = result["skills"].split("\n")
+        _bullet_idx = next(
+            (i for i, l in enumerate(_sk_lines) if l.strip().startswith(("•", "●", "▪", "◦"))),
+            None,
+        )
+        if _bullet_idx is not None and _bullet_idx > 0:
+            _stray = "\n".join(_sk_lines[_bullet_idx:]).strip()
+            result["skills"] = "\n".join(_sk_lines[:_bullet_idx]).strip()
+            if _stray:
+                result["experience"] = (result.get("experience", "").rstrip() + "\n" + _stray).strip()
+                logger.info(
+                    "Rescued %d line(s) of stray Experience content stranded past Skills",
+                    len(_sk_lines) - _bullet_idx,
+                )
+
+    # ── 2a-pre-2: same idea, symmetric case — stray Skills content stranded
+    # past an Education heading (e.g. a sidebar Skills list wraps onto a
+    # second column/page and its tail lands after Education's own content,
+    # before the next real heading). Genuine Education lines always carry a
+    # year, a degree abbreviation, a CGPA/GPA marker, or an institution
+    # keyword; once those stop appearing, trailing lines with none of those
+    # signals are stray tool/skill names, not more education.
+    if result.get("education"):
+        _edu_marker_re = re.compile(
+            r'\b(19|20)\d{2}\b|'
+            r'\b(b\.?\s?e|b\.?\s?tech|m\.?\s?tech|mba|mca|bca|b\.?\s?sc|m\.?\s?sc|'
+            r'b\.?\s?com|m\.?\s?com|phd|ph\.?d|cgpa|gpa)\b|'
+            r'\b(university|college|institute|school|academy)\b',
+            re.IGNORECASE,
+        )
+        _edu_lines = result["education"].split("\n")
+        _last_marker_idx = None
+        for _ei, _el in enumerate(_edu_lines):
+            if _edu_marker_re.search(_el):
+                _last_marker_idx = _ei
+        if _last_marker_idx is not None and _last_marker_idx < len(_edu_lines) - 1:
+            _edu_tail = [
+                l for l in _edu_lines[_last_marker_idx + 1:]
+                if len(l.strip(" .")) > 1  # drop stray punctuation-only artifact lines
+            ]
+            _edu_stray = "\n".join(_edu_tail).strip()
+            if _edu_stray:
+                result["education"] = "\n".join(_edu_lines[:_last_marker_idx + 1]).strip()
+                result["skills"] = (result.get("skills", "").rstrip() + "\n" + _edu_stray).strip()
+                logger.info(
+                    "Rescued %d line(s) of stray Skills content stranded past Education",
+                    len(_edu_tail),
+                )
+
+    # ── 2b-pre: prefer the OCR-recovered About Me paragraph over a column-split,
+    # fragmented native extraction. OCR reads the page in true visual order, so
+    # when the text layer's own extraction splits this paragraph across a column
+    # boundary (half stays near the header, the other half lands elsewhere after
+    # a sidebar section), the native "summary" ends up short and grammatically
+    # broken while the OCR version reconstructs the whole sentence correctly.
+    _m_about_ocr = re.search(r'(?m)^\s*About\s*Me\s*:\s*(.+)$', raw_text)
+    if _m_about_ocr:
+        _about_ocr_text = _m_about_ocr.group(1).strip()
+        if len(_about_ocr_text) > len(result.get("summary", "").replace("\n", " ").strip()):
+            result["summary"] = _about_ocr_text
+            logger.info(
+                "Summary replaced with OCR-recovered About Me paragraph (%d chars)",
+                len(_about_ocr_text),
+            )
+
+    # ── 2c-pre: rescue a numbered Work Experience tail stranded past an unmapped
+    # heading. On 2-column PDFs, page 2's sidebar (Other Personal Details/Hobbies/
+    # Languages/Extra Curricular) sometimes gets read before the main column's
+    # continuation of Experience, landing the last bullets right after one of
+    # those unrecognized headings — where they'd otherwise be silently dropped
+    # since the heading has no field to attach to. Detected by: Experience ends
+    # on a numbered bullet "N." and an unmapped chunk contains bullet "N+1.".
+    if result.get("experience") and _unmapped_chunks:
+        _exp_nums = re.findall(r'(?:^|\n)\s*(\d+)\.\s', result["experience"])
+        if _exp_nums:
+            _next_num = int(_exp_nums[-1]) + 1
+            for _chunk in _unmapped_chunks:
+                _m = re.search(rf'(?:^|\n)\s*{_next_num}\.\s', _chunk)
+                if _m:
+                    _continuation = _chunk[_m.start():].strip()
+                    result["experience"] = result["experience"].rstrip() + "\n" + _continuation
+                    logger.info(
+                        "Rescued numbered Work Experience continuation (from #%d) "
+                        "stranded past an unmapped heading",
+                        _next_num,
+                    )
+                    break
 
     # ── 2a-preamble: No summary heading found — look for a professional paragraph in the
     # preamble (text before the first recognised section heading). Covers CVs that use a
@@ -5248,19 +5402,22 @@ def profile_detail(resume_id):
         for jd in jds:
             jd_dict = dict(jd)
             score = calculate_match_score(resume_dict, jd_dict)
+            holistic = _holistic_or_default(resume_dict, jd_dict)
             matches.append({
                 'jd_id': jd['id'],
                 'jd_title': jd['title'],
+                'jd_role': jd_dict.get('role', ''),
                 'match_percentage': score['match_percentage'],
+                'holistic_percentage': holistic['fit_percentage'],
                 'matched_count': score['matched_count'],
                 'total_jd_requirements': score['total_jd_requirements']
             })
 
-        matches.sort(key=lambda x: x['match_percentage'], reverse=True)
+        _resume_role = resume_dict.get('title', '')
+        matches.sort(key=lambda x: (not _jd_role_matches(_resume_role, x['jd_role']), -x['holistic_percentage']))
         top_matches = matches[:3]
-        is_weak = top_matches and top_matches[0]['match_percentage'] < 50
 
-    return render_template("profile.html", resume=resume, top_matches=top_matches, is_weak=is_weak,
+    return render_template("profile.html", resume=resume, top_matches=top_matches,
                            l1_comments=resume_dict.get("l1_comments") or "",
                            l2_comments=resume_dict.get("l2_comments") or "")
 
@@ -5281,18 +5438,23 @@ def export_top_matches(resume_id):
         for jd in jds:
             jd_dict = dict(jd)
             score = calculate_match_score(resume_dict, jd_dict)
+            holistic = _holistic_or_default(resume_dict, jd_dict)
             matches.append({
                 'jd': jd_dict,
                 'jd_id': jd['id'],
                 'jd_title': jd['title'],
                 'match_percentage': score['match_percentage'],
+                'holistic_percentage': holistic['fit_percentage'],
+                'matched_skills': score.get('matched_skills', []),
+                'missing_skills': score.get('missing_skills', []),
                 'matched_count': score['matched_count'],
                 'total_jd_requirements': score['total_jd_requirements'],
-                'matched_skills': score.get('matched_skills', []),
-                'missing_skills': score.get('missing_skills', [])
+                'tier_label': holistic['tier_label'],
+                'recommendation': holistic['recommendation'],
             })
 
-        matches.sort(key=lambda x: x['match_percentage'], reverse=True)
+        _resume_role = resume_dict.get('title', '')
+        matches.sort(key=lambda x: (not _jd_role_matches(_resume_role, x['jd'].get('role', '')), -x['holistic_percentage']))
         top_matches = matches[:3]
 
     # Prepare export data
@@ -5318,6 +5480,8 @@ def export_top_matches(resume_id):
             'category': match['jd'].get('category'),
             'role': match['jd'].get('role'),
             'match_percentage': match['match_percentage'],
+            'fit': match['tier_label'],
+            'recommendation': match['recommendation'],
             'skills_matched': f"{match['matched_count']}/{match['total_jd_requirements']}",
             'matched_skills': match.get('matched_skills', []),
             'missing_skills': match.get('missing_skills', []),
@@ -5394,15 +5558,19 @@ def _build_match_detail_story(resume_dict, jd_dict, sc, rank=None):
     C_LIGHT     = HexColor('#f8fafc')
     C_BORDER    = HexColor('#e2e8f0')
 
-    LEVEL_COLOR = {'Strong Match': C_GREEN, 'Good Match': C_BLUE,
-                   'Partial Match': C_ORANGE, 'Low Match': C_RED}
-    LEVEL_BG    = {'Strong Match': C_GREEN_BG, 'Good Match': C_BLUE_BG,
-                   'Partial Match': C_ORANGE_BG, 'Low Match': C_RED_BG}
-
-    level       = sc.get('match_level', 'Low Match')
-    lv_color    = LEVEL_COLOR.get(level, C_GRAY)
-    lv_bg       = LEVEL_BG.get(level,    C_LIGHT)
-    pct         = sc.get('match_percentage', 0)
+    # Verdict comes from the whole-document holistic match, not a raw percentage —
+    # color keyed to the verdict's own wording so nothing here is percentage-driven.
+    holistic = _holistic_or_default(resume_dict, jd_dict)
+    level    = holistic['verdict']
+    level_l  = level.lower()
+    if 'strong' in level_l:
+        lv_color, lv_bg = C_GREEN, C_GREEN_BG
+    elif 'good' in level_l:
+        lv_color, lv_bg = C_BLUE, C_BLUE_BG
+    elif 'partial' in level_l:
+        lv_color, lv_bg = C_ORANGE, C_ORANGE_BG
+    else:
+        lv_color, lv_bg = C_RED, C_RED_BG
 
     s_body  = ParagraphStyle('_Body',  fontSize=9,  textColor=C_NAVY, spaceAfter=3, leading=14)
     s_muted = ParagraphStyle('_Muted', fontSize=8.5, textColor=C_GRAY, spaceAfter=3, leading=13)
@@ -5443,12 +5611,12 @@ def _build_match_detail_story(resume_dict, jd_dict, sc, rank=None):
     ]))
 
     score_cell = Table([
-        [Paragraph(f'{pct}%',
-                   ParagraphStyle('_ScBig', fontSize=26, fontName='Helvetica-Bold',
-                                   textColor=lv_color, alignment=TA_CENTER))],
-        [Paragraph(level,
-                   ParagraphStyle('_ScLvl', fontSize=8, textColor=lv_color,
-                                   alignment=TA_CENTER, fontName='Helvetica-Bold'))],
+        [Paragraph(holistic['tier_label'],
+                   ParagraphStyle('_ScLvl', fontSize=14, fontName='Helvetica-Bold',
+                                   textColor=lv_color, alignment=TA_CENTER, leading=17))],
+        [Paragraph(holistic['recommendation'],
+                   ParagraphStyle('_ScRec', fontSize=8.5, fontName='Helvetica-Bold',
+                                   textColor=lv_color, alignment=TA_CENTER, leading=11))],
     ], colWidths=[2.1 * inch])
     score_cell.setStyle(TableStyle([
         ('BACKGROUND',   (0, 0), (-1, -1), lv_bg),
@@ -5472,23 +5640,20 @@ def _build_match_detail_story(resume_dict, jd_dict, sc, rank=None):
     story.append(banner)
     story.append(Spacer(1, 0.14 * inch))
 
-    # ── Score breakdown table ─────────────────────────────────────────────────
+    # ── Match Summary table (qualitative — no percentage scores) ─────────────
     story.append(Paragraph(
-        'Match Score Breakdown',
+        'Match Summary',
         ParagraphStyle('_SecH', fontSize=10, fontName='Helvetica-Bold',
                         textColor=C_NAVY, spaceAfter=5, spaceBefore=8)
     ))
     exp_note_short = (sc.get('experience_note') or '')[:90]
     sb_data = [
-        ['Metric', 'Score', 'Detail'],
-        ['Overall Match',     f"{pct}%",
-         f"{sc.get('matched_count',0)} of {sc.get('total_jd_requirements',0)} requirements met"],
-        ['Skills Match',      f"{sc.get('skills_match_percentage',0)}%",
-         f"{sc.get('matched_count',0)} skills matched"],
-        ['Experience Match',  f"{sc.get('experience_match_percentage',0)}%",
-         exp_note_short or '—'],
+        ['Metric', 'Detail'],
+        ['Overall Fit',       level],
+        ['Requirements Met',  f"{sc.get('matched_count',0)} of {sc.get('total_jd_requirements',0)}"],
+        ['Experience',        exp_note_short or '—'],
     ]
-    sb_tbl = Table(sb_data, colWidths=[1.55 * inch, 0.85 * inch, 4.45 * inch])
+    sb_tbl = Table(sb_data, colWidths=[1.55 * inch, 5.75 * inch])
     sb_tbl.setStyle(TableStyle([
         ('BACKGROUND',   (0, 0), (-1, 0),  C_NAVY),
         ('TEXTCOLOR',    (0, 0), (-1, 0),  RL_WHITE),
@@ -5496,10 +5661,8 @@ def _build_match_detail_story(resume_dict, jd_dict, sc, rank=None):
         ('FONTSIZE',     (0, 0), (-1, -1), 8.5),
         ('ROWBACKGROUNDS',(0,1), (-1, -1), [C_LIGHT, RL_WHITE]),
         ('GRID',         (0, 0), (-1, -1), 0.5, C_BORDER),
-        ('ALIGN',        (1, 0), (1,  -1), 'CENTER'),
         ('FONTNAME',     (1, 1), (1,  1),  'Helvetica-Bold'),
         ('TEXTCOLOR',    (1, 1), (1,  1),  lv_color),
-        ('FONTNAME',     (1, 2), (1,  3),  'Helvetica-Bold'),
         ('VALIGN',       (0, 0), (-1, -1), 'MIDDLE'),
         ('TOPPADDING',   (0, 0), (-1, -1), 5),
         ('BOTTOMPADDING',(0, 0), (-1, -1), 5),
@@ -5618,15 +5781,7 @@ def _build_match_detail_story(resume_dict, jd_dict, sc, rank=None):
         ParagraphStyle('_RecH', fontSize=10, fontName='Helvetica-Bold',
                         textColor=C_NAVY, spaceAfter=5, spaceBefore=4)
     ))
-    recs = []
-    if pct >= 80:
-        recs.append('Strong candidate — recommend for immediate interview.')
-    elif pct >= 60:
-        recs.append('Good candidate — consider for interview with skill gap discussion.')
-    elif pct >= 40:
-        recs.append('Partial match — may require upskilling in the gap areas listed above.')
-    else:
-        recs.append('Low match — candidate profile does not closely align with this role.')
+    recs = [holistic['recommendation']]
     if missing:
         top_miss = missing[:5]
         recs.append(f'Key areas to strengthen: {", ".join(top_miss)}'
@@ -5654,8 +5809,14 @@ def export_top_matches_pdf(resume_id):
     for jd in jds:
         jd_dict = dict(jd)
         score = calculate_match_score(resume_dict, jd_dict)
-        matches.append({'jd': jd_dict, 'score': score})
-    matches.sort(key=lambda x: x['score']['match_percentage'], reverse=True)
+        holistic = _holistic_or_default(resume_dict, jd_dict)
+        matches.append({'jd': jd_dict, 'score': score,
+                         'holistic_percentage': holistic['fit_percentage'],
+                         'verdict': holistic['verdict'],
+                         'tier_label': holistic['tier_label'],
+                         'recommendation': holistic['recommendation']})
+    _resume_role = resume_dict.get('title', '')
+    matches.sort(key=lambda x: (not _jd_role_matches(_resume_role, x['jd'].get('role', '')), -x['holistic_percentage']))
     top_matches = matches[:3]
 
     # ── Shared palette / styles ────────────────────────────────────────────────
@@ -5667,8 +5828,12 @@ def export_top_matches_pdf(resume_id):
     C_GREEN  = HexColor('#15803d')
     C_ORANGE = HexColor('#d97706')
     C_RED    = HexColor('#dc2626')
-    LEVEL_COLS = {'Strong Match': C_GREEN, 'Good Match': C_BLUE,
-                  'Partial Match': C_ORANGE, 'Low Match': C_RED}
+    def _verdict_col(verdict):
+        v = (verdict or '').lower()
+        if 'strong' in v: return C_GREEN
+        if 'good' in v: return C_BLUE
+        if 'partial' in v: return C_ORANGE
+        return C_RED
 
     buffer = BytesIO()
     doc = SimpleDocTemplate(
@@ -5744,19 +5909,20 @@ def export_top_matches_pdf(resume_id):
         ParagraphStyle('_OvH', fontSize=10, fontName='Helvetica-Bold',
                         textColor=C_BLUE, spaceAfter=7)
     ))
-    ov_data = [['Rank', 'Job Role', 'Category', 'Match Score', 'Matched', 'Missing']]
+    ov_data = [['Rank', 'Job Role', 'Category', 'Overall Fit', 'Recommendation', 'Matched', 'Missing']]
     for i, m in enumerate(top_matches, 1):
         sc = m['score']
         ov_data.append([
             f'#{i}',
             m['jd'].get('title', ''),
             m['jd'].get('category', ''),
-            f"{sc['match_percentage']}%  ({sc['match_level']})",
+            m['tier_label'],
+            m['recommendation'],
             str(sc['matched_count']),
             str(sc['missing_count']),
         ])
     ov_tbl = Table(ov_data,
-                    colWidths=[0.45*inch, 2.2*inch, 1.2*inch, 1.5*inch, 0.8*inch, 0.85*inch])
+                    colWidths=[0.4*inch, 1.75*inch, 1.0*inch, 0.95*inch, 1.5*inch, 0.65*inch, 0.7*inch])
     ov_style = TableStyle([
         ('BACKGROUND',    (0, 0), (-1,  0), C_NAVY),
         ('TEXTCOLOR',     (0, 0), (-1,  0), RL_WHITE),
@@ -5772,9 +5938,9 @@ def export_top_matches_pdf(resume_id):
         ('LEFTPADDING',   (0, 0), (-1, -1), 6),
     ])
     for i, m in enumerate(top_matches, 1):
-        col = LEVEL_COLS.get(m['score']['match_level'], C_GRAY)
-        ov_style.add('TEXTCOLOR',  (3, i), (3, i), col)
-        ov_style.add('FONTNAME',   (3, i), (3, i), 'Helvetica-Bold')
+        col = _verdict_col(m['verdict'])
+        ov_style.add('TEXTCOLOR',  (3, i), (4, i), col)
+        ov_style.add('FONTNAME',   (3, i), (4, i), 'Helvetica-Bold')
     ov_tbl.setStyle(ov_style)
     story.append(ov_tbl)
 
@@ -5948,11 +6114,17 @@ def export_rich_profile_pdf(resume_id):
     for jd in jds:
         jd_dict = dict(jd)
         score = calculate_match_score(resume_dict, jd_dict)
+        holistic = _holistic_or_default(resume_dict, jd_dict)
         score['jd'] = jd_dict
         score['jd_title']    = str(jd_dict.get('title') or 'Unknown')
         score['jd_category'] = str(jd_dict.get('category') or '')
+        score['verdict']         = holistic['verdict']
+        score['tier_label']      = holistic['tier_label']
+        score['recommendation']  = holistic['recommendation']
+        score['holistic_percentage'] = holistic['fit_percentage']
         matches.append(score)
-    matches.sort(key=lambda x: x['match_percentage'], reverse=True)
+    _resume_role = resume_dict.get('title', '')
+    matches.sort(key=lambda x: (not _jd_role_matches(_resume_role, x['jd'].get('role', '')), -x['holistic_percentage']))
     top_matches = matches[:3]
 
     buffer = BytesIO()
@@ -5976,14 +6148,12 @@ def export_rich_profile_pdf(resume_id):
     C_HDR     = rl_colors.HexColor('#1e293b')
     C_LINE    = rl_colors.HexColor('#3b82f6')
 
-    def _scol(p):
-        return C_GREEN if p >= 80 else C_INDIGO if p >= 60 else C_ORANGE if p >= 40 else C_RED
-
-    def _slbl(p):
-        if p >= 80: return 'Strong Match'
-        if p >= 60: return 'Good Match'
-        if p >= 40: return 'Partial Match'
-        return 'Low Match'
+    def _scol(verdict):
+        v = (verdict or '').lower()
+        if 'strong' in v: return C_GREEN
+        if 'good' in v: return C_INDIGO
+        if 'partial' in v: return C_ORANGE
+        return C_RED
 
     def _ps(nm, **kw):
         return ParagraphStyle(nm, **kw)
@@ -6040,16 +6210,17 @@ def export_rich_profile_pdf(resume_id):
                 textColor=C_WHITE, alignment=TA_CENTER)
     ov_hl = _ps('RP_OvHL', fontName='Helvetica-Bold', fontSize=9, textColor=C_WHITE)
     ov_data = [[
-        Paragraph('Rank',        ov_hc),
-        Paragraph('Job Role',    ov_hl),
-        Paragraph('Category',    ov_hl),
-        Paragraph('Match Score', ov_hc),
-        Paragraph('Matched',     ov_hc),
-        Paragraph('Missing',     ov_hc),
+        Paragraph('Rank',           ov_hc),
+        Paragraph('Job Role',       ov_hl),
+        Paragraph('Category',       ov_hl),
+        Paragraph('Overall Fit',    ov_hc),
+        Paragraph('Recommendation', ov_hc),
+        Paragraph('Matched',        ov_hc),
+        Paragraph('Missing',        ov_hc),
     ]]
     for ri, m in enumerate(top_matches, 1):
-        p      = m['match_percentage']
-        sc     = _scol(p)
+        verdict = m['verdict']
+        sc     = _scol(verdict)
         mc     = int(m['matched_count'])
         ms_cnt = int(m['missing_count'])
         ov_data.append([
@@ -6062,9 +6233,12 @@ def export_rich_profile_pdf(resume_id):
             Paragraph(str(m['jd_category']),
                       _ps(f'RP_OvC{ri}', fontName='Helvetica', fontSize=9,
                           textColor=C_MUTED, leading=12)),
-            Paragraph(f'{p}%  ({_slbl(p)})',
+            Paragraph(m['tier_label'],
                       _ps(f'RP_OvSc{ri}', fontName='Helvetica-Bold',
                           fontSize=9, textColor=sc, alignment=TA_CENTER)),
+            Paragraph(m['recommendation'],
+                      _ps(f'RP_OvRec{ri}', fontName='Helvetica-Bold',
+                          fontSize=8, textColor=sc, alignment=TA_CENTER)),
             Paragraph(str(mc),
                       _ps(f'RP_OvMc{ri}', fontName='Helvetica-Bold',
                           fontSize=9, textColor=C_GREEN, alignment=TA_CENTER)),
@@ -6073,7 +6247,7 @@ def export_rich_profile_pdf(resume_id):
                           fontSize=9, textColor=C_RED, alignment=TA_CENTER)),
         ])
 
-    ov_cols  = [0.08*W, 0.28*W, 0.22*W, 0.24*W, 0.09*W, 0.09*W]
+    ov_cols  = [0.06*W, 0.22*W, 0.15*W, 0.14*W, 0.24*W, 0.09*W, 0.10*W]
     ov_style = [
         ('BACKGROUND',    (0, 0), (-1, 0),  C_DARK),
         ('TOPPADDING',    (0, 0), (-1, -1), 7),
@@ -6187,11 +6361,9 @@ def export_rich_profile_pdf(resume_id):
     RANKS = ['#1', '#2', '#3']
 
     for idx, m in enumerate(top_matches):
-        p           = m['match_percentage']
-        sc          = _scol(p)
+        verdict     = m['verdict']
+        sc          = _scol(verdict)
         jdt         = str(m['jd_title'])
-        sp          = int(m.get('skills_match_percentage', 0))
-        ep          = int(m.get('experience_match_percentage', 0))
         exp_note    = str(m.get('experience_note') or '')
         res_yrs     = m.get('resume_years_estimated')
         strong      = list(m.get('strong_areas') or [])
@@ -6204,7 +6376,7 @@ def export_rich_profile_pdf(resume_id):
 
         story.append(PageBreak())
 
-        # JD banner: colored rank badge | title | % + label
+        # JD banner: colored rank badge | title | tier + recommendation
         banner = Table([[
             Paragraph(RANKS[idx],
                       _ps(f'RP_Rk{idx}', fontName='Helvetica-Bold', fontSize=18,
@@ -6212,10 +6384,10 @@ def export_rich_profile_pdf(resume_id):
             Paragraph(jdt,
                       _ps(f'RP_JdT{idx}', fontName='Helvetica-Bold', fontSize=13,
                           textColor=C_DARK, leading=18)),
-            Paragraph(f'<b>{p}%</b><br/><font size="9">{_slbl(p)}</font>',
-                      _ps(f'RP_JdP{idx}', fontName='Helvetica-Bold', fontSize=22,
-                          textColor=sc, alignment=TA_RIGHT, leading=26)),
-        ]], colWidths=[0.12 * W, 0.60 * W, 0.28 * W])
+            Paragraph(f"<b>{m['tier_label']}</b><br/><font size=\"9\">{m['recommendation']}</font>",
+                      _ps(f'RP_JdP{idx}', fontName='Helvetica-Bold', fontSize=12,
+                          textColor=sc, alignment=TA_RIGHT, leading=15)),
+        ]], colWidths=[0.12 * W, 0.48 * W, 0.40 * W])
         banner.setStyle(TableStyle([
             ('BACKGROUND',    (0, 0), (0, 0),   sc),
             ('BACKGROUND',    (1, 0), (-1, -1), C_WHITE),
@@ -6231,31 +6403,24 @@ def export_rich_profile_pdf(resume_id):
         story.append(banner)
         story.append(Spacer(1, 0.15 * inch))
 
-        # Match Score Breakdown table
-        story.append(Paragraph('Match Score Breakdown',
+        # Match Summary table (qualitative — no percentage scores)
+        story.append(Paragraph('Match Summary',
                                 _ps(f'RP_MBH{idx}', fontName='Helvetica-Bold', fontSize=11,
                                     textColor=C_DARK, spaceAfter=6)))
         mb_wh  = _ps(f'RP_MBW{idx}',  fontName='Helvetica-Bold', fontSize=9, textColor=C_WHITE)
-        mb_whc = _ps(f'RP_MBWC{idx}', fontName='Helvetica-Bold', fontSize=9,
-                     textColor=C_WHITE, alignment=TA_CENTER)
         mb_met = _ps(f'RP_MBM{idx}', fontName='Helvetica', fontSize=9, textColor=C_DARK)
         mb_det = _ps(f'RP_MBD{idx}', fontName='Helvetica', fontSize=9, textColor=C_MUTED)
         exp_det = exp_note[:90] if exp_note else 'N/A'
 
         mb_data = [
-            [Paragraph('Metric', mb_wh),  Paragraph('Score', mb_whc),
-             Paragraph('Detail', mb_wh)],
-            [Paragraph('Overall Match', mb_met),
-             Paragraph(f'{p}%', _ps(f'RP_MBOv{idx}', fontName='Helvetica-Bold', fontSize=9,
-                       textColor=sc, alignment=TA_CENTER)),
-             Paragraph(f'{match_count} of {total} requirements met', mb_det)],
-            [Paragraph('Skills Match', mb_met),
-             Paragraph(f'{sp}%', _ps(f'RP_MBSk{idx}', fontName='Helvetica-Bold', fontSize=9,
-                       textColor=C_DARK, alignment=TA_CENTER)),
-             Paragraph(f'{match_count} skills matched', mb_det)],
-            [Paragraph('Experience Match', mb_met),
-             Paragraph(f'{ep}%', _ps(f'RP_MBEx{idx}', fontName='Helvetica-Bold', fontSize=9,
-                       textColor=C_DARK, alignment=TA_CENTER)),
+            [Paragraph('Metric', mb_wh), Paragraph('Detail', mb_wh)],
+            [Paragraph('Overall Fit', mb_met),
+             Paragraph(verdict, _ps(f'RP_MBOv{idx}', fontName='Helvetica-Bold', fontSize=9, textColor=sc))],
+            [Paragraph('Recommendation', mb_met),
+             Paragraph(m['recommendation'], _ps(f'RP_MBRec{idx}', fontName='Helvetica-Bold', fontSize=9, textColor=sc))],
+            [Paragraph('Requirements Met', mb_met),
+             Paragraph(f'{match_count} of {total}', mb_det)],
+            [Paragraph('Experience', mb_met),
              Paragraph(exp_det, mb_det)],
         ]
         mb_style = [
@@ -6270,7 +6435,7 @@ def export_rich_profile_pdf(resume_id):
         for ri in range(1, len(mb_data)):
             mb_style.append(('BACKGROUND', (0, ri), (-1, ri),
                              C_WHITE if ri % 2 == 1 else rl_colors.HexColor('#f8fafc')))
-        mb_tbl = Table(mb_data, colWidths=[0.28 * W, 0.14 * W, 0.58 * W])
+        mb_tbl = Table(mb_data, colWidths=[0.28 * W, 0.72 * W])
         mb_tbl.setStyle(TableStyle(mb_style))
         story.append(mb_tbl)
         story.append(Spacer(1, 0.15 * inch))
@@ -6348,15 +6513,7 @@ def export_rich_profile_pdf(resume_id):
         story.append(Paragraph('Recommendations',
                                 _ps(f'RP_RecH{idx}', fontName='Helvetica-Bold', fontSize=11,
                                     textColor=C_DARK, spaceAfter=6)))
-        if p >= 80:
-            rec1 = 'Strong match — candidate meets most requirements.'
-        elif p >= 60:
-            rec1 = 'Good match — candidate meets key requirements with some gaps.'
-        elif p >= 40:
-            rec1 = 'Partial match — may require upskilling in the gap areas listed above.'
-        else:
-            rec1 = 'Low match — significant gaps to address before applying.'
-        story.append(Paragraph(f'• {rec1}',
+        story.append(Paragraph(f"• {m['recommendation']}",
                                 _ps(f'RP_Rec1{idx}', fontName='Helvetica', fontSize=9,
                                     textColor=C_DARK, leading=14, spaceAfter=4)))
         if weak:
@@ -7304,17 +7461,12 @@ def export_bulk_compare_pdf():
     COL_WHITE  = rl_colors.white
     COL_HDR    = rl_colors.HexColor('#312e81')
 
-    def sc(pct):
-        if pct >= 80: return COL_GREEN
-        if pct >= 60: return COL_ACCENT
-        if pct >= 40: return COL_ORANGE
+    def sc(verdict):
+        v = (verdict or '').lower()
+        if 'strong' in v: return COL_GREEN
+        if 'good' in v: return COL_ACCENT
+        if 'partial' in v: return COL_ORANGE
         return COL_RED
-
-    def lvl(pct):
-        if pct >= 80: return 'Strong Match'
-        if pct >= 60: return 'Good Match'
-        if pct >= 40: return 'Partial Match'
-        return 'Low Match'
 
     story = []
     W = A4[0] - 1.3*inch
@@ -7347,18 +7499,20 @@ def export_bulk_compare_pdf():
                       textColor=COL_WHITE)),
             Paragraph('Title', ParagraphStyle('TH', fontName='Helvetica-Bold', fontSize=8.5,
                       textColor=COL_WHITE)),
-            Paragraph('Score', ParagraphStyle('TH', fontName='Helvetica-Bold', fontSize=8.5,
+            Paragraph('Fit', ParagraphStyle('TH', fontName='Helvetica-Bold', fontSize=8.5,
+                      textColor=COL_WHITE, alignment=TA_CENTER)),
+            Paragraph('Recommendation', ParagraphStyle('TH', fontName='Helvetica-Bold', fontSize=8.5,
                       textColor=COL_WHITE, alignment=TA_CENTER)),
             Paragraph('Matched', ParagraphStyle('TH', fontName='Helvetica-Bold', fontSize=8.5,
-                      textColor=COL_WHITE, alignment=TA_CENTER)),
-            Paragraph('Level', ParagraphStyle('TH', fontName='Helvetica-Bold', fontSize=8.5,
                       textColor=COL_WHITE, alignment=TA_CENTER)),
         ]
         tbl_data = [hdr_row]
         row_colors = []
         for i, r in enumerate(results):
-            pct = r.get('match_percentage', 0)
-            color = sc(pct)
+            verdict = r.get('verdict', 'Not enough data to assess')
+            tier_label = r.get('tier_label', verdict)
+            recommendation = r.get('recommendation', '')
+            color = sc(verdict)
             bg = rl_colors.HexColor('#f8fafc') if i % 2 == 0 else COL_WHITE
             row_colors.append(bg)
             matched_str = ', '.join(r.get('matched_skills', [])[:5])
@@ -7373,16 +7527,16 @@ def export_bulk_compare_pdf():
                 Paragraph(r.get('title', '—'),
                           ParagraphStyle('TD3', fontName='Helvetica', fontSize=8,
                                          textColor=COL_MUTED)),
-                Paragraph(f'{pct}%', ParagraphStyle('TD4', fontName='Helvetica-Bold', fontSize=11,
+                Paragraph(tier_label, ParagraphStyle('TD4', fontName='Helvetica-Bold', fontSize=8.5,
+                          textColor=color, alignment=TA_CENTER)),
+                Paragraph(recommendation, ParagraphStyle('TD4b', fontName='Helvetica-Bold', fontSize=7.5,
                           textColor=color, alignment=TA_CENTER)),
                 Paragraph(f"{r.get('matched_count',0)}/{r.get('total_jd_requirements',0)}",
                           ParagraphStyle('TD5', fontName='Helvetica', fontSize=8.5,
                                          textColor=COL_MUTED, alignment=TA_CENTER)),
-                Paragraph(lvl(pct), ParagraphStyle('TD6', fontName='Helvetica', fontSize=8,
-                          textColor=color, alignment=TA_CENTER)),
             ])
 
-        col_w = [0.06*W, 0.28*W, 0.22*W, 0.12*W, 0.16*W, 0.16*W]
+        col_w = [0.05*W, 0.22*W, 0.17*W, 0.15*W, 0.24*W, 0.17*W]
         main_tbl = Table(tbl_data, colWidths=col_w, repeatRows=1)
         ts = [
             ('BACKGROUND',    (0,0), (-1,0), COL_DARK),
@@ -7409,8 +7563,9 @@ def export_bulk_compare_pdf():
         for r in results:
             if r.get('error'):
                 continue
-            pct = r.get('match_percentage', 0)
-            color = sc(pct)
+            verdict = r.get('verdict', 'Not enough data to assess')
+            recommendation = r.get('recommendation', '')
+            color = sc(verdict)
             name = r.get('candidate_name', r.get('file', '?'))
             matched = r.get('matched_skills', [])
             missing = r.get('missing_skills', [])
@@ -7418,10 +7573,10 @@ def export_bulk_compare_pdf():
             cand_hdr = Table([[
                 Paragraph(name, ParagraphStyle('CN', fontName='Helvetica-Bold',
                           fontSize=10, textColor=COL_WHITE, leading=14)),
-                Paragraph(f'{pct}%  {lvl(pct)}',
+                Paragraph(f'{verdict}<br/><font size="8">{recommendation}</font>',
                           ParagraphStyle('CPct', fontName='Helvetica-Bold', fontSize=10,
-                                         textColor=COL_WHITE, alignment=TA_CENTER, leading=14)),
-            ]], colWidths=[W*0.65, W*0.35])
+                                         textColor=COL_WHITE, alignment=TA_CENTER, leading=13)),
+            ]], colWidths=[W*0.6, W*0.4])
             cand_hdr.setStyle(TableStyle([
                 ('BACKGROUND', (0,0), (-1,-1), color),
                 ('TOPPADDING', (0,0), (-1,-1), 8),
@@ -7491,14 +7646,12 @@ def bulk_compare():
         path = RAW_UPLOAD_FOLDER / safe
         if not path.exists():
             results.append({"file": filename, "candidate_name": safe,
-                             "error": "File not found", "match_percentage": 0,
-                             "match_level": "Error", "match_level_color": "gray"})
+                             "error": "File not found", "fit_percentage": 0, "verdict": "Error"})
             continue
         ext = safe.rsplit(".", 1)[-1].lower() if "." in safe else ""
         if ext not in ALLOWED_EXTENSIONS:
             results.append({"file": filename, "candidate_name": safe,
-                             "error": "Unsupported format", "match_percentage": 0,
-                             "match_level": "Error", "match_level_color": "gray"})
+                             "error": "Unsupported format", "fit_percentage": 0, "verdict": "Error"})
             continue
         try:
             if ext == "pdf":
@@ -7507,14 +7660,16 @@ def bulk_compare():
                 text = extract_resume_text(path, ext)
                 parsed = parse_resume_text(text)
             score = calculate_match_score(parsed, jd_dict)
+            holistic = _holistic_or_default(parsed, jd_dict)
             results.append({
                 "file": filename,
                 "candidate_name": parsed.get("full_name") or Path(filename).stem,
                 "title": parsed.get("title", ""),
                 "email": parsed.get("email", ""),
-                "match_percentage": score["match_percentage"],
-                "match_level": score["match_level"],
-                "match_level_color": score["match_level_color"],
+                "fit_percentage": holistic["fit_percentage"],
+                "verdict": holistic["verdict"],
+                "tier_label": holistic["tier_label"],
+                "recommendation": holistic["recommendation"],
                 "matched_count": score["matched_count"],
                 "missing_count": score["missing_count"],
                 "total_jd_requirements": score["total_jd_requirements"],
@@ -7529,9 +7684,8 @@ def bulk_compare():
                 "file": filename,
                 "candidate_name": Path(filename).stem,
                 "error": str(e),
-                "match_percentage": 0,
-                "match_level": "Error",
-                "match_level_color": "gray",
+                "fit_percentage": 0,
+                "verdict": "Error",
                 "matched_count": 0,
                 "missing_count": 0,
                 "total_jd_requirements": 0,
@@ -7539,7 +7693,7 @@ def bulk_compare():
                 "missing_skills": [],
             })
 
-    results.sort(key=lambda x: x.get("match_percentage", 0), reverse=True)
+    results.sort(key=lambda x: x.get("fit_percentage", 0), reverse=True)
     return jsonify({
         "success": True,
         "jd_title": jd_dict["title"],
@@ -7574,6 +7728,26 @@ def groups(role=None):
 
 JD_UPLOAD_FOLDER = UPLOAD_FOLDER / "jd"
 JD_UPLOAD_FOLDER.mkdir(exist_ok=True)
+
+
+def ensure_ai_match_cache_table(conn):
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS ai_match_cache (
+            resume_id          INTEGER NOT NULL,
+            jd_id              INTEGER NOT NULL,
+            fit_percentage     INTEGER NOT NULL,
+            verdict            VARCHAR(200) DEFAULT '',
+            rationale          TEXT DEFAULT '',
+            extra              JSONB DEFAULT '{}'::jsonb,
+            resume_updated_at  TIMESTAMPTZ,
+            jd_updated_at      TIMESTAMPTZ,
+            computed_at        TIMESTAMP DEFAULT NOW(),
+            PRIMARY KEY (resume_id, jd_id)
+        )
+    """)
+    # Defensive migration — this table already existed in some dev environments
+    # before the "extra" column (strengths/concerns/suggested_roles) was added.
+    conn.execute("ALTER TABLE ai_match_cache ADD COLUMN IF NOT EXISTS extra JSONB DEFAULT '{}'::jsonb")
 
 
 def ensure_jd_table(conn):
@@ -8086,28 +8260,61 @@ PREDEFINED_JDS = [
 
 
 def seed_jds(conn):
-    existing_titles = {
-        row["title"]
-        for row in conn.execute("SELECT title FROM job_description").fetchall()
-    }
+    """Populate the starter JD set on a genuinely empty table only. This runs
+    on every /jd-management page load, so re-checking title-by-title (as
+    before) meant deleting a predefined JD got silently undone on the very
+    next page load — the delete worked, but the next GET re-seeded it right
+    back in. A one-time "table is empty" check preserves the first-run
+    starter content without fighting the user's own deletions afterward.
+    """
+    (count_row,) = conn.execute("SELECT COUNT(*) AS n FROM job_description").fetchall()
+    if count_row["n"] > 0:
+        return
     for jd in PREDEFINED_JDS:
-        if jd["title"] not in existing_titles:
-            conn.execute(
-                """
-                INSERT INTO job_description
-                    (title, role, category, responsibilities, requirements, skills, keywords)
-                VALUES
-                    (%(title)s, %(role)s, %(category)s, %(responsibilities)s,
-                     %(requirements)s, %(skills)s, %(keywords)s)
-                """,
-                jd,
-            )
+        conn.execute(
+            """
+            INSERT INTO job_description
+                (title, role, category, responsibilities, requirements, skills, keywords)
+            VALUES
+                (%(title)s, %(role)s, %(category)s, %(responsibilities)s,
+                 %(requirements)s, %(skills)s, %(keywords)s)
+            """,
+            jd,
+        )
 
 
 # ── Matching Algorithm ────────────────────────────────────────────────────────
 
 def _normalize(text):
     return re.sub(r'\s+', ' ', (text or '').lower()).strip()
+
+
+def _jd_role_matches(resume_title, jd_role):
+    """True if the candidate's own declared role/title matches a JD's role.
+
+    Used to prioritize a JD for the candidate's own specialty ahead of pure
+    skill-keyword-overlap scoring in the Top Matches ranking — otherwise a
+    JD can score lower than an unrelated one purely because its specific
+    tool/skill list has less textual overlap with the resume, even though
+    the role itself is an exact match (e.g. a Cybersecurity Engineer
+    candidate not seeing the Cybersecurity Engineer JD in their own top 3).
+    Both sides are drawn from the same role vocabulary (the Groups dropdown
+    used at upload / the JD role dropdown), so an exact match once
+    whitespace differences are ignored ("Cyber Security" vs "Cybersecurity")
+    is the right bar — no fuzzy/partial matching, to avoid conflating
+    distinct roles like "QA Engineer" and "QA Lead".
+    """
+    a = re.sub(r'\s+', '', (resume_title or '').lower())
+    b = re.sub(r'\s+', '', (jd_role or '').lower())
+    return bool(a) and bool(b) and a == b
+
+
+# JD-posting logistics lines (not actual requirements) that show up mixed into
+# free-text requirements fields on any JD, not just one specific posting.
+_JD_METADATA_LINE_RE = re.compile(
+    r'^(location|type|salary|duration|department|employment\s*type|work\s*mode|shift|reports?\s*to)\s*:',
+    re.I,
+)
 
 
 def _parse_jd_items(skills_text, requirements_text, keywords_text):
@@ -8117,7 +8324,7 @@ def _parse_jd_items(skills_text, requirements_text, keywords_text):
     seen, items = set(), []
     for line in combined.splitlines():
         line = re.sub(r'^[•\-–*►◆▸▪\d\.\)\s]+', '', line).strip()
-        if not line:
+        if not line or _JD_METADATA_LINE_RE.match(line):
             continue
         for part in re.split(r'[,;]', line):
             part = part.strip()
@@ -8128,11 +8335,51 @@ def _parse_jd_items(skills_text, requirements_text, keywords_text):
     return items
 
 
+# Common abbreviation/full-form pairs so e.g. a JD's "JavaScript" matches a resume
+# that only ever wrote "JS", without needing an LLM call to recognize the synonym.
+# Grouped as sets (not a flat dict) so any member in a group pulls in every other
+# member as a variant to check.
+_SKILL_SYNONYM_GROUPS = [
+    {"js", "javascript"}, {"ts", "typescript"}, {"py", "python"},
+    {"ml", "machine learning"}, {"ai", "artificial intelligence"},
+    {"k8s", "kubernetes"}, {"aws", "amazon web services"},
+    {"gcp", "google cloud platform"}, {"nlp", "natural language processing"},
+    {"oop", "object oriented programming"}, {"qa", "quality assurance"},
+    {"sql", "structured query language"}, {"iac", "infrastructure as code"},
+    {"sre", "site reliability engineering"}, {"crm", "customer relationship management"},
+    {"erp", "enterprise resource planning"}, {"bi", "business intelligence"},
+    {"etl", "extract transform load"}, {"llm", "large language model"},
+    {"ux", "user experience"}, {"ui", "user interface"},
+    {"devops", "development operations"}, {"iot", "internet of things"},
+    {"ci/cd", "cicd", "ci cd", "continuous integration continuous deployment"},
+]
+
+
+def _synonym_variants(skill_n):
+    """All known synonym phrases for an already-normalized skill, plus itself."""
+    variants = {skill_n}
+    for group in _SKILL_SYNONYM_GROUPS:
+        if skill_n in group:
+            variants |= group
+    return variants
+
+
 def _skill_matches(skill, corpus):
     skill_n = _normalize(skill)
     corpus_n = _normalize(corpus)
-    if skill_n in corpus_n:
+    # Short skills (IQ, FRA, CAPA, ...) need a whole-word check — as plain substrings
+    # they'd false-positive inside unrelated words (e.g. "iq" inside "techniques").
+    if len(skill_n) <= 4:
+        if re.search(r'\b' + re.escape(skill_n) + r'\b', corpus_n):
+            return True
+    elif skill_n in corpus_n:
         return True
+    for variant in _synonym_variants(skill_n) - {skill_n}:
+        if len(variant) <= 4:
+            if re.search(r'\b' + re.escape(variant) + r'\b', corpus_n):
+                return True
+        elif variant in corpus_n:
+            return True
     words = [w for w in skill_n.split() if len(w) > 3]
     if len(words) >= 2 and all(w in corpus_n for w in words[:2]):
         return True
@@ -8154,6 +8401,120 @@ def _extract_years_required(text):
             except Exception:
                 pass
     return None
+
+
+
+# Generic-language words filtered out of the whole-document comparison so the
+# similarity reflects shared domain/role content, not shared filler words —
+# not specific to any one JD or resume.
+_DOC_STOPWORDS = set("""
+a an the and or but if then else for of to in on at by with without within into from as is are was
+were be been being this that these those it its youre your our their his her he she they them i we
+do does did have has had will would can could should shall may might must not no nor so such than too
+very s t don now years year experience strong excellent good working skills location type permanent
+full time hybrid remote responsible ability including etc using well also both across each per any
+role team teams work works related including
+""".split())
+
+
+def _doc_word_freq(text):
+    words = re.findall(r"[a-z]{3,}", (text or '').lower())
+    return Counter(w for w in words if w not in _DOC_STOPWORDS)
+
+
+def _whole_doc_similarity(jd_dict, resume_dict):
+    """Cosine similarity between the JD's full text and the resume's full text,
+    treated as whole documents rather than a checklist of discrete skills.
+    A shared-vocabulary comparison across the whole JD and whole resume gives
+    credit for genuine overall domain/role overlap (shared responsibilities,
+    tools, terminology) instead of scoring a category to zero the moment one
+    specific line item isn't a literal hit — closer to how a recruiter skims
+    a resume against a JD as a whole rather than checking off a line-by-line
+    list. Returns (similarity 0..1, shared significant terms sorted by
+    combined frequency).
+    """
+    jd_text = " ".join(str(jd_dict.get(k) or '') for k in
+                        ('title', 'skills', 'requirements', 'responsibilities', 'keywords'))
+    resume_text = " ".join(str(resume_dict.get(k) or '') for k in
+                            ('title', 'summary', 'skills', 'experience', 'projects', 'certifications', 'education'))
+    jd_freq = _doc_word_freq(jd_text)
+    res_freq = _doc_word_freq(resume_text)
+    if not jd_freq or not res_freq:
+        return 0.0, []
+
+    common = set(jd_freq) & set(res_freq)
+    dot = sum(jd_freq[w] * res_freq[w] for w in common)
+    jd_norm = math.sqrt(sum(v * v for v in jd_freq.values()))
+    res_norm = math.sqrt(sum(v * v for v in res_freq.values()))
+    similarity = dot / (jd_norm * res_norm) if jd_norm and res_norm else 0.0
+
+    shared = sorted(common, key=lambda w: jd_freq[w] * res_freq[w], reverse=True)
+    return similarity, shared
+
+
+def _holistic_match(resume_dict, jd_dict):
+    """Whole-document fit assessment: cosine similarity between the JD's full
+    text and the resume's full text, rather than a line-by-line skills
+    checklist — see _whole_doc_similarity(). A checklist scores a candidate
+    down for every individual missing acronym even when the two documents are
+    clearly the same domain overall; comparing the documents as a whole avoids
+    that, at the cost of being a cruder, less specific signal.
+    """
+    similarity, shared_terms = _whole_doc_similarity(jd_dict, resume_dict)
+    if not shared_terms and similarity == 0.0:
+        return None
+    # Raw cosine similarity between two natural-language documents (unweighted
+    # term frequency, no IDF corpus available) sits low in absolute terms even
+    # for a strong match, so it's rescaled onto a friendlier 0-100 range rather
+    # than reported as-is; only relative ordering/tiering matters since the UI
+    # doesn't surface the raw number.
+    pct = max(0, min(100, round(similarity * 220)))
+
+    if pct >= 70:
+        verdict, tier_label, recommendation = (
+            "Strong overall fit", "Strong Fit", "🌟 Great fit for this role — advance to next round")
+    elif pct >= 45:
+        verdict, tier_label, recommendation = (
+            "Good overall fit", "Good Fit", "👍 Good fit for this role — worth interviewing")
+    elif pct >= 25:
+        verdict, tier_label, recommendation = (
+            "Partial overall fit", "Partial Fit", "🤔 Partial fit — worth a closer look")
+    else:
+        verdict, tier_label, recommendation = (
+            "Limited overall fit", "Weak Fit", "⏭ Not a strong fit for this role")
+
+    rationale = f"Compared the full job description against the full resume as whole documents; {verdict.lower()} based on shared domain content."
+
+    return {
+        "fit_percentage": pct,
+        "verdict": verdict,
+        "tier_label": tier_label,
+        "recommendation": recommendation,
+        "rationale": rationale[:500],
+        "strengths": shared_terms[:6],
+        "concerns": "",
+        "suggested_roles": [],
+    }
+
+
+def _holistic_or_default(resume_dict, jd_dict):
+    """_holistic_match(), normalized to always return a full dict (never None)
+    so every caller gets the same keys (including tier_label/recommendation)
+    without repeating its own "if holistic else ..." fallback.
+    """
+    holistic = _holistic_match(resume_dict, jd_dict)
+    if holistic:
+        return holistic
+    return {
+        "fit_percentage": 0,
+        "verdict": "Not enough data to assess",
+        "tier_label": "Not enough data",
+        "recommendation": "— No assessment available",
+        "rationale": "",
+        "strengths": [],
+        "concerns": "",
+        "suggested_roles": [],
+    }
 
 
 def _estimate_exp_years(experience_text):
@@ -8525,6 +8886,81 @@ def compare_result(resume_id, jd_id):
     )
 
 
+@app.route("/api/compare/<int:resume_id>/<int:jd_id>/ai-assessment")
+def compare_ai_assessment(resume_id, jd_id):
+    """Fetched asynchronously by compare_result.html / profile.html after the
+    page loads. _holistic_match() is pure Python now (no LLM call), so this
+    resolves quickly, but it's still kept off the initial page render and
+    cached per (resume_id, jd_id) from when it was a slow local-model call —
+    cheap to keep either way. The cache is invalidated automatically if either
+    side was edited since it was computed (its updated_at moved past what's
+    stored).
+    """
+    logger.info(f"AI assessment requested → resume={resume_id} jd={jd_id}")
+    with db_conn() as conn:
+        resume = conn.execute("SELECT * FROM resume WHERE id = %s", (resume_id,)).fetchone()
+        jd = conn.execute("SELECT * FROM job_description WHERE id = %s", (jd_id,)).fetchone()
+        if not resume or not jd:
+            return jsonify({"error": "Resume or JD not found"}), 404
+
+        ensure_ai_match_cache_table(conn)
+        cached = conn.execute(
+            "SELECT * FROM ai_match_cache WHERE resume_id = %s AND jd_id = %s",
+            (resume_id, jd_id),
+        ).fetchone()
+        # resume.updated_at is TIMESTAMPTZ (tz-aware) but job_description.updated_at
+        # is a naive TIMESTAMP — normalize both sides to naive before comparing so
+        # this doesn't depend on which of the two inconsistent column types a given
+        # value happened to come from.
+        _naive = lambda dt: dt.replace(tzinfo=None) if dt and dt.tzinfo else dt
+        if (cached and _naive(cached["resume_updated_at"]) == _naive(resume["updated_at"])
+                and _naive(cached["jd_updated_at"]) == _naive(jd["updated_at"])):
+            logger.info(f"AI assessment cache hit → resume={resume_id} jd={jd_id}")
+            extra = cached["extra"] or {}
+            return jsonify({
+                "fit_percentage": cached["fit_percentage"],
+                "verdict": cached["verdict"],
+                "tier_label": extra.get("tier_label", cached["verdict"]),
+                "recommendation": extra.get("recommendation", ""),
+                "rationale": cached["rationale"],
+                "strengths": extra.get("strengths", []),
+                "concerns": extra.get("concerns", ""),
+                "suggested_roles": extra.get("suggested_roles", []),
+            })
+
+        logger.info(f"AI assessment cache miss → resume={resume_id} jd={jd_id}, computing")
+        assessment = _holistic_match(dict(resume), dict(jd))
+        if assessment is None:
+            return jsonify({"error": "AI assessment unavailable right now"}), 503
+
+        extra_json = json.dumps({
+            "tier_label": assessment.get("tier_label", assessment["verdict"]),
+            "recommendation": assessment.get("recommendation", ""),
+            "strengths": assessment.get("strengths", []),
+            "concerns": assessment.get("concerns", ""),
+            "suggested_roles": assessment.get("suggested_roles", []),
+        })
+        conn.execute(
+            """
+            INSERT INTO ai_match_cache
+                (resume_id, jd_id, fit_percentage, verdict, rationale, extra,
+                 resume_updated_at, jd_updated_at, computed_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+            ON CONFLICT (resume_id, jd_id) DO UPDATE SET
+                fit_percentage = EXCLUDED.fit_percentage,
+                verdict = EXCLUDED.verdict,
+                rationale = EXCLUDED.rationale,
+                extra = EXCLUDED.extra,
+                resume_updated_at = EXCLUDED.resume_updated_at,
+                jd_updated_at = EXCLUDED.jd_updated_at,
+                computed_at = NOW()
+            """,
+            (resume_id, jd_id, assessment["fit_percentage"], assessment["verdict"],
+             assessment["rationale"], extra_json, resume["updated_at"], jd["updated_at"]),
+        )
+    return jsonify(assessment)
+
+
 # ── NEW FEATURE: Top-matching resumes for a JD (reverse of Compare Resumes) ──
 # Given a JD, scores every stored resume against it with the same
 # calculate_match_score() used by the one-resume-at-a-time compare flow, and
@@ -8546,9 +8982,10 @@ def jd_top_matches(jd_id):
     for r in resumes:
         r_dict = dict(r)
         score = calculate_match_score(r_dict, jd_dict)
-        scored.append({"resume": r_dict, "score": score})
+        holistic = _holistic_or_default(r_dict, jd_dict)
+        scored.append({"resume": r_dict, "score": score, "holistic": holistic})
 
-    scored.sort(key=lambda x: x["score"]["match_percentage"], reverse=True)
+    scored.sort(key=lambda x: x["holistic"]["fit_percentage"], reverse=True)
     top_matches = scored[:3]
 
     return render_template(

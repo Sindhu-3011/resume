@@ -50,54 +50,47 @@
         </div>
         <a class="button" style="background:#10b981;padding:8px 16px;font-size:0.83rem;border-radius:8px;" href="{{ url_for('export_rich_profile_pdf', resume_id=resume.id) }}">📄 Export PDF</a>
     </div>
+    <p class="muted" style="margin:-10px 0 18px;font-size:0.78rem;">
+        AI holistic scores load one card at a time and can take up to a couple of minutes total on local hardware — cached after the first load, so revisits are instant.
+    </p>
 
-    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:18px;">
+    <div id="matching-roles-grid" style="display:grid;grid-template-columns:repeat(3,1fr);gap:18px;">
         {% for match in top_matches %}
-        {%- set clr_main  = '#10b981' if match.match_percentage >= 80 else ('#6366f1' if match.match_percentage >= 60 else ('#f59e0b' if match.match_percentage >= 40 else '#ef4444')) -%}
-        {%- set clr_dark  = '#059669' if match.match_percentage >= 80 else ('#4f46e5' if match.match_percentage >= 60 else ('#d97706' if match.match_percentage >= 40 else '#dc2626')) -%}
-        {%- set clr_bg    = '#f0fdf4' if match.match_percentage >= 80 else ('#eef2ff' if match.match_percentage >= 60 else ('#fffbeb' if match.match_percentage >= 40 else '#fef2f2')) -%}
-        {%- set clr_pill  = '#dcfce7' if match.match_percentage >= 80 else ('#e0e7ff' if match.match_percentage >= 60 else ('#fef9c3' if match.match_percentage >= 40 else '#fee2e2')) -%}
-        {%- set clr_ptx   = '#166534' if match.match_percentage >= 80 else ('#3730a3' if match.match_percentage >= 60 else ('#854d0e' if match.match_percentage >= 40 else '#991b1b')) -%}
-        {%- set lbl       = 'Strong Match' if match.match_percentage >= 80 else ('Good Match' if match.match_percentage >= 60 else ('Partial Match' if match.match_percentage >= 40 else 'Low Match')) -%}
+        {%- set clr_main  = '#6366f1' -%}
+        {%- set clr_dark  = '#4f46e5' -%}
+        {%- set clr_bg    = '#eef2ff' -%}
 
-        <div style="background:{{ clr_bg }};border-radius:14px;overflow:hidden;box-shadow:0 2px 10px rgba(0,0,0,0.07);transition:transform .2s,box-shadow .2s;"
+        <div id="match-card-{{ match.jd_id }}" data-jd-id="{{ match.jd_id }}" data-fallback-pct="{{ match.match_percentage }}"
+             style="background:{{ clr_bg }};border-radius:14px;overflow:hidden;box-shadow:0 2px 10px rgba(0,0,0,0.07);transition:transform .2s,box-shadow .2s,background .4s;"
              onmouseover="this.style.transform='translateY(-3px)';this.style.boxShadow='0 10px 24px rgba(0,0,0,0.13)';"
              onmouseout="this.style.transform='translateY(0)';this.style.boxShadow='0 2px 10px rgba(0,0,0,0.07)';">
 
-            <!-- Card header band -->
-            <div style="background:linear-gradient(90deg,{{ clr_main }},{{ clr_dark }});padding:14px 18px;display:flex;align-items:center;justify-content:space-between;">
+            <!-- Card header band — rank + fit tier label (replaced once the AI verdict loads) -->
+            <div id="band-{{ match.jd_id }}" style="background:linear-gradient(90deg,{{ clr_main }},{{ clr_dark }});padding:14px 18px;display:flex;align-items:center;justify-content:space-between;transition:background .4s;">
                 <div style="display:flex;align-items:center;gap:10px;">
-                    <div style="width:28px;height:28px;border-radius:8px;background:rgba(255,255,255,0.25);display:flex;align-items:center;justify-content:center;font-size:0.95rem;font-weight:900;color:#fff;">{{ loop.index }}</div>
-                    <span style="font-size:0.72rem;font-weight:800;color:rgba(255,255,255,0.9);text-transform:uppercase;letter-spacing:.07em;">{{ lbl }}</span>
+                    <div class="rank-badge" style="width:28px;height:28px;border-radius:8px;background:rgba(255,255,255,0.25);display:flex;align-items:center;justify-content:center;font-size:0.95rem;font-weight:900;color:#fff;">{{ loop.index }}</div>
+                    <span id="band-label-{{ match.jd_id }}" style="font-size:0.72rem;font-weight:800;color:rgba(255,255,255,0.9);text-transform:uppercase;letter-spacing:.07em;">Analyzing&hellip;</span>
                 </div>
-                <span style="font-size:1.5rem;font-weight:900;color:#fff;line-height:1;">{{ match.match_percentage }}%</span>
             </div>
 
             <!-- Card body -->
             <div style="padding:16px 18px;">
-                <h3 style="margin:0 0 14px 0;font-size:1rem;font-weight:800;color:#1e293b;line-height:1.4;">
+                <h3 style="margin:0 0 8px 0;font-size:1rem;font-weight:800;color:#1e293b;line-height:1.4;">
                     <a href="{{ url_for('compare_result', resume_id=resume.id, jd_id=match.jd_id) }}" style="color:inherit;text-decoration:none;">{{ match.jd_title }}</a>
                 </h3>
 
-                <!-- Progress bar -->
-                <div style="margin-bottom:14px;">
-                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-                        <span style="font-size:0.72rem;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.05em;">Match Score</span>
-                        <span style="font-size:0.8rem;font-weight:700;color:{{ clr_main }};">{{ match.match_percentage }} / 100</span>
-                    </div>
-                    <div style="width:100%;height:9px;background:rgba(0,0,0,0.08);border-radius:999px;overflow:hidden;">
-                        <div style="height:100%;width:{{ match.match_percentage }}%;background:linear-gradient(90deg,{{ clr_main }},{{ clr_dark }});border-radius:999px;transition:width .8s ease;"></div>
-                    </div>
+                <!-- AI verdict — the only fit signal shown, no score/percentage -->
+                <div id="ai-verdict-{{ match.jd_id }}" style="margin-bottom:6px;font-size:0.8rem;color:#6d28d9;line-height:1.5;min-height:1.2em;">
+                    <span class="ai-mini-spinner" style="display:inline-block;width:11px;height:11px;border:2px solid rgba(109,40,217,0.25);border-top-color:#6d28d9;border-radius:50%;animation:aiminispin 0.8s linear infinite;vertical-align:middle;margin-right:6px;"></span>
+                    Analyzing fit&hellip;
                 </div>
 
-                <!-- Skills pill -->
-                <div style="background:{{ clr_pill }};color:{{ clr_ptx }};border-radius:8px;padding:8px 12px;font-size:0.82rem;font-weight:700;text-align:center;margin-bottom:14px;">
-                    ✓ {{ match.matched_count }} / {{ match.total_jd_requirements }} skills matched
-                </div>
+                <!-- Recommendation — the "can we proceed?" signal, no number needed -->
+                <div id="ai-recommendation-{{ match.jd_id }}" style="margin-bottom:14px;font-size:0.82rem;font-weight:700;min-height:1.2em;"></div>
 
                 <!-- CTA button -->
                 <a href="{{ url_for('compare_result', resume_id=resume.id, jd_id=match.jd_id) }}"
-                   style="display:block;width:100%;padding:10px;background:linear-gradient(90deg,{{ clr_main }},{{ clr_dark }});color:#fff;text-align:center;text-decoration:none;border-radius:8px;font-weight:700;font-size:0.85rem;box-sizing:border-box;letter-spacing:.02em;">
+                   style="display:block;width:100%;margin-top:14px;padding:10px;background:linear-gradient(90deg,{{ clr_main }},{{ clr_dark }});color:#fff;text-align:center;text-decoration:none;border-radius:8px;font-weight:700;font-size:0.85rem;box-sizing:border-box;letter-spacing:.02em;">
                     View Full Comparison →
                 </a>
             </div>
@@ -105,12 +98,6 @@
         {% endfor %}
     </div>
 
-    {% if is_weak %}
-    <div style="background:#fffbeb;border:1px solid #fcd34d;color:#78350f;padding:10px 16px;border-radius:8px;margin-top:16px;font-size:0.84rem;display:flex;gap:8px;align-items:flex-start;">
-        <span style="font-size:1rem;">⚠️</span>
-        <p style="margin:0;"><strong>Best matches found, but none are strong fits.</strong> Review the comparisons above or explore more roles in <a href="{{ url_for('jd_management') }}" style="color:#92400e;font-weight:700;">Job Descriptions</a>.</p>
-    </div>
-    {% endif %}
 </section>
 {% endif %}
 
@@ -257,5 +244,98 @@ function saveComments() {
     </div>
     {% endif %}
 </section>
+
+{% if top_matches %}
+<style>
+@keyframes aiminispin { to { transform: rotate(360deg); } }
+</style>
+<script>
+(function () {
+    var jdIds = [{% for match in top_matches %}{{ match.jd_id }}{{ ',' if not loop.last }}{% endfor %}];
+    var resumeId = {{ resume.id }};
+    var results = {}; // jdId -> {pct, isAI}
+
+    function esc(s) {
+        return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+            return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+        });
+    }
+
+    // Colors keyed to the verdict's own wording, not a raw score — no percentage
+    // is ever computed into a visible number here.
+    function tierColors(verdict) {
+        var v = (verdict || '').toLowerCase();
+        if (v.indexOf('strong') !== -1) return {main:'#10b981', dark:'#059669', bg:'#f0fdf4'};
+        if (v.indexOf('good') !== -1) return {main:'#6366f1', dark:'#4f46e5', bg:'#eef2ff'};
+        if (v.indexOf('partial') !== -1) return {main:'#f59e0b', dark:'#d97706', bg:'#fffbeb'};
+        return {main:'#ef4444', dark:'#dc2626', bg:'#fef2f2'};
+    }
+
+    // Promotes the AI verdict to the primary badge/band for this card once it loads.
+    function applyBand(jdId, tierLabel, verdict) {
+        var band = document.getElementById('band-' + jdId);
+        var lblEl = document.getElementById('band-label-' + jdId);
+        var card = document.getElementById('match-card-' + jdId);
+        var c = tierColors(verdict);
+        if (band) band.style.background = 'linear-gradient(90deg,' + c.main + ',' + c.dark + ')';
+        if (lblEl) lblEl.textContent = tierLabel || 'Assessed';
+        if (card) card.style.background = c.bg;
+    }
+
+    // Re-sorts the grid by whatever's in `results` (AI score if it resolved,
+    // keyword estimate otherwise) and renumbers the rank badges to match.
+    function resortGrid() {
+        var grid = document.getElementById('matching-roles-grid');
+        if (!grid) return;
+        var cards = Array.prototype.slice.call(grid.children);
+        cards.sort(function (a, b) {
+            var pa = results[a.getAttribute('data-jd-id')];
+            var pb = results[b.getAttribute('data-jd-id')];
+            return (pb ? pb.pct : 0) - (pa ? pa.pct : 0);
+        });
+        cards.forEach(function (card, idx) {
+            grid.appendChild(card);
+            var rankEl = card.querySelector('.rank-badge');
+            if (rankEl) rankEl.textContent = idx + 1;
+        });
+    }
+
+    jdIds.forEach(function (id) {
+        var card = document.getElementById('match-card-' + id);
+        var fallback = card ? parseInt(card.getAttribute('data-fallback-pct'), 10) || 0 : 0;
+        results[id] = {pct: fallback, isAI: false};
+    });
+
+    // Sequential, not parallel — concurrent local-LLM calls contend for the
+    // same CPU and end up slower overall than running them one at a time.
+    function loadNext(i) {
+        if (i >= jdIds.length) { resortGrid(); return; }
+        var jdId = jdIds[i];
+        var verdictEl = document.getElementById('ai-verdict-' + jdId);
+        var recEl = document.getElementById('ai-recommendation-' + jdId);
+        fetch('/api/compare/' + resumeId + '/' + jdId + '/ai-assessment')
+            .then(function (r) { return r.json().then(function (data) { return {ok: r.ok, data: data}; }); })
+            .then(function (res) {
+                if (!verdictEl) return;
+                if (!res.ok || res.data.error) {
+                    verdictEl.innerHTML = '<span style="color:#9ca3af;">AI holistic score unavailable — showing keyword estimate.</span>';
+                    return;
+                }
+                var d = res.data;
+                results[jdId] = {pct: d.fit_percentage, isAI: true};
+                applyBand(jdId, d.tier_label, d.verdict);
+                var c = tierColors(d.verdict);
+                verdictEl.innerHTML = '🤖 <strong style="color:' + c.main + ';">' + esc(d.verdict || '') + '</strong>';
+                if (recEl) recEl.innerHTML = '<span style="color:' + c.main + ';">' + esc(d.recommendation || '') + '</span>';
+            })
+            .catch(function () {
+                if (verdictEl) verdictEl.innerHTML = '<span style="color:#9ca3af;">AI holistic score unavailable — showing keyword estimate.</span>';
+            })
+            .then(function () { loadNext(i + 1); });
+    }
+    loadNext(0);
+})();
+</script>
+{% endif %}
 
 {% endblock %}

@@ -531,11 +531,12 @@
         });
     }
 
-    function levelColor(color) {
-        var map = {
-            green: '#059669', blue: '#1d4ed8', orange: '#d97706', red: '#dc2626', gray: '#64748b'
-        };
-        return map[color] || '#64748b';
+    function verdictColor(verdict) {
+        var v = (verdict || '').toLowerCase();
+        if (v.indexOf('strong') !== -1) return '#059669';
+        if (v.indexOf('good') !== -1) return '#1d4ed8';
+        if (v.indexOf('partial') !== -1) return '#d97706';
+        return '#dc2626';
     }
 
     function renderCompareResults(res) {
@@ -545,7 +546,7 @@
             '<div class="section-header" style="margin-bottom:14px;">' +
             '<div class="section-icon" style="background:#d1fae5;color:#065f46;">&#10003;</div>' +
             '<h2>Results: ' + escHtml(res.jd_title) + '</h2>' +
-            '<span class="section-note">' + results.length + ' resume(s) compared · sorted by match %</span>' +
+            '<span class="section-note">' + results.length + ' resume(s) compared · ranked by overall fit</span>' +
             '</div></div>';
 
         if (!results.length) {
@@ -553,34 +554,19 @@
         } else {
             html += '<div class="dash-table-wrap"><table class="dash-table" id="cmp-result-table">' +
                 '<thead><tr>' +
-                '<th>#</th><th>Candidate</th><th>Title</th><th>Match</th>' +
-                '<th>Matched</th><th>Missing</th><th>Level</th><th>Experience</th>' +
+                '<th>#</th><th>Candidate</th><th>Title</th><th>Fit</th>' +
+                '<th>Matched</th><th>Missing</th><th>Experience</th>' +
                 '</tr></thead><tbody>';
 
             results.forEach(function (r, i) {
-                var pct = r.match_percentage || 0;
-                var col = levelColor(r.match_level_color);
-                var badgeBg = {
-                    green: '#d1fae5', blue: '#dbeafe', orange: '#fed7aa',
-                    red: '#fee2e2', gray: '#f1f5f9'
-                }[r.match_level_color] || '#f1f5f9';
-                var badgeTx = {
-                    green: '#065f46', blue: '#1e40af', orange: '#92400e',
-                    red: '#991b1b', gray: '#475569'
-                }[r.match_level_color] || '#475569';
+                var col = verdictColor(r.verdict);
 
                 if (r.error) {
                     html += '<tr><td class="dash-td-num">' + (i+1) + '</td>' +
                         '<td><strong>' + escHtml(r.candidate_name || r.file) + '</strong></td>' +
-                        '<td colspan="6" style="color:var(--clr-danger);font-size:0.84rem;">Error: ' + escHtml(r.error) + '</td></tr>';
+                        '<td colspan="5" style="color:var(--clr-danger);font-size:0.84rem;">Error: ' + escHtml(r.error) + '</td></tr>';
                     return;
                 }
-
-                // Match bar cell
-                var barHtml = '<div style="display:flex;align-items:center;gap:8px;">' +
-                    '<div style="flex:1;height:7px;background:var(--border);border-radius:999px;overflow:hidden;">' +
-                    '<div style="height:100%;width:' + pct + '%;background:' + col + ';border-radius:999px;"></div></div>' +
-                    '<span style="font-size:0.85rem;font-weight:800;color:' + col + ';width:38px;text-align:right;">' + pct + '%</span></div>';
 
                 // Matched skills mini-tags
                 var matchedTags = (r.matched_skills || []).slice(0,4).map(function(s) {
@@ -596,11 +582,10 @@
                     '<td><strong style="display:block;">' + escHtml(r.candidate_name) + '</strong>' +
                         (r.email ? '<span style="font-size:0.78rem;color:var(--tx-muted);">' + escHtml(r.email) + '</span>' : '') + '</td>' +
                     '<td style="font-size:0.84rem;color:var(--tx-2);">' + escHtml(r.title || '—') + '</td>' +
-                    '<td style="min-width:160px;">' + barHtml + '</td>' +
+                    '<td style="min-width:180px;"><span class="cmr-level-badge" style="font-size:0.75rem;padding:4px 10px;background:' + col + '1a;color:' + col + ';">' + escHtml(r.tier_label || r.verdict) + '</span>' +
+                        '<div style="font-size:0.72rem;font-weight:700;color:' + col + ';margin-top:4px;">' + escHtml(r.recommendation || '') + '</div></td>' +
                     '<td><div class="cmr-tag-wrap" style="gap:4px;">' + (matchedTags || '<span class="muted">—</span>') + '</div></td>' +
                     '<td><div class="cmr-tag-wrap" style="gap:4px;">' + (missingTags || '<span style="color:var(--clr-success);font-size:0.8rem;font-weight:600;">✓ All matched</span>') + '</div></td>' +
-                    '<td><span class="cmr-level-badge cmr-level-' + (r.match_level_color || 'gray') + '" ' +
-                        'style="font-size:0.75rem;padding:4px 10px;">' + escHtml(r.match_level) + '</span></td>' +
                     '<td style="font-size:0.8rem;color:var(--tx-muted);max-width:180px;">' + escHtml(r.experience_note || '—') + '</td>' +
                     '</tr>';
             });
