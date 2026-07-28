@@ -230,20 +230,10 @@
     var statusCtx = document.getElementById('statusDonutChart');
     if (statusCtx && window.Chart) {
         var istData = {{ interview_status_counts | tojson }};
-        // Fixed categorical order (8 hues max — see dataviz palette). The
-        // three rarest/least-actionable statuses fold into "Other" rather
-        // than generating a 9th hue; their breakdown still shows in the
-        // "Other" tooltip so no information is lost, just de-duplicated color.
-        var istColors = {
-            'To Be Interviewed':          '#2a78d6',
-            'Profile Shared With Client': '#1baf7a',
-            'Selected by Client':         '#eda100',
-            'Client Offer Released':      '#008300',
-            'Joined Vaisesika':           '#4a3aa7',
-            'Rejected By Client':         '#e34948',
-            'Not Shortlisted':            '#e87ba4',
-            'Position Closed':            '#eb6834'
-        };
+        // Colours come from the shared server-side map so this donut and the
+        // "Interview Status" bar list below never disagree on a status's colour.
+        // Any status not in the map (should be none) folds into "Other".
+        var istColors = {{ interview_status_colors | tojson }};
         var OTHER_COLOR = '#898781';
         var rawLabels = Object.keys(istData);
         var otherBreakdown = [];
@@ -557,26 +547,66 @@
                 return '<select class="ist-select" data-id="' + id + '" onchange="setInterviewStatus(this)" title="Set interview status">' + opts + '</select>';
             }
 
+            // Floating toast — tells the user whether a background save actually
+            // persisted, instead of silently swallowing failures.
+            function dashToast(msg, ok) {
+                var el = document.getElementById('dashToast');
+                if (!el) {
+                    el = document.createElement('div');
+                    el.id = 'dashToast';
+                    el.style.cssText = 'position:fixed;bottom:22px;left:50%;transform:translateX(-50%);z-index:9999;';
+                    document.body.appendChild(el);
+                }
+                el.innerHTML = '<span class="toast-msg ' + (ok ? 'ok' : 'fail') + '" role="status" aria-live="polite">'
+                    + (ok ? '✓ ' : '⚠ ') + _esc(msg) + '</span>';
+                clearTimeout(el._t);
+                el._t = setTimeout(function () { el.innerHTML = ''; }, 2600);
+            }
+
             window.setInterviewStatus = function (sel) {
                 var id = sel.dataset.id;
                 var status = sel.value;
+                sel.disabled = true;
                 fetch('/candidate-interview-status', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({id: parseInt(id), status: status})
-                }).catch(function () {});
+                }).then(function (r) { return r.json().then(function (d) { return {ok: r.ok, d: d}; }); })
+                  .then(function (res) {
+                      sel.disabled = false;
+                      if (res.ok && res.d && res.d.ok) dashToast('Interview status saved', true);
+                      else dashToast('Could not save status', false);
+                  })
+                  .catch(function () { sel.disabled = false; dashToast('Could not save status — check your connection', false); });
             };
 
             // ── Quick Search ──────────────────────────────────────────────
             window.qsFilter = function () {
                 var q = (document.getElementById('qsInput').value || '').toLowerCase();
+                var visible = 0;
                 document.querySelectorAll('#candTbody .cand-row').forEach(function (row) {
                     var tds = row.querySelectorAll('td');
                     var text = [tds[1], tds[3], tds[4]].map(function (td) {
                         return td ? td.textContent.toLowerCase() : '';
                     }).join(' ');
-                    row.style.display = (!q || text.includes(q)) ? '' : 'none';
+                    var show = (!q || text.includes(q));
+                    row.style.display = show ? '' : 'none';
+                    if (show) visible++;
                 });
+                // Show a "no results" row when the filter hides everything.
+                var tbody = document.getElementById('candTbody');
+                var noRow = document.getElementById('candNoResults');
+                if (q && visible === 0) {
+                    if (!noRow) {
+                        noRow = document.createElement('tr');
+                        noRow.id = 'candNoResults';
+                        noRow.innerHTML = '<td colspan="8" style="text-align:center;padding:24px;color:var(--tx-muted);">No candidates match your search.</td>';
+                        tbody.appendChild(noRow);
+                    }
+                    noRow.style.display = '';
+                } else if (noRow) {
+                    noRow.style.display = 'none';
+                }
             };
 
             // ── Status cycling ────────────────────────────────────────────
@@ -598,17 +628,27 @@
                 });
             };
 
+            // Column types so numeric/date columns don't sort as text
+            // (e.g. "10+" before "3", or dates compared lexically). Col 2 = Exp
+            // (numeric), col 5 = Added (date); the rest are plain text.
+            var _colType = {2: 'num', 5: 'date'};
+            function _cellValue(td, type) {
+                var txt = td ? td.textContent.trim() : '';
+                if (type === 'num') { var n = parseFloat(txt.replace(/[^0-9.\-]/g, '')); return isNaN(n) ? -Infinity : n; }
+                if (type === 'date') { var t = Date.parse(txt); return isNaN(t) ? -Infinity : t; }
+                return txt.toLowerCase();
+            }
             var _sortCol = -1, _sortAsc = true;
             window.candSort = function (col) {
                 var tbody = document.getElementById('candTbody');
                 var rows  = Array.from(tbody.querySelectorAll('.cand-row'));
+                var type  = _colType[col] || 'text';
                 if (_sortCol === col) _sortAsc = !_sortAsc; else { _sortCol = col; _sortAsc = true; }
                 rows.sort(function (a, b) {
-                    var tda = a.querySelectorAll('td')[col];
-                    var tdb = b.querySelectorAll('td')[col];
-                    var va  = tda ? tda.textContent.trim().toLowerCase() : '';
-                    var vb  = tdb ? tdb.textContent.trim().toLowerCase() : '';
-                    return _sortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
+                    var va = _cellValue(a.querySelectorAll('td')[col], type);
+                    var vb = _cellValue(b.querySelectorAll('td')[col], type);
+                    var cmp = (type === 'text') ? String(va).localeCompare(String(vb)) : (va < vb ? -1 : va > vb ? 1 : 0);
+                    return _sortAsc ? cmp : -cmp;
                 });
                 rows.forEach(function (r) { tbody.appendChild(r); });
                 document.querySelectorAll('.cand-sortable .sort-ic').forEach(function (ic, i) {
@@ -659,23 +699,11 @@
             {% set _ist_data = interview_status_counts %}
             {% if _ist_data %}
                 <div class="ist-chart-wrap" id="istChartWrap">
-                    {% set _ist_colors = {
-                        'To Be Interviewed':               '#6366f1',
-                        'Profile Shared With Client':      '#0284c7',
-                        'Can be considered for Future Roles': '#8b5cf6',
-                        'Client Offer Released':           '#059669',
-                        'Joined Vaisesika':                '#10b981',
-                        'Not Available Currently':         '#64748b',
-                        'Not Shortlisted':                 '#f59e0b',
-                        'Position Closed':                 '#dc2626',
-                        'Rejected By Client':              '#ef4444',
-                        'Rejected Internally':             '#991b1b',
-                        'Selected by Client':              '#16a34a'
-                    } %}
+                    {% set _ist_colors = interview_status_colors %}
                     {% set _total = _ist_data.values() | sum %}
                     {% for label, cnt in _ist_data.items() | sort(attribute=1, reverse=True) %}
                     {% set _pct = ((cnt / _total) * 100) | round(1) %}
-                    {% set _col = _ist_colors.get(label, '#6366f1') %}
+                    {% set _col = _ist_colors.get(label, interview_status_fallback_color) %}
                     <div class="ist-bar-row">
                         <div class="ist-bar-label" title="{{ label }}">{{ label }}</div>
                         <div class="ist-bar-track">
@@ -705,10 +733,13 @@
 
 <script>
 (function () {
+    var _reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     // ── 1. Count-up animation on stat cards ───────────────────────────────
     document.querySelectorAll('.dash-card-value').forEach(function (el) {
         var target = parseInt(el.textContent) || 0;
         if (!target) return;
+        // Respect the OS "reduce motion" setting — show the final value at once.
+        if (_reduceMotion) { el.textContent = target; return; }
         var duration = 900, startTime = null;
         el.textContent = '0';
         function step(ts) {

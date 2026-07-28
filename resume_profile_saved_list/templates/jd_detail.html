@@ -39,7 +39,7 @@
                 <div class="section-icon icon-experience">&#128203;</div>
                 <h2>Responsibilities</h2>
             </div>
-            <div class="jd-content-text">{{ jd.responsibilities | replace('\n', '<br>') | safe }}</div>
+            <div class="jd-content-text">{{ jd.responsibilities | nl2br }}</div>
         </div>
         {% endif %}
 
@@ -49,7 +49,7 @@
                 <div class="section-icon icon-education">&#127891;</div>
                 <h2>Requirements / Qualifications</h2>
             </div>
-            <div class="jd-content-text">{{ jd.requirements | replace('\n', '<br>') | safe }}</div>
+            <div class="jd-content-text">{{ jd.requirements | nl2br }}</div>
         </div>
         {% endif %}
 

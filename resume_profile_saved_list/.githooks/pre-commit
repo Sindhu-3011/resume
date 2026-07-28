@@ -1,0 +1,40 @@
+#!/bin/sh
+# Parser regression guard — blocks a commit that would break resume parsing.
+#
+# Runs scripts/check_parser.py (undefined-name static check + parsing smoke test)
+# whenever the parsing pipeline is touched. This is what stops "new functionality
+# silently breaks existing parsing" from happening again.
+#
+# NOTE ON LAYOUT: the git repository root is the PARENT of the app folder; the app
+# lives in the subdirectory below. Paths here account for that.
+PROJ_SUBDIR="resume_profile_saved_list"
+#
+# Activate once per clone:  git config core.hooksPath resume_profile_saved_list/.githooks
+# Bypass in an emergency:   git commit --no-verify   (avoid — it defeats the guard)
+
+ROOT="$(git rev-parse --show-toplevel)"
+PROJ="$ROOT/$PROJ_SUBDIR"
+
+# Only run when parser-related files are staged, so unrelated commits stay fast.
+# Staged paths are repo-root-relative (e.g. resume_profile_saved_list/app.py).
+if ! git diff --cached --name-only | grep -Eq "(^|/)$PROJ_SUBDIR/(app\.py|scripts/check_parser\.py)$"; then
+    exit 0
+fi
+
+# Prefer a project/venv interpreter; fall back to whatever python is on PATH.
+if   [ -x "$PROJ/.venv/Scripts/python.exe" ]; then PY="$PROJ/.venv/Scripts/python.exe"
+elif [ -x "$ROOT/.venv/Scripts/python.exe" ]; then PY="$ROOT/.venv/Scripts/python.exe"
+elif [ -x "$PROJ/.venv/bin/python" ];         then PY="$PROJ/.venv/bin/python"
+elif [ -x "$ROOT/.venv/bin/python" ];         then PY="$ROOT/.venv/bin/python"
+else PY="python"
+fi
+
+echo "pre-commit: running resume-parser regression guard..."
+"$PY" "$PROJ/scripts/check_parser.py"
+status=$?
+if [ "$status" -ne 0 ]; then
+    echo ""
+    echo "pre-commit: parser guard FAILED — commit blocked."
+    echo "Fix the issues above, or (not recommended) bypass with: git commit --no-verify"
+fi
+exit $status

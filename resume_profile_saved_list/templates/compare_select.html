@@ -19,7 +19,17 @@
            style="width:100%; padding:10px 14px; border:1px solid #d1dbe8; border-radius:8px; font-size:1rem;">
 </div>
 
-{% set categories = ['Validation Roles', 'IT Roles'] %}
+{# Derive the category groups from the JDs actually present, so every category
+   (IT Technology, Regulatory Affairs, General, …) appears — not just a hardcoded
+   two. Preferred categories lead; any others follow in the order first seen. #}
+{% set categories = [] %}
+{% set _all_cats = jds | map(attribute='category') | list %}
+{% for c in ['Validation Roles', 'IT Technology'] %}
+    {% if c in _all_cats and c not in categories %}{% set _ = categories.append(c) %}{% endif %}
+{% endfor %}
+{% for c in _all_cats %}
+    {% if c and c not in categories %}{% set _ = categories.append(c) %}{% endif %}
+{% endfor %}
 {% for cat in categories %}
     {% set cat_jds = jds | selectattr('category', 'equalto', cat) | list %}
     {% if cat_jds %}

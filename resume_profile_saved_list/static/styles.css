@@ -1507,3 +1507,118 @@ body.login-page {
     .training-chat-bubble { max-width: 88%; }
     .training-chat-input { flex-direction: column; align-items: stretch; }
 }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Shared result primitives  ·  verdict colours, loading, empty states
+   Single source of truth for Strong/Good/Partial/Low fit colours — consumed
+   by the match-result, profile, and JD top-matches pages (see verdict.js).
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* Each verdict tier sets four custom props; consumers read them so a colour
+   only ever needs to change in one place. Default = "Good" (neutral indigo). */
+.verdict         { --v-main:#6366f1; --v-dark:#4f46e5; --v-bg:#eef2ff; --v-text:#3730a3; }
+.verdict-strong  { --v-main:#10b981; --v-dark:#059669; --v-bg:#f0fdf4; --v-text:#15803d; }
+.verdict-good    { --v-main:#6366f1; --v-dark:#4f46e5; --v-bg:#eef2ff; --v-text:#1d4ed8; }
+.verdict-partial { --v-main:#f59e0b; --v-dark:#d97706; --v-bg:#fffbeb; --v-text:#b45309; }
+.verdict-low     { --v-main:#ef4444; --v-dark:#dc2626; --v-bg:#fef2f2; --v-text:#dc2626; }
+
+.verdict-text  { color: var(--v-text); }
+.verdict-badge {
+    display: inline-block; padding: 5px 16px; border-radius: 999px;
+    font-size: 0.96rem; font-weight: 700;
+    background: color-mix(in srgb, var(--v-main) 12%, #fff); color: var(--v-text);
+}
+.verdict-band { background: linear-gradient(90deg, var(--v-main), var(--v-dark)); }
+
+/* Loading indicator — one spinner treatment app-wide, announced to AT. */
+@keyframes spin { to { transform: rotate(360deg); } }
+.is-loading { display: inline-flex; align-items: center; gap: 10px; color: var(--tx-muted); font-size: 0.9rem; }
+.spinner-dot {
+    width: 16px; height: 16px; flex: none;
+    border: 2px solid var(--border); border-top-color: var(--clr-accent);
+    border-radius: 50%; display: inline-block; animation: spin 0.8s linear infinite;
+}
+.spinner-dot.sm { width: 11px; height: 11px; }
+
+/* Empty state — one card treatment for "nothing here yet". */
+.empty-state { text-align: center; padding: 30px 20px; color: var(--tx-muted); font-size: 0.95rem; }
+.empty-state-icon { font-size: 1.9rem; display: block; margin-bottom: 8px; opacity: 0.7; }
+.empty-state .button { margin-top: 14px; }
+
+/* AI holistic assessment result — replaces the inline-styled block that used
+   to be string-built in compare_result.html. Colours come from the .verdict-*
+   class on an ancestor. */
+.ai-result-verdict { font-weight: 800; font-size: 1.05rem; color: var(--v-text); margin-bottom: 4px; }
+.ai-result-rec     { font-weight: 700; font-size: 0.9rem; color: var(--v-text); margin-bottom: 10px; }
+.ai-metrics {
+    display: flex; flex-wrap: wrap; gap: 16px;
+    margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--border);
+}
+.ai-metric { display: flex; flex-direction: column; gap: 1px; min-width: 84px; }
+.ai-metric-val   { font-size: 1.1rem; font-weight: 800; color: var(--tx); }
+.ai-metric-label { font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--tx-light); }
+.ai-metric-hint  { font-size: 0.72rem; color: var(--tx-muted); line-height: 1.4; max-width: 190px; }
+.ai-result-rationale { font-size: 0.87rem; line-height: 1.6; color: var(--tx-2); }
+.ai-result-heading {
+    font-size: 0.78rem; font-weight: 700; text-transform: uppercase;
+    letter-spacing: .04em; margin: 14px 0 6px;
+}
+.ai-result-heading.good  { color: var(--clr-success); }
+.ai-result-heading.warn  { color: var(--clr-warning); }
+.ai-result-heading.info  { color: var(--clr-primary); }
+.ai-result-list { margin: 0 0 10px 18px; padding: 0; font-size: 0.85rem; line-height: 1.6; color: var(--tx-2); }
+.ai-note { font-size: 0.82rem; color: var(--tx-muted); }
+.ai-note.warn { color: var(--clr-warning); }
+.role-pill-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.role-pill { background: var(--clr-primary-light); color: #3730a3; border-radius: 999px; padding: 4px 10px; font-size: 0.78rem; font-weight: 600; }
+
+/* Match-result category badge — one class per real category value. */
+.jdm-cat-general { background: #f1f5f9; color: #475569; }
+
+/* Profile "Top matching roles" cards — colours driven by the .verdict-* class,
+   so the tier colour lives only in styles.css (was inline-styled + a JS colour
+   map). Defaults to the "good" indigo until the AI verdict resolves. */
+.match-card {
+    background: var(--v-bg, #eef2ff); border-radius: 14px; overflow: hidden;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.07);
+    transition: transform .2s, box-shadow .2s, background .4s;
+}
+.match-card:hover { transform: translateY(-3px); box-shadow: 0 10px 24px rgba(0,0,0,0.13); }
+.match-card-band {
+    background: linear-gradient(90deg, var(--v-main, #6366f1), var(--v-dark, #4f46e5));
+    padding: 14px 18px; display: flex; align-items: center; justify-content: space-between;
+    transition: background .4s;
+}
+.match-card-rank {
+    width: 28px; height: 28px; border-radius: 8px; background: rgba(255,255,255,0.25);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.95rem; font-weight: 900; color: #fff;
+}
+.match-card-band-label { font-size: 0.72rem; font-weight: 800; color: rgba(255,255,255,0.9); text-transform: uppercase; letter-spacing: .07em; }
+.match-card-body { padding: 16px 18px; }
+.match-card-title { margin: 0 0 8px 0; font-size: 1rem; font-weight: 800; color: #1e293b; line-height: 1.4; }
+.match-card-title a { color: inherit; text-decoration: none; }
+.match-card-verdict { margin-bottom: 6px; font-size: 0.8rem; color: var(--v-text, #6d28d9); line-height: 1.5; min-height: 1.2em; }
+.match-card-rec { margin-bottom: 14px; font-size: 0.82rem; font-weight: 700; min-height: 1.2em; color: var(--v-text); }
+.match-card-cta {
+    display: block; width: 100%; margin-top: 14px; padding: 10px;
+    background: linear-gradient(90deg, var(--v-main, #6366f1), var(--v-dark, #4f46e5));
+    color: #fff; text-align: center; text-decoration: none; border-radius: 8px;
+    font-weight: 700; font-size: 0.85rem; box-sizing: border-box; letter-spacing: .02em;
+}
+@keyframes aiminispin { to { transform: rotate(360deg); } }
+
+/* Toast — reused by dashboard status saves; mirrors the profile "saved" pill. */
+.toast-msg {
+    display: inline-block; font-size: 0.85rem; font-weight: 600;
+    padding: 5px 12px; border-radius: 20px;
+}
+.toast-msg.ok   { color: var(--clr-success); background: var(--clr-success-l); }
+.toast-msg.fail { color: var(--clr-danger);  background: var(--clr-danger-l); }
+
+/* Respect the OS "reduce motion" setting on the surfaces that animate. */
+@media (prefers-reduced-motion: reduce) {
+    .spinner-dot, .spinner, .ai-mini-spinner { animation: none !important; }
+    .stat-card, .role-bar-fill, [class*="count-up"] { transition: none !important; }
+    html { scroll-behavior: auto; }
+}

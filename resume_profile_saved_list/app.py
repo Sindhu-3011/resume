@@ -78,6 +78,41 @@ def set_cache_control(response):
     response.headers['Expires'] = '0'
     return response
 
+
+from markupsafe import Markup, escape as _escape
+
+
+@app.template_filter("verdict_tier")
+def verdict_tier(value):
+    """Map a verdict/tier string to its tier slug (strong|good|partial|low).
+
+    Server-side mirror of static/verdict.js so the fit-tier COLOURS live only in
+    styles.css (.verdict-* classes) instead of being hardcoded as hex values in
+    each template. Keeps jd_top_matches.html in sync with the JS-driven pages.
+    """
+    v = str(value or "").lower()
+    if "strong" in v:
+        return "strong"
+    if "good" in v:
+        return "good"
+    if "partial" in v:
+        return "partial"
+    return "low"
+
+
+@app.template_filter("nl2br")
+def nl2br(value):
+    """Escape untrusted text first, THEN turn newlines into <br>.
+
+    Resume/JD section text is auto-parsed from uploaded PDFs/DOCX and is
+    therefore untrusted — the previous `| replace('\\n','<br>') | safe`
+    rendered that content as raw HTML. This escapes the text (so any markup in
+    the document shows as literal characters) before inserting the line breaks.
+    """
+    if value is None:
+        return ""
+    return Markup("<br>".join(_escape(line) for line in str(value).split("\n")))
+
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_FOLDER = BASE_DIR / "uploads"
 
@@ -255,6 +290,9 @@ SECTION_ALIASES = {
         "courses and certifications",
         "professional courses",
         "online courses",
+        "certificates courses", "certificate courses",
+        "certificates and courses", "courses and certificates",
+        "certifications courses", "courses certifications",
         "certification and training",
         "certifications and training",
         "certifications and professional development",
@@ -315,6 +353,9 @@ SECTION_ALIASES = {
         "technical projects", "professional projects",
         "freelance projects", "contract projects",
         "client projects", "project portfolio",
+        # "Projects Completed" style headings (incl. the common "compelted" typo)
+        "projects completed", "project completed", "completed projects",
+        "projects compelted", "projects compeleted", "projects done",
     ],
 
     # ── Achievements / accomplishments ────────────────────────────────────────
@@ -1927,8 +1968,15 @@ def find_sections(lines):
                     bucket.append(line)
                     continue
             if section == current:
-                # "Summary" appearing mid-summary (e.g. wrapped "Validation Summary Report.")
-                # — ignore it so the current section doesn't restart and lose its content.
+                # A bare repeat of the heading word itself (e.g. "Summary" wrapped mid-
+                # summary from "Validation Summary Report.") is ignored so the section
+                # doesn't restart and lose its content. But when the matched heading
+                # words are just the LEAD-IN of an ordinary sentence — e.g. "Professional
+                # experience in Power BI, Power Apps & Power Automate" matches the
+                # "Professional Experience" heading alias — the real content living in
+                # inline_remainder must still be kept, not silently dropped.
+                if inline_remainder:
+                    bucket.append(inline_remainder)
                 continue
             if current and bucket:
                 sections[current] = "\n".join(bucket).strip()
@@ -2454,6 +2502,417 @@ def _extract_name_from_pdf_fonts(path):
     return scored[0][2][:80]
 
 
+_SIDEBAR_CONTACT_HEAD = re.compile(
+    r'^(contact|contact details|contact information|phone|mobile|tel|telephone|'
+    r'e-?mail|email|linked ?in|www|website|web|address|fax|bold profile|'
+    r'social link|social)\s*:?\s*$', re.I)
+_SIDEBAR_SKILLS_HEAD = re.compile(r'^(skills?|key skills|technical skills|core skills)\s*:?\s*$', re.I)
+_SIDEBAR_OTHER_HEAD = re.compile(r'^(languages?|interests|hobbies|references)\s*:?\s*$', re.I)
+_SIDEBAR_EMAIL = re.compile(r'^[\w.+\-]+@[\w.\-]+\.\w{2,}$')
+_SIDEBAR_PHONE = re.compile(r'^[\+\(]?\d[\d\s\-\(\)]{6,}$')
+_SIDEBAR_URL = re.compile(r'^(https?://|www\.)', re.I)
+_SIDEBAR_BULLET = ('•', '●', '▪', '◦', '‣', '·')
+
+
+def _extract_sidebar_bleed_from_experience(exp_text):
+    """Split a 2-column contact/skills SIDEBAR block out of Work-Experience text.
+
+    On sidebar-style PDFs the right/left sidebar (Contact + Skills) is read
+    interleaved into the middle of the experience column, e.g.:
+        • Writing test cases with use of TestNG and
+        Contact
+        Phone
+        +91-...
+        E-mail  ...  LinkedIn  ...  WWW  ...
+        Skills
+        Selenium WebDriver
+        JAVA  ...
+        • Automating all the manual test cases to ...
+    The block always STARTS at a contact heading (Contact/Phone/Email/LinkedIn/
+    WWW) — which never legitimately appears inside a job's bullet list — and runs
+    until the real experience resumes (a bullet, a date/job line, a 'Project:'
+    line, or a full prose sentence). We remove that run from experience and return
+    any Skills items found inside it, so the caller can restore them to Skills.
+
+    Returns (cleaned_experience, [skill_items]).
+    """
+    lines = exp_text.split('\n') if exp_text else []
+    n = len(lines)
+    if not any(_SIDEBAR_CONTACT_HEAD.match(l.strip()) for l in lines):
+        return exp_text, []
+
+    def _resumes_work(s):
+        return (s.startswith(_SIDEBAR_BULLET)
+                or bool(re.match(r'^\d{4}[\-/]', s))          # date range "2016-11"
+                or 'project:' in s.lower()
+                or (len(s) > 45 and ' ' in s and not _SIDEBAR_URL.match(s)))  # prose
+
+    out, skills, i = [], [], 0
+    while i < n:
+        s = lines[i].strip()
+        if _SIDEBAR_CONTACT_HEAD.match(s):
+            in_skills = False
+            j = i + 1
+            while j < n:
+                sj = lines[j].strip()
+                is_head = (_SIDEBAR_CONTACT_HEAD.match(sj) or _SIDEBAR_SKILLS_HEAD.match(sj)
+                           or _SIDEBAR_OTHER_HEAD.match(sj))
+                if sj and _resumes_work(sj) and not is_head:
+                    break
+                if _SIDEBAR_SKILLS_HEAD.match(sj):
+                    in_skills = True
+                elif _SIDEBAR_OTHER_HEAD.match(sj) or _SIDEBAR_CONTACT_HEAD.match(sj):
+                    in_skills = False
+                elif (in_skills and sj and not _SIDEBAR_URL.match(sj)
+                      and not _SIDEBAR_EMAIL.match(sj) and not _SIDEBAR_PHONE.match(sj)):
+                    skills.append(sj)
+                j += 1
+            i = j  # drop the whole run [i, j)
+            continue
+        out.append(lines[i])
+        i += 1
+    return '\n'.join(out).strip(), skills
+
+
+def _merge_recovered_skills(skills_text, recovered):
+    """Prepend sidebar-recovered skill items to the skills field, de-duplicated
+    case-insensitively (ignoring punctuation), preserving existing entries."""
+    if not recovered:
+        return skills_text
+    existing = [l for l in (skills_text or "").split('\n') if l.strip()]
+    seen = {re.sub(r'[^a-z0-9]', '', l.lower()) for l in existing}
+    merged = []
+    for item in recovered:
+        key = re.sub(r'[^a-z0-9]', '', item.lower())
+        if key and key not in seen:
+            seen.add(key)
+            merged.append(item)
+    return "\n".join(merged + existing).strip()
+
+
+_SKILL_SIDEBAR_BULLET_CHARS = ("-", "•", "*", "▪", "●", "○", "◦", "‣", "»", "›", "·", "", "")
+
+
+def _looks_like_skill_sidebar_header(line):
+    """True for a short Title-Case line that reads like a skill category header
+    ("Microsoft Office Suite", "Data Management") rather than a job/company line."""
+    line = line.strip()
+    if not line or line.startswith(_SKILL_SIDEBAR_BULLET_CHARS):
+        return False
+    # Real job/company lines are the main false-positive risk here — they're
+    # often ALL CAPS and/or use a comma or pipe to separate title/company/
+    # location (e.g. "SENIOR EXECUTIVE, STELIS BIOPHARMA, DODDABALLAPURA",
+    # "Business Analyst | Salesforce Business Analyst"). Genuine skill
+    # category headers never look like that, so reject both patterns outright.
+    if "," in line or "|" in line:
+        return False
+    letters_only = re.sub(r"[^A-Za-z]", "", line)
+    if letters_only and letters_only.isupper():
+        return False
+    if re.search(r"\d", line):
+        return False
+    if len(line) > 60:
+        return False
+    words = line.split()
+    if not (1 <= len(words) <= 6):
+        return False
+    _minor = {"and", "or", "of", "for", "the", "in", "&", "to"}
+    for w in words:
+        if w.lower() in _minor:
+            continue
+        if not w[0].isupper():
+            return False
+    return words[0][0].isupper()
+
+
+def _is_skill_sidebar_bullet_or_date_line(line):
+    line = line.strip()
+    if not line:
+        return False
+    if line.startswith(_SKILL_SIDEBAR_BULLET_CHARS):
+        return True
+    return bool(re.search(r"\b(19|20)\d{2}\b", line))
+
+
+def _rescue_skill_sidebar_from_experience(experience_text):
+    """Sidebar resumes sometimes repeat their Skills column on later pages
+    WITHOUT repeating the "SKILLS" heading, so that continuation has no marker
+    distinguishing it from whatever section is active at that point in the
+    text — usually Experience. Detect a run of 3+ consecutive "Short
+    Title-Case Header" + "description" pairs (no bullets, no dates in
+    between) inside Experience and pull it out.
+
+    Returns (cleaned_experience, rescued_skills_text). rescued_skills_text is
+    "" when nothing looked like a skills sidebar (the common case).
+    """
+    exp_lines = (experience_text or "").splitlines()
+    n_lines = len(exp_lines)
+    skill_blocks = []
+    si = 0
+    while si < n_lines:
+        if _looks_like_skill_sidebar_header(exp_lines[si]):
+            start = si
+            pair_count = 0
+            sj = si
+            while sj < n_lines and _looks_like_skill_sidebar_header(exp_lines[sj]):
+                sj += 1
+                desc_lines = 0
+                while (sj < n_lines and exp_lines[sj].strip()
+                       and not _looks_like_skill_sidebar_header(exp_lines[sj])
+                       and not _is_skill_sidebar_bullet_or_date_line(exp_lines[sj])):
+                    desc_lines += 1
+                    ends_with_comma = exp_lines[sj].rstrip().endswith(",")
+                    sj += 1
+                    # Only keep consuming lines while the previous one trails off
+                    # with a comma (a genuine mid-sentence line wrap, e.g.
+                    # "...CARR,\nFEA, QC Charts..."). Without that signal, stop
+                    # after one line — otherwise an unrelated stray fragment right
+                    # after a complete sentence (e.g. a duplicated/truncated
+                    # leftover line from the source document) gets swallowed into
+                    # this entry's description.
+                    if not ends_with_comma:
+                        break
+                if desc_lines == 0:
+                    break
+                pair_count += 1
+                if sj < n_lines and _is_skill_sidebar_bullet_or_date_line(exp_lines[sj]):
+                    break
+            end = sj
+            if pair_count >= 3:
+                skill_blocks.append((start, end))
+            si = end if end > si else si + 1
+        else:
+            si += 1
+
+    if not skill_blocks:
+        return experience_text, ""
+
+    covered = set()
+    for bs, be in skill_blocks:
+        covered.update(range(bs, be))
+    rescued = [l for i, l in enumerate(exp_lines) if i in covered]
+    kept = [l for i, l in enumerate(exp_lines) if i not in covered]
+    rescued_text = "\n".join(rescued).strip()
+    if not rescued_text:
+        return experience_text, ""
+    return "\n".join(kept).strip(), rescued_text
+
+
+_HEADING_TAIL_WORDS = frozenset({
+    "me", "completed", "compelted", "compeleted", "courses", "course",
+    "details", "detail", "summary", "information", "info", "profile",
+    "done", "worked", "history", "background", "expertise",
+})
+
+
+def _strip_heading_tail_prefix(text):
+    """Remove a leading orphan word that is the wrapped tail of a section heading.
+
+    Two-word headings sometimes wrap so the first word matches as the heading and
+    the second word lands as the section's first content line, e.g.
+    "ABOUT ME" → summary starting with "ME", or "PROJECTS COMPELTED" → projects
+    starting with "COMPELTED". This drops such a leading single-word remnant.
+    """
+    lines = text.split('\n') if text else []
+    while lines:
+        first = lines[0].strip()
+        key = re.sub(r'[^a-z]', '', first.lower())
+        if first and ' ' not in first and key in _HEADING_TAIL_WORDS:
+            lines.pop(0)
+        else:
+            break
+    return '\n'.join(lines).strip()
+
+
+def _pymupdf_summary_block(path):
+    """Recover a full-width summary/objective paragraph via pymupdf block layout.
+
+    On 2-column PDFs, a justified full-width "About Me"/"Profile Summary" paragraph
+    gets its lines split into left+right halves by the linear text extractor, so
+    the summary field captures only the first halves and reads truncated. pymupdf's
+    block extraction keeps the paragraph intact as ONE block, so we find the summary
+    heading block and return the following paragraph block. Returns "" if no summary
+    heading block is found or on any error — caller only uses it when it is longer
+    than the summary it already has.
+    """
+    try:
+        import pymupdf as fitz
+    except Exception:
+        return ""
+    head = re.compile(
+        r'^(about(\s+me)?|profile\s+summary|professional\s+summary|career\s+summary|'
+        r'summary|objective|career\s+objective|professional\s+objective|profile|'
+        r'professional\s+profile|career\s+profile|personal\s+profile)\s*:?\s*$', re.I)
+    best = ""
+    try:
+        doc = fitz.open(str(path))
+        for page in doc:
+            blocks = [b for b in page.get_text("blocks") if b[6] == 0 and b[4].strip()]
+            blocks.sort(key=lambda b: (round(b[1]), b[0]))
+            for idx, b in enumerate(blocks):
+                blines = [l.strip() for l in b[4].splitlines() if l.strip()]
+                if not blines or not head.match(blines[0]):
+                    continue
+                rest = "\n".join(blines[1:]).strip()
+                cand = rest if len(rest) > 40 else (
+                    blocks[idx + 1][4].strip() if idx + 1 < len(blocks) else "")
+                if len(cand) > len(best):
+                    best = cand
+        doc.close()
+    except Exception as exc:
+        logger.debug(f"_pymupdf_summary_block failed: {exc}")
+        return ""
+    return best
+
+
+def _stitch_wrapped_urls(text):
+    """Rejoin URLs broken across lines by narrow sidebar wrapping.
+
+    A 2-column contact sidebar wraps a long URL mid-path, e.g.
+        https://www.linkedin.com/i
+        n/prasanth-vb-0017b016a
+    Native extraction keeps those as two lines, so URL matching grabs a garbled
+    value. This concatenates a continuation line onto the preceding URL line when
+    the continuation starts lowercase/digit/'/' and is pure URL-path characters —
+    which excludes ALL-CAPS sidebar headings ("WWW") and spaced text, so only a
+    genuine wrapped-URL tail is joined. Intended for building a scratch string
+    used ONLY for URL extraction, never the main resume text.
+    """
+    cont = re.compile(r'^[a-z0-9/][a-z0-9\-_%/.?=&#]*$')
+    url_end = re.compile(r'(?:https?://|www\.|linkedin\.com|github\.com)\S*$', re.I)
+    out = []
+    for ln in text.split('\n'):
+        s = ln.strip()
+        if out and s and cont.match(s) and url_end.search(out[-1].strip()):
+            out[-1] = out[-1].rstrip() + s
+        else:
+            out.append(ln)
+    return '\n'.join(out)
+
+
+# Section headings that sometimes bleed into the Skills column on 2-column PDFs —
+# everything from such a line onward is the NEXT section, not skills.
+_SKILLS_BLEED_HEADINGS = frozenset({
+    "languages", "language", "language known", "languages known",
+    "interests", "hobbies", "hobbies and interests", "declaration",
+    "personal details", "other personal details", "personal information",
+    "references", "extra curricular", "extracurricular",
+})
+
+
+def _truncate_skills_at_bleed(lines):
+    """Cut the skills list at the first line that is actually the heading of a
+    following section (e.g. a 'Languages' sidebar block read straight after the
+    skills). Removes 'extra information apart from skills' without touching real
+    skill entries above the boundary."""
+    out = []
+    for l in lines:
+        key = re.sub(r'[^a-z ]', ' ', l.strip().lower())
+        key = re.sub(r'\s+', ' ', key).strip()
+        if key in _SKILLS_BLEED_HEADINGS:
+            break
+        out.append(l)
+    return out
+
+
+_SKILL_FILLER_LEAD = re.compile(
+    r'^\s*(?:proficient(?:\s+in)?|skilled(?:\s+in)?|experienced(?:\s+(?:in|with))?|'
+    r'expertise(?:\s+in)?|professional\s+experience(?:\s+in)?|knowledgeable(?:\s+in)?|'
+    r'hands[-\s]on\s+experience(?:\s+(?:in|with))?|good\s+knowledge\s+of|'
+    r'strong\s+knowledge\s+of|working\s+knowledge\s+of|familiar\s+with|exposure\s+to|'
+    r'advanced|provided|qualified)\b[\s:]*', re.I)
+
+_SKILL_JUNK_TOKENS = frozenset({
+    "editing", "review", "preparation", "document preparation", "management",
+    "experience", "knowledge", "user interface", "high-performing teams",
+    "compliance", "efficiency", "medical devices",
+})
+
+
+def _looks_like_prose_skills(skills_text):
+    """True when the skills section is written as category labels + prose sentences
+    (e.g. 'Proficient in PTC CREO, Solid Works, ...') rather than atomic entries.
+    Deliberately narrow so already-clean skill lists are left completely untouched.
+    """
+    lines = [l.strip() for l in (skills_text or "").split('\n') if l.strip()]
+    if len(lines) < 4:
+        return False
+    filler = sum(1 for l in lines if _SKILL_FILLER_LEAD.match(l))
+    longish = sum(1 for l in lines if len(l) > 60)
+    return filler >= 2 or longish >= 3
+
+
+def _split_desc_to_skills(line):
+    s = re.sub(r'\([^)]*\)', ' ', line)                    # drop parentheticals
+    items = []
+    # Split on list separators. `and`/`&` require surrounding spaces so intra-token
+    # forms like "GD&T", "R&D", "NX CAD/CAM" are never broken apart.
+    for p in re.split(r'[;,:]|\s+and\s+|\s+&\s+', s, flags=re.I):
+        p = _SKILL_FILLER_LEAD.sub('', p).strip(' .:-\t')  # strip leading filler
+        # A bare leading preposition ("in Power BI" left behind when an upstream
+        # heading-alias match consumed only "Professional Experience" from
+        # "Professional experience in Power BI...") is never itself a skill token.
+        p = re.sub(r'^(?:in|with|for|using|of)\s+', '', p, flags=re.I).strip()
+        if not p or len(p) < 2 or len(p) > 40 or len(p.split()) > 4:
+            continue
+        if re.search(r'\b(for|to|with)\b', p, re.I):       # drop purpose clauses
+            continue
+        if p.lower() in _SKILL_JUNK_TOKENS or _SKILL_FILLER_LEAD.match(p):
+            continue
+        items.append(p)
+    return items
+
+
+def _extract_skill_keywords(skills_text):
+    """Turn a category-label + prose skills section into atomic, one-per-line skill
+    keywords. No-op unless the section is prose-formatted (see _looks_like_prose_
+    skills), so resumes that already list clean skills are unaffected.
+
+    Every line is split (both the bold category labels and their descriptions),
+    because a label often carries real skill names too (e.g. 'TrackWise and
+    Salesforce'); de-duplication then collapses repeats.
+    """
+    if not _looks_like_prose_skills(skills_text):
+        return skills_text
+    out = []
+    for line in skills_text.split('\n'):
+        out.extend(_split_desc_to_skills(line))
+    seen, result = set(), []
+    for s in out:
+        k = re.sub(r'[^a-z0-9]', '', s.lower())
+        if k and k not in seen:
+            seen.add(k)
+            result.append(s)
+    return '\n'.join(result) if result else skills_text
+
+
+def _drop_trailing_skill_fragments(lines):
+    """Drop trailing single-word gutter-bleed fragments from a skills list.
+
+    On 2-column PDFs, a skill that wraps in the sidebar (e.g. "Medical Device
+    Classification") can leave its leading word ("Medical") stranded as its own
+    line at the very END of the skills column, right before the next section.
+    Such an orphan is spurious — it only repeats the first word of a real,
+    multi-word skill already in the list. We remove a trailing single-word line
+    ONLY when an earlier line actually starts with that same word followed by a
+    space, so genuine standalone one-word skills (e.g. "Python", "Selenium") are
+    never touched.
+    """
+    lines = list(lines)
+    while len(lines) >= 2:
+        last = lines[-1].strip()
+        core = re.sub(r"[&/\-.]", "", last)
+        is_single_word = last and " " not in last and core.isalpha()
+        repeats_lead = any(
+            o.strip().lower().startswith(last.lower() + " ") for o in lines[:-1]
+        )
+        if is_single_word and repeats_lead:
+            lines.pop()
+        else:
+            break
+    return lines
+
+
 def parse_resume_text(text, name_hint=None):
     lines = normalize_lines(text)
     parsed = {
@@ -2476,11 +2935,14 @@ def parse_resume_text(text, name_hint=None):
     # Strategy: scan every line; take first candidate whose digit-only count >= 10.
     parsed["phone"] = _extract_phone(text)
 
-    # Join LinkedIn URLs that wrap across lines (e.g. "malthesh-\nkarnam-29a6b416a")
+    # Join LinkedIn URLs that wrap across lines. Sidebars wrap mid-path anywhere
+    # (e.g. "linkedin.com/i\nn/prasanth-vb..." or "malthesh-\nkarnam-29a6b416a"),
+    # so stitch general wrapped-URL tails first, then the hyphen-specific case.
+    _lnk_text = _stitch_wrapped_urls(text)
     _lnk_text = re.sub(
         r'(linkedin\.com/in/[a-zA-Z0-9\-_%]*)-[ \t]*\n[ \t]*([a-zA-Z0-9])',
         lambda m: m.group(1) + '-' + m.group(2),
-        text, flags=re.I,
+        _lnk_text, flags=re.I,
     )
     linkedin_match = re.search(
         r"(?:https?://)?(?:www\.)?linkedin\.com/in/([a-zA-Z0-9\-_%]+)", _lnk_text, re.I
@@ -2817,7 +3279,13 @@ def parse_resume_text(text, name_hint=None):
             if _non_skill_heading_pat.match(re.sub(r"[^a-zA-Z\s]", " ", cleaned_sl).strip()):
                 continue
             clean_skill_lines.append(cleaned_sl)
+        clean_skill_lines = _truncate_skills_at_bleed(clean_skill_lines)
+        clean_skill_lines = _drop_trailing_skill_fragments(clean_skill_lines)
         parsed["skills"] = "\n".join(clean_skill_lines).strip()
+        # Category-label + prose skills ("CAD Design Tools" / "Proficient in PTC CREO,
+        # Solid Works, ...") → atomic one-per-line keywords. No-op for already-clean lists.
+        if parsed["skills"]:
+            parsed["skills"] = _extract_skill_keywords(parsed["skills"])
 
     if parsed.get("education"):
         _personal_pat = re.compile(
@@ -2890,6 +3358,27 @@ def parse_resume_text(text, name_hint=None):
     # Map the extracted/cleaned title to the closest known group role
     if parsed["title"]:
         parsed["title"] = _map_to_group_role(parsed["title"])
+
+    # Recover a skills sidebar block that a 2-column layout interleaved into Work
+    # Experience: an unlabeled run of "category header" + "description" pairs with
+    # no distinguishing heading of its own (common when the sidebar's Skills column
+    # continues onto a later page), then re-flatten it into atomic keywords too.
+    if parsed.get("experience"):
+        _clean_exp, _rescued_text = _rescue_skill_sidebar_from_experience(parsed["experience"])
+        if _rescued_text:
+            parsed["skills"] = (parsed["skills"] + "\n" + _rescued_text) if parsed.get("skills") else _rescued_text
+            parsed["experience"] = _clean_exp
+            parsed["skills"] = _extract_skill_keywords(parsed["skills"])
+
+    # Recover a contact/skills sidebar block (Contact/Phone/Email/LinkedIn + a
+    # Skills list) that a 2-column layout interleaved into Work Experience.
+    if parsed.get("experience"):
+        _clean_exp, _recovered_skills = _extract_sidebar_bleed_from_experience(parsed["experience"])
+        if _recovered_skills or _clean_exp != parsed["experience"]:
+            parsed["experience"] = _clean_exp
+            if _recovered_skills:
+                parsed["skills"] = _merge_recovered_skills(parsed.get("skills", ""), _recovered_skills)
+                parsed["skills"] = _extract_skill_keywords(parsed["skills"])
 
     return parsed
 
@@ -3031,7 +3520,7 @@ def _identity_value_grounded(field, value, source_text):
     return any(w in text_lower for w in words) if words else False
 
 
-def _ollama_identity_extract(text, missing_fields, rules_text=""):
+def _ollama_identity_extract(text, missing_fields):
     """Ask the local LLM for identity fields the rule-based parser couldn't find.
 
     Runs on its own — independent of the content-field AI budget below — so heavy
@@ -3040,15 +3529,10 @@ def _ollama_identity_extract(text, missing_fields, rules_text=""):
     resume layouts that don't match any of the rule-based heuristics, and the ONLY
     fallback at all for location/linkedin, which the regex-only pass can miss
     whenever they aren't behind an explicit label.
-
-    rules_text: optional block of admin-authored parsing instructions from the
-    AI Training module (see _active_training_rules_block); empty by default so
-    behavior is unchanged when no training rules exist.
     """
     if not missing_fields:
         return {}
     prompt = (
-        rules_text +
         "Extract the candidate's identity details from this resume header/contact "
         "area. Return ONLY this JSON, using an empty string for anything not "
         'present:\n{"full_name": "", "email": "", "phone": "", "location": "", '
@@ -3804,6 +4288,24 @@ def parse_resume_with_llm_text(path):
         "ROLE AND RESPONSIBILITIES", "Role and Responsibilities",
         "KEY RESPONSIBILITIES", "Key Responsibilities",
         "RESPONSIBILITIES", "Responsibilities",
+        # ── Additions to close gaps found on 2-column/sidebar resumes ──────────
+        # "About Me" is a summary heading (was only in the base-parse table, so the
+        # verbatim pass was blind to it and could overwrite a good summary).
+        "ABOUT ME", "ABOUT", "About Me",
+        # "Technical Expertise" is a skills heading (sidebar templates use it).
+        "TECHNICAL EXPERTISE", "Technical Expertise", "AREA OF EXPERTISE",
+        # Contact/personal sidebars must act as section BOUNDARIES (mapped to no
+        # field below) so their phone/address/email don't bleed into the section
+        # printed just before them (e.g. Skills).
+        "CONTACT", "CONTACT DETAILS", "CONTACT INFORMATION", "CONTACT INFO",
+        "PERSONAL INFORMATION", "PERSONAL INFO", "PERSONAL PROFILE", "INTERESTS",
+        # "Projects Completed" / "Certificates Courses" style multi-word headings
+        # (incl. the common "compelted" typo) — the trailing word previously made
+        # the single-keyword match fail, so the section was unrecognised.
+        "PROJECTS COMPLETED", "PROJECTS COMPELTED", "PROJECT COMPLETED",
+        "COMPLETED PROJECTS", "PROJECTS DONE",
+        "CERTIFICATES COURSES", "CERTIFICATE COURSES",
+        "CERTIFICATES AND COURSES", "COURSES AND CERTIFICATES", "COURSES",
     ]
     _section_heading_re = re.compile(
         r'(?:^|(?<=\n))\s*('
@@ -3818,7 +4320,8 @@ def parse_resume_with_llm_text(path):
         u = h.strip().upper()
         if u in ("SUMMARY", "PROFILE SUMMARY", "PROFESSIONAL SUMMARY",
                  "APPLICATIONS SUMMARY", "CAREER SUMMARY",
-                 "PROFESSIONAL SUMMARY & SKILL SET"):
+                 "PROFESSIONAL SUMMARY & SKILL SET",
+                 "ABOUT ME", "ABOUT", "OBJECTIVE"):
             return "summary"
         if u in ("EXPERIENCE", "PROFESSIONAL EXPERIENCE", "WORK EXPERIENCE",
                  "EMPLOYMENT HISTORY", "EMPLOYMENT",
@@ -3827,9 +4330,9 @@ def parse_resume_with_llm_text(path):
                  "KEY RESPONSIBILITIES", "RESPONSIBILITIES"):
             return "experience"
         if u in ("SKILLS", "TECHNICAL SKILLS", "KEY SKILLS", "CORE COMPETENCIES",
-                 "AREAS OF EXPERTISE",
+                 "AREAS OF EXPERTISE", "AREA OF EXPERTISE",
                  "TECHNICAL SKILLS & TOOLS", "TECHNICAL SKILLS AND TOOLS",
-                 "TECHNICAL & OTHER PROFICIENCY"):
+                 "TECHNICAL & OTHER PROFICIENCY", "TECHNICAL EXPERTISE"):
             return "skills"
         if u in ("EDUCATION", "QUALIFICATIONS", "ACADEMIC BACKGROUND",
                  "ACADEMIC QUALIFICATIONS", "EDUCATIONAL QUALIFICATIONS",
@@ -3845,7 +4348,10 @@ def parse_resume_with_llm_text(path):
                  "CERTIFICATIONS & TRAINING", "CERTIFICATION & TRAINING",
                  "CERTIFICATIONS & PROFESSIONAL DEVELOPMENT",
                  "CERTIFICATIONS AND PROFESSIONAL DEVELOPMENT",
-                 "PROFESSIONAL DEVELOPMENT", "TRAINING"):
+                 "PROFESSIONAL DEVELOPMENT", "TRAINING",
+                 "CERTIFICATES COURSES", "CERTIFICATE COURSES",
+                 "CERTIFICATES AND COURSES", "COURSES AND CERTIFICATES",
+                 "COURSES", "CERTIFICATES", "CERTIFICATE"):
             return "certifications"
         if u in ("ACHIEVEMENTS", "ACHIEVEMENT", "AWARDS", "AWARD",
                  "AWARDS & RECOGNITION", "AWARDS AND RECOGNITION",
@@ -3856,7 +4362,9 @@ def parse_resume_with_llm_text(path):
                  "PROJECT DETAILS", "KEY PROJECTS", "KEY PROJECTS WORKED",
                  "PROJECT HIGHLIGHTS", "PROJECT SUMMARY",
                  "RELEVANT PROJECT/ORGANIZATIONAL DETAILS",
-                 "RELEVANT PROJECT ORGANIZATIONAL DETAILS"):
+                 "RELEVANT PROJECT ORGANIZATIONAL DETAILS",
+                 "PROJECTS COMPLETED", "PROJECTS COMPELTED", "PROJECT COMPLETED",
+                 "COMPLETED PROJECTS", "PROJECTS DONE"):
             return "projects"
         if u in ("REFERENCES",):
             return "references"
@@ -3939,6 +4447,12 @@ def parse_resume_with_llm_text(path):
 
     verbatim = {}
     _ambiguous_field_source = set()
+    # Content sitting under headings that map to no resume field (e.g. a page-2
+    # sidebar's "Other Personal Details"/"Hobbies"/"Extra Curricular"). On
+    # 2-column PDFs the last Work-Experience bullets can be read AFTER one of
+    # these, stranding them here where they'd otherwise be dropped. Collected so
+    # the numbered-continuation rescue below can recover them.
+    _unmapped_chunks = []
     for i, (pos, heading) in enumerate(headings):
         field = _heading_field(heading)
         nl_pos = raw_text.find("\n", pos)
@@ -4029,6 +4543,8 @@ def parse_resume_with_llm_text(path):
             continue
 
         if not field:
+            if text:
+                _unmapped_chunks.append(text)
             continue
         if field in verbatim:
             # A field can legitimately recur multiple times in one resume — multiple
@@ -4157,12 +4673,15 @@ def parse_resume_with_llm_text(path):
             )
 
     # ── 2c-pre: rescue a numbered Work Experience tail stranded past an unmapped
-    # heading. On 2-column PDFs, page 2's sidebar (Other Personal Details/Hobbies/
-    # Languages/Extra Curricular) sometimes gets read before the main column's
-    # continuation of Experience, landing the last bullets right after one of
-    # those unrecognized headings — where they'd otherwise be silently dropped
-    # since the heading has no field to attach to. Detected by: Experience ends
-    # on a numbered bullet "N." and an unmapped chunk contains bullet "N+1.".
+    # heading. On 2-column PDFs, page 2's sidebar (Other Personal Details / Hobbies /
+    # Languages / Extra Curricular) is often read BEFORE the main column's
+    # continuation of Experience, so the last bullets land right after one of those
+    # unrecognised headings — where they'd otherwise be dropped, since the heading
+    # maps to no field. Detected by: Experience ends on a numbered bullet "N." and
+    # an unmapped chunk contains the next bullet "N+1." — we then splice that
+    # chunk's "N+1." onward (up to any following recognised heading, which already
+    # bounds the chunk) back onto Experience. Guarded by check_parser.py so it
+    # cannot silently break again (this variable was previously never built).
     if result.get("experience") and _unmapped_chunks:
         _exp_nums = re.findall(r'(?:^|\n)\s*(\d+)\.\s', result["experience"])
         if _exp_nums:
@@ -4276,6 +4795,11 @@ def parse_resume_with_llm_text(path):
                 and not re.search(r'[/(]|\d', l)       # keep if has slash/paren/digit
             )
         ]
+        # Cut a bled-in next-section heading (e.g. a "Languages" sidebar block read
+        # right after skills), then drop a trailing single-word wrap fragment
+        # ("Medical" left from "Medical Device Classification").
+        vsk_lines = _truncate_skills_at_bleed(vsk_lines)
+        vsk_lines = _drop_trailing_skill_fragments(vsk_lines)
         result["skills"] = "\n".join(l for l in vsk_lines if l.strip())
 
     # ── 2a-post. Clean verbatim education: stop at PERSONAL INFORMATION, remove personal lines ──
@@ -4411,110 +4935,20 @@ def parse_resume_with_llm_text(path):
                 result["experience"] = _proj_text
             result["projects"] = ""
 
-    # ── 2c-skills-in-experience: sidebar resumes sometimes repeat their Skills
+    # -- 2c-skills-in-experience: sidebar resumes sometimes repeat their Skills
     # column on later pages WITHOUT repeating the "SKILLS" heading, so that
     # continuation has no marker distinguishing it from whatever section is
-    # active at that point in the text — usually Experience. Detect a run of
-    # 3+ consecutive "Short Title-Case Header" + "description" pairs (no
-    # bullets, no dates in between) inside Experience and move it to Skills.
-    _bullet_chars = ("-", "•", "*", "▪", "●", "○", "◦", "‣", "»", "›", "·", "", "")
-
-    def _looks_like_skill_header(line):
-        line = line.strip()
-        if not line or line.startswith(_bullet_chars):
-            return False
-        # Real job/company lines are the main false-positive risk here — they're
-        # often ALL CAPS and/or use a comma or pipe to separate title/company/
-        # location (e.g. "SENIOR EXECUTIVE, STELIS BIOPHARMA, DODDABALLAPURA",
-        # "Business Analyst | Salesforce Business Analyst"). Genuine skill
-        # category headers ("Microsoft Office Suite", "Data Management") never
-        # look like that, so reject both patterns outright.
-        if "," in line or "|" in line:
-            return False
-        letters_only = re.sub(r"[^A-Za-z]", "", line)
-        if letters_only and letters_only.isupper():
-            return False
-        if re.search(r"\d", line):
-            return False
-        if len(line) > 60:
-            return False
-        words = line.split()
-        if not (1 <= len(words) <= 6):
-            return False
-        _minor = {"and", "or", "of", "for", "the", "in", "&", "to"}
-        for w in words:
-            if w.lower() in _minor:
-                continue
-            if not w[0].isupper():
-                return False
-        return words[0][0].isupper()
-
-    def _is_bullet_or_date_line(line):
-        line = line.strip()
-        if not line:
-            return False
-        if line.startswith(_bullet_chars):
-            return True
-        return bool(re.search(r"\b(19|20)\d{2}\b", line))
-
-    _exp_for_skills = result.get("experience", "")
-    if _exp_for_skills:
-        _exp_lines = _exp_for_skills.splitlines()
-        _n_lines = len(_exp_lines)
-        _skill_blocks = []
-        _si = 0
-        while _si < _n_lines:
-            if _looks_like_skill_header(_exp_lines[_si]):
-                _start = _si
-                _pair_count = 0
-                _sj = _si
-                while _sj < _n_lines and _looks_like_skill_header(_exp_lines[_sj]):
-                    _sj += 1
-                    _desc_lines = 0
-                    while (_sj < _n_lines and _exp_lines[_sj].strip()
-                           and not _looks_like_skill_header(_exp_lines[_sj])
-                           and not _is_bullet_or_date_line(_exp_lines[_sj])):
-                        _desc_lines += 1
-                        _ends_with_comma = _exp_lines[_sj].rstrip().endswith(",")
-                        _sj += 1
-                        # Only keep consuming lines while the previous one trails
-                        # off with a comma (a genuine mid-sentence line wrap, e.g.
-                        # "...CARR,\nFEA, QC Charts..."). Without that signal, stop
-                        # after one line — otherwise an unrelated stray fragment
-                        # right after a complete sentence (e.g. a duplicated/
-                        # truncated leftover line from the source document) gets
-                        # swallowed into this entry's description.
-                        if not _ends_with_comma:
-                            break
-                    if _desc_lines == 0:
-                        break
-                    _pair_count += 1
-                    if _sj < _n_lines and _is_bullet_or_date_line(_exp_lines[_sj]):
-                        break
-                _end = _sj
-                if _pair_count >= 3:
-                    _skill_blocks.append((_start, _end))
-                _si = _end if _end > _si else _si + 1
-            else:
-                _si += 1
-
-        if _skill_blocks:
-            _covered = set()
-            for _bs, _be in _skill_blocks:
-                _covered.update(range(_bs, _be))
-            _rescued = [l for i, l in enumerate(_exp_lines) if i in _covered]
-            _kept = [l for i, l in enumerate(_exp_lines) if i not in _covered]
-            _rescued_text = "\n".join(_rescued).strip()
-            if _rescued_text:
-                if result.get("skills"):
-                    result["skills"] = result["skills"] + "\n" + _rescued_text
-                else:
-                    result["skills"] = _rescued_text
-                result["experience"] = "\n".join(_kept).strip()
-                logger.info(
-                    "Rescued %d line(s) of unlabeled skills-sidebar continuation from Experience into Skills",
-                    len(_rescued),
-                )
+    # active at that point in the text -- usually Experience. Move it to Skills.
+    if result.get("experience"):
+        _clean_exp, _rescued_text = _rescue_skill_sidebar_from_experience(result["experience"])
+        if _rescued_text:
+            _sep = "\n"
+            result["skills"] = (result["skills"] + _sep + _rescued_text) if result.get("skills") else _rescued_text
+            result["experience"] = _clean_exp
+            logger.info(
+                "Rescued %d line(s) of unlabeled skills-sidebar continuation from Experience into Skills",
+                len(_rescued_text.splitlines()),
+            )
 
     # ── 2d-cert-overrun: the initial base regex parse (parse_resume_text, at the
     # very top of this function) does its own independent section split and can
@@ -4716,17 +5150,9 @@ def parse_resume_with_llm_text(path):
     # reached email/phone, and full_name got only one shot gated by the same clock.
     # location/linkedin had no AI fallback at all. This call is unconditional and
     # untimed against that budget, so identity extraction always gets to run.
-    # AI Training module: load any admin-authored parsing instructions once per
-    # parse and thread them into every Ollama prompt below. Empty when no rules
-    # exist (the default), so this is a no-op until rules are added.
-    import time as _time
-    _train_t0 = _time.monotonic()
-    _training_rules_text, _training_rule_ids = _active_training_rules_block()
-    _training_ai_responses = []
-
     _missing_identity = [f for f in _IDENTITY_FIELDS if not result.get(f)]
     if _missing_identity:
-        _identity_fill = _ollama_identity_extract(raw_text, _missing_identity, _training_rules_text)
+        _identity_fill = _ollama_identity_extract(raw_text, _missing_identity)
         for _id_field, _id_val in _identity_fill.items():
             result[_id_field] = _id_val
             logger.info(f"Identity AI filled '{_id_field}': {_id_val}")
@@ -4790,9 +5216,8 @@ def parse_resume_with_llm_text(path):
             break
         logger.info(f"AI fallback for '{field}'")
         try:
-            raw = _ollama_chat(_training_rules_text + prompt + ctx_text, as_json=as_json,
+            raw = _ollama_chat(prompt + ctx_text, as_json=as_json,
                                num_predict=num_predict, num_ctx=num_ctx)
-            _training_ai_responses.append(f"{field}: {str(raw)[:200]}")
             if as_json:
                 items = raw.get("skills", []) if isinstance(raw, dict) else []
                 if items:
@@ -5137,40 +5562,45 @@ def parse_resume_with_llm_text(path):
             result["projects"] = _table_projects
             logger.info(f"Projects overridden from pdfplumber table extraction ({len(_table_projects)} chars)")
 
-    # AI Training: Experience/Projects are extracted verbatim above and never
-    # otherwise reach Ollama (they aren't in _AI_FALLBACK), so a saved rule about
-    # how they should be organized would otherwise never take effect. Only runs
-    # when active rules exist AND there's still time left in the same AI budget
-    # every other fallback call above respects — without this check, a bulk
-    # upload processing many resumes in one request could each spend extra,
-    # uncapped time here and stall the whole batch. Keeps the original verbatim
-    # text on any failure, budget exhaustion, or unsafe-looking output, so this
-    # can reorganize but never drop content or block indefinitely.
-    if _training_rules_text and _time.monotonic() - _ai_budget_start <= _OLLAMA_BUDGET_SECS:
-        result["experience"], _exp_note = _apply_training_rules_to_verbatim_field(
-            "Work Experience", result.get("experience", ""), _training_rules_text
-        )
-        if _exp_note:
-            _training_ai_responses.append(_exp_note)
-        if _time.monotonic() - _ai_budget_start <= _OLLAMA_BUDGET_SECS:
-            result["projects"], _proj_note = _apply_training_rules_to_verbatim_field(
-                "Project Details", result.get("projects", ""), _training_rules_text
-            )
-        else:
-            logger.info("AI budget exhausted — skipping training-rule refinement of Projects")
-            _proj_note = None
-        if _proj_note:
-            _training_ai_responses.append(_proj_note)
+    # Remove a contact/skills sidebar block that a 2-column PDF interleaved into
+    # Work Experience (Contact/Phone/Email/LinkedIn + a Skills list), and restore
+    # any skills found inside it to the Skills field.
+    if result.get("experience"):
+        _clean_exp, _recovered_skills = _extract_sidebar_bleed_from_experience(result["experience"])
+        if _recovered_skills or _clean_exp != result["experience"]:
+            result["experience"] = _clean_exp
+            if _recovered_skills:
+                result["skills"] = _merge_recovered_skills(result.get("skills", ""), _recovered_skills)
+                logger.info(
+                    "Removed interleaved contact/skills sidebar from experience; "
+                    "restored %d skill item(s) to Skills",
+                    len(_recovered_skills),
+                )
+            else:
+                logger.info("Removed interleaved contact sidebar block from experience")
 
-    _log_training_parse(
-        resume_name=os.path.basename(str(path)),
-        rule_ids=_training_rule_ids,
-        prompt_excerpt=_training_rules_text,
-        response_excerpt=" | ".join(_training_ai_responses),
-        final_json=result,
-        duration_ms=int((_time.monotonic() - _train_t0) * 1000),
-        success=True,
-    )
+    # Strip wrapped-heading remnants ("ME" from "ABOUT ME", "COMPELTED" from
+    # "PROJECTS COMPELTED") that leaked in as a section's first line.
+    for _f in ("summary", "projects", "certifications"):
+        if result.get(_f):
+            result[_f] = _strip_heading_tail_prefix(result[_f])
+
+    # Category-label + prose skills ("CAD Design Tools" / "Proficient in PTC CREO,
+    # Solid Works, ...") → atomic one-per-line keywords. No-op for already-clean lists.
+    if result.get("skills"):
+        result["skills"] = _extract_skill_keywords(result["skills"])
+
+    # Recover a full-width summary paragraph that the linear extractor split across
+    # a 2-column boundary (only when the block version is clearly more complete).
+    if _path_ext == "pdf":
+        _blk_summary = _pymupdf_summary_block(path)
+        _cur_summary = str(result.get("summary") or "")
+        if _blk_summary and len(_blk_summary.strip()) > len(_cur_summary.strip()) + 20:
+            result["summary"] = _blk_summary.strip()
+            logger.info(
+                "Summary replaced with pymupdf block paragraph (%d → %d chars)",
+                len(_cur_summary), len(_blk_summary),
+            )
 
     return result, "llm_text"
 
@@ -5248,13 +5678,23 @@ def edit_resume(resume_id=None):
 
                 # parse_mode: "llm" = Resume Intelligence (AI), anything else = Quick Parse
                 parse_mode = request.form.get("parse_mode", "llm")
+                ai_downgraded = False
                 try:
                     if ext in ("pdf", "docx") and parse_mode == "llm":
                         logger.info(f"Using Resume Intelligence (AI) path for {path}")
                         try:
                             parsed_data, _ = parse_resume_with_llm_text(path)
                         except Exception as e:
-                            logger.warning("Resume Intelligence failed (%s); using Quick Parse.", e, exc_info=True)
+                            # A crash here (not just an unreachable LLM) means the AI
+                            # pipeline itself broke — log at ERROR so it can't hide, and
+                            # tell the user the result is a reduced-quality parse rather
+                            # than flashing a misleading "success".
+                            ai_downgraded = True
+                            logger.error(
+                                "Resume Intelligence pipeline FAILED for %s (%s) — "
+                                "downgraded to Quick Parse. Fields may be incomplete.",
+                                path, e, exc_info=True,
+                            )
                             if ext == "pdf":
                                 parsed_data = _parse_pdf_quick(path)
                             else:
@@ -5264,7 +5704,15 @@ def edit_resume(resume_id=None):
                     else:
                         extracted = extract_resume_text(path, ext)
                         parsed_data = parse_resume_text(extracted)
-                    flash("Resume uploaded and data extracted successfully.", "success")
+                    if ai_downgraded:
+                        flash(
+                            "Resume uploaded, but AI extraction failed — a basic parse was used, "
+                            "so Skills/Experience/Projects/Education may be incomplete. "
+                            "Please review the fields before saving.",
+                            "warning",
+                        )
+                    else:
+                        flash("Resume uploaded and data extracted successfully.", "success")
                 except Exception:
                     flash(
                         "File uploaded, but text could not be extracted. "
@@ -7135,6 +7583,8 @@ def dashboard():
         status_counts=status_counts,
         interview_status_counts=interview_status_counts,
         interview_statuses=INTERVIEW_STATUSES,
+        interview_status_colors=INTERVIEW_STATUS_COLORS,
+        interview_status_fallback_color=INTERVIEW_STATUS_FALLBACK_COLOR,
         open_jobs_count=open_jobs_count,
         interviews_count=interviews_count,
         offers_count=offers_count,
@@ -8594,6 +9044,191 @@ def calculate_match_score(resume_d, jd_d):
     }
 
 
+# ── LLM-as-judge hybrid assessment ────────────────────────────────────────────
+# calculate_match_score() is a literal keyword/skill checklist — a resume that
+# says "CI/CD pipeline automation" gets no credit against a JD line item of
+# "Jenkins" even though a recruiter would call that a plausible match. The
+# functions below add a real LLM judgment on top of (not instead of) that
+# keyword scan: the keyword findings are fed into the prompt as grounding
+# facts, and the LLM is asked to reason about what the literal scan misses
+# (adjacent tools, transferable skills, seniority) and explain its verdict in
+# plain language, with its own confidence.
+
+_HYBRID_KEYWORD_WEIGHT = 0.35
+_HYBRID_LLM_WEIGHT = 0.65
+_CONFIDENCE_AGREEMENT_WEIGHT = 0.45
+_CONFIDENCE_SUFFICIENCY_WEIGHT = 0.20
+_CONFIDENCE_SELF_WEIGHT = 0.35
+_HYBRID_ALGO_VERSION = "hybrid-v1"
+
+
+def _tier_from_pct(pct):
+    """Same verdict/tier/recommendation buckets as _holistic_match(), shared
+    so the hybrid blended score buckets identically to the pure-heuristic
+    fallback the user already saw before this feature existed.
+    """
+    if pct >= 70:
+        return ("Strong overall fit", "Strong Fit",
+                "🌟 Great fit for this role — advance to next round")
+    elif pct >= 45:
+        return ("Good overall fit", "Good Fit",
+                "👍 Good fit for this role — worth interviewing")
+    elif pct >= 25:
+        return ("Partial overall fit", "Partial Fit",
+                "🤔 Partial fit — worth a closer look")
+    else:
+        return ("Limited overall fit", "Weak Fit",
+                "⏭ Not a strong fit for this role")
+
+
+def _clamp_pct(value, default=50):
+    try:
+        return max(0, min(100, int(round(float(value)))))
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_str_list(value, limit):
+    if not isinstance(value, list):
+        return []
+    out = []
+    for item in value:
+        s = str(item).strip()
+        if s:
+            out.append(s[:80])
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _llm_judge_match(resume_dict, jd_dict, keyword_result):
+    """Asks the local Ollama model to judge JD/resume fit as a human recruiter
+    would, grounded in the keyword scan's own matched/missing findings so it
+    reasons about the gaps rather than re-deriving everything from scratch.
+    Returns None (never raises) if the model is unreachable, times out, or
+    returns something we can't make sense of — callers fall back to the
+    pure-heuristic score in that case, same as every other Ollama caller here.
+    """
+    jd_text = "\n".join(f"{label}: {str(jd_dict.get(key) or '')[:1500]}" for label, key in [
+        ("Title", "title"), ("Role", "role"), ("Skills", "skills"),
+        ("Requirements", "requirements"), ("Responsibilities", "responsibilities"),
+        ("Keywords", "keywords"),
+    ])
+    resume_text = "\n".join(f"{label}: {str(resume_dict.get(key) or '')[:1500]}" for label, key in [
+        ("Title", "title"), ("Summary", "summary"), ("Skills", "skills"),
+        ("Experience", "experience"), ("Projects", "projects"),
+        ("Certifications", "certifications"), ("Education", "education"),
+    ])
+    matched = keyword_result.get("matched_skills") or []
+    missing = keyword_result.get("missing_skills") or []
+
+    prompt = (
+        "You are a technical recruiter judging how well a candidate's resume fits a job description. "
+        "A keyword scan already ran and found the results below — use it as a starting point, "
+        "then look past exact wording for adjacent tools, transferable skills, and seniority signals "
+        "the keyword scan would miss.\n\n"
+        f"KEYWORD SCAN: {len(matched)}/{len(matched) + len(missing)} JD items matched "
+        f"({keyword_result.get('match_percentage', 0)}%).\n"
+        f"Matched: {', '.join(matched[:20]) or 'none'}\n"
+        f"Missing: {', '.join(missing[:20]) or 'none'}\n\n"
+        f"JOB DESCRIPTION:\n{jd_text}\n\n"
+        f"RESUME:\n{resume_text}\n\n"
+        "Return ONLY JSON with this exact shape:\n"
+        '{"fit_percentage": <0-100 int>, "verdict": "<Strong Match|Good Match|Partial Match|Low Match>", '
+        '"rationale": "<2-4 sentences grounded in specific resume/JD content explaining the verdict>", '
+        '"strengths": ["<short phrase>", ...up to 6], '
+        '"concerns": "<1-2 sentences on the biggest gaps, or empty string if none>", '
+        '"suggested_roles": ["<role name>", ...up to 3, or empty list], '
+        '"confidence": <0-100 int, how confident you are in this judgment given the information available>, '
+        '"confidence_reason": "<one short sentence>"}'
+    )
+
+    try:
+        raw = _ollama_chat(prompt, as_json=True, num_predict=700, num_ctx=8192)
+    except Exception as e:
+        logger.warning(f"LLM judge call failed: {e}", exc_info=True)
+        return None
+
+    if not isinstance(raw, dict) or "fit_percentage" not in raw:
+        logger.warning(f"LLM judge returned unusable response: {str(raw)[:200]}")
+        return None
+
+    return {
+        "fit_percentage": _clamp_pct(raw.get("fit_percentage")),
+        "verdict": str(raw.get("verdict") or "").strip()[:100],
+        "rationale": str(raw.get("rationale") or "").strip()[:600],
+        "strengths": _coerce_str_list(raw.get("strengths"), 6),
+        "concerns": str(raw.get("concerns") or "").strip()[:400],
+        "suggested_roles": _coerce_str_list(raw.get("suggested_roles"), 3),
+        "confidence": _clamp_pct(raw.get("confidence")),
+        "confidence_reason": str(raw.get("confidence_reason") or "").strip()[:200],
+    }
+
+
+def _hybrid_match(resume_dict, jd_dict):
+    """The primary "AI Assessment": keyword checklist + LLM-as-judge, blended.
+    Never raises and never returns None — falls back to the pure-heuristic
+    _holistic_or_default() (with a Low confidence badge) if the LLM judge is
+    unavailable, so a down/slow Ollama server degrades the UX rather than
+    breaking it.
+    """
+    keyword_result = calculate_match_score(resume_dict, jd_dict)
+    llm_result = _llm_judge_match(resume_dict, jd_dict, keyword_result)
+
+    if llm_result is None:
+        fallback = _holistic_or_default(resume_dict, jd_dict)
+        fallback["keyword_match_percentage"] = keyword_result.get("match_percentage", 0)
+        fallback["llm_fit_percentage"] = None
+        fallback["confidence"] = 25
+        fallback["confidence_label"] = "Low"
+        fallback["confidence_reason"] = "AI judge unavailable — showing keyword + heuristic estimate only."
+        fallback["algo_version"] = _HYBRID_ALGO_VERSION
+        return fallback
+
+    keyword_pct = keyword_result.get("match_percentage", 0)
+    llm_pct = llm_result["fit_percentage"]
+    final_pct = round(keyword_pct * _HYBRID_KEYWORD_WEIGHT + llm_pct * _HYBRID_LLM_WEIGHT)
+    verdict, tier_label, recommendation = _tier_from_pct(final_pct)
+
+    total_items = keyword_result.get("total_jd_requirements", 0)
+    resume_word_count = len(re.findall(r"\w+", " ".join(
+        str(resume_dict.get(k) or '') for k in ("skills", "experience", "summary"))))
+    if total_items >= 5 and resume_word_count >= 80:
+        data_sufficiency = 100
+    elif total_items >= 2 and resume_word_count >= 30:
+        data_sufficiency = 60
+    else:
+        data_sufficiency = 30
+
+    agreement = 100 - abs(keyword_pct - llm_pct)
+    confidence_pct = round(
+        agreement * _CONFIDENCE_AGREEMENT_WEIGHT
+        + data_sufficiency * _CONFIDENCE_SUFFICIENCY_WEIGHT
+        + llm_result["confidence"] * _CONFIDENCE_SELF_WEIGHT
+    )
+    confidence_label = "High" if confidence_pct >= 75 else "Medium" if confidence_pct >= 50 else "Low"
+
+    return {
+        "fit_percentage": final_pct,
+        "verdict": verdict,
+        "tier_label": tier_label,
+        "recommendation": recommendation,
+        "rationale": llm_result["rationale"],
+        "strengths": llm_result["strengths"],
+        "concerns": llm_result["concerns"],
+        "suggested_roles": llm_result["suggested_roles"],
+        "keyword_match_percentage": keyword_pct,
+        "llm_fit_percentage": llm_pct,
+        "confidence": confidence_pct,
+        "confidence_label": confidence_label,
+        "confidence_reason": llm_result["confidence_reason"] or (
+            "Keyword scan and AI judge agree closely." if agreement >= 80
+            else "Keyword scan and AI judge differ somewhat."
+        ),
+        "algo_version": _HYBRID_ALGO_VERSION,
+    }
+
+
 # ── JD Routes ─────────────────────────────────────────────────────────────────
 
 @app.route("/jd-management")
@@ -8889,12 +9524,12 @@ def compare_result(resume_id, jd_id):
 @app.route("/api/compare/<int:resume_id>/<int:jd_id>/ai-assessment")
 def compare_ai_assessment(resume_id, jd_id):
     """Fetched asynchronously by compare_result.html / profile.html after the
-    page loads. _holistic_match() is pure Python now (no LLM call), so this
-    resolves quickly, but it's still kept off the initial page render and
-    cached per (resume_id, jd_id) from when it was a slow local-model call —
-    cheap to keep either way. The cache is invalidated automatically if either
-    side was edited since it was computed (its updated_at moved past what's
-    stored).
+    page loads. Runs the hybrid keyword + LLM-judge assessment (_hybrid_match())
+    and caches the result per (resume_id, jd_id) — the LLM call can take a
+    while on local hardware, so it's kept off the initial page render. The
+    cache is invalidated if either side was edited since it was computed (its
+    updated_at moved past what's stored) or if it was computed under a
+    previous scoring algorithm (algo_version mismatch).
     """
     logger.info(f"AI assessment requested → resume={resume_id} jd={jd_id}")
     with db_conn() as conn:
@@ -8914,7 +9549,8 @@ def compare_ai_assessment(resume_id, jd_id):
         # value happened to come from.
         _naive = lambda dt: dt.replace(tzinfo=None) if dt and dt.tzinfo else dt
         if (cached and _naive(cached["resume_updated_at"]) == _naive(resume["updated_at"])
-                and _naive(cached["jd_updated_at"]) == _naive(jd["updated_at"])):
+                and _naive(cached["jd_updated_at"]) == _naive(jd["updated_at"])
+                and (cached["extra"] or {}).get("algo_version") == _HYBRID_ALGO_VERSION):
             logger.info(f"AI assessment cache hit → resume={resume_id} jd={jd_id}")
             extra = cached["extra"] or {}
             return jsonify({
@@ -8926,10 +9562,15 @@ def compare_ai_assessment(resume_id, jd_id):
                 "strengths": extra.get("strengths", []),
                 "concerns": extra.get("concerns", ""),
                 "suggested_roles": extra.get("suggested_roles", []),
+                "keyword_match_percentage": extra.get("keyword_match_percentage"),
+                "llm_fit_percentage": extra.get("llm_fit_percentage"),
+                "confidence": extra.get("confidence"),
+                "confidence_label": extra.get("confidence_label", ""),
+                "confidence_reason": extra.get("confidence_reason", ""),
             })
 
         logger.info(f"AI assessment cache miss → resume={resume_id} jd={jd_id}, computing")
-        assessment = _holistic_match(dict(resume), dict(jd))
+        assessment = _hybrid_match(dict(resume), dict(jd))
         if assessment is None:
             return jsonify({"error": "AI assessment unavailable right now"}), 503
 
@@ -8939,6 +9580,12 @@ def compare_ai_assessment(resume_id, jd_id):
             "strengths": assessment.get("strengths", []),
             "concerns": assessment.get("concerns", ""),
             "suggested_roles": assessment.get("suggested_roles", []),
+            "keyword_match_percentage": assessment.get("keyword_match_percentage"),
+            "llm_fit_percentage": assessment.get("llm_fit_percentage"),
+            "confidence": assessment.get("confidence"),
+            "confidence_label": assessment.get("confidence_label", ""),
+            "confidence_reason": assessment.get("confidence_reason", ""),
+            "algo_version": assessment.get("algo_version", _HYBRID_ALGO_VERSION),
         })
         conn.execute(
             """
@@ -9090,6 +9737,24 @@ INTERVIEW_STATUSES = [
     "Rejected Internally",
     "Selected by Client",
 ]
+
+# Single source of truth for interview-status colours. The dashboard donut and
+# the "Interview Status" bar list both read this, so the same status can never
+# render in two different colours across the two panels.
+INTERVIEW_STATUS_COLORS = {
+    "To Be Interviewed":                  "#6366f1",
+    "Profile Shared With Client":         "#0284c7",
+    "Can be considered for Future Roles": "#8b5cf6",
+    "Client Offer Released":              "#059669",
+    "Joined Vaisesika":                   "#10b981",
+    "Not Available Currently":            "#64748b",
+    "Not Shortlisted":                    "#f59e0b",
+    "Position Closed":                    "#dc2626",
+    "Rejected By Client":                 "#ef4444",
+    "Rejected Internally":                "#991b1b",
+    "Selected by Client":                 "#16a34a",
+}
+INTERVIEW_STATUS_FALLBACK_COLOR = "#6366f1"
 
 
 def _ensure_interview_status_col():
@@ -9568,595 +10233,6 @@ def user_delete(user_id):
         conn.execute("DELETE FROM app_user WHERE id = %s", (user_id,))
     flash("User deleted.", "success")
     return redirect(url_for("user_management"))
-
-
-# ── AI Training / Prompt Management (new module — additive only, isolated) ──
-#
-# Lets an admin give plain-English parsing instructions ("treat 'Core
-# Competencies' as Skills") through a chat UI. Accepted instructions are
-# stored as versioned, prioritized rules and injected into the existing
-# Ollama prompts at parse time via _active_training_rules_block(), called
-# from _ollama_identity_extract and from the _AI_FALLBACK loop inside
-# parse_resume_with_llm_text. When no rules exist, those prompts are
-# byte-identical to before this module existed, so there is zero behavior
-# change until an admin actually adds a rule. This is prompt augmentation
-# only — it never touches Ollama model weights.
-
-TRAINING_CATEGORIES = [
-    "Work Experience", "Skills", "Projects", "Education", "Certifications",
-    "Personal Details", "Summary", "Role Detection", "Section Mapping",
-    "Parsing Rules", "General",
-]
-
-
-def ensure_training_tables(conn):
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS training_chat_message (
-            id                 SERIAL PRIMARY KEY,
-            role               TEXT NOT NULL,
-            message            TEXT NOT NULL,
-            suggested_category TEXT DEFAULT '',
-            saved_as_rule_id   INTEGER,
-            created_by         TEXT DEFAULT '',
-            created_at         TIMESTAMPTZ DEFAULT NOW()
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS training_rule (
-            id             SERIAL PRIMARY KEY,
-            category       TEXT NOT NULL,
-            rule_text      TEXT NOT NULL,
-            priority       INTEGER DEFAULT 100,
-            status         TEXT DEFAULT 'active',
-            version        INTEGER DEFAULT 1,
-            source_chat_id INTEGER REFERENCES training_chat_message(id),
-            created_by     TEXT DEFAULT '',
-            created_at     TIMESTAMPTZ DEFAULT NOW(),
-            updated_at     TIMESTAMPTZ DEFAULT NOW()
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS training_rule_version (
-            id          SERIAL PRIMARY KEY,
-            rule_id     INTEGER NOT NULL REFERENCES training_rule(id) ON DELETE CASCADE,
-            version     INTEGER NOT NULL,
-            category    TEXT NOT NULL,
-            rule_text   TEXT NOT NULL,
-            priority    INTEGER NOT NULL,
-            status      TEXT NOT NULL,
-            changed_by  TEXT DEFAULT '',
-            changed_at  TIMESTAMPTZ DEFAULT NOW()
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS training_parse_log (
-            id               SERIAL PRIMARY KEY,
-            resume_name      TEXT DEFAULT '',
-            rules_applied    INTEGER[] DEFAULT '{}',
-            prompt_excerpt   TEXT DEFAULT '',
-            response_excerpt TEXT DEFAULT '',
-            final_json       TEXT,
-            duration_ms      INTEGER DEFAULT 0,
-            success          BOOLEAN DEFAULT TRUE,
-            error_detail     TEXT DEFAULT '',
-            created_at       TIMESTAMPTZ DEFAULT NOW()
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS training_rule_usage (
-            rule_id      INTEGER PRIMARY KEY REFERENCES training_rule(id) ON DELETE CASCADE,
-            usage_count  INTEGER DEFAULT 0,
-            last_used_at TIMESTAMPTZ
-        )
-        """
-    )
-
-
-def _active_training_rules_block():
-    """Return (instruction_block, rule_ids) for all active training rules,
-    highest priority first. Empty ("", []) when no rules exist, so prompts
-    at every call site are unaffected until an admin adds a rule."""
-    try:
-        with db_conn() as conn:
-            ensure_training_tables(conn)
-            rules = conn.execute(
-                "SELECT id, category, rule_text FROM training_rule "
-                "WHERE status = 'active' ORDER BY priority ASC, id ASC"
-            ).fetchall()
-    except Exception as e:
-        logger.warning(f"Could not load training rules: {e}")
-        return "", []
-    if not rules:
-        return "", []
-    lines = ["Additional parsing instructions (apply strictly, highest priority first):"]
-    for r in rules:
-        lines.append(f"- [{r['category']}] {r['rule_text']}")
-    return "\n".join(lines) + "\n\n", [r["id"] for r in rules]
-
-
-_TRAINING_META_PHRASE_RE = re.compile(
-    r'\bbased on (?:the|this) resume\b|\bthe candidate\b|\bthis resume (?:shows|indicates|includes)\b'
-    r'|\bi (?:can see|found|couldn\'?t find)\b|\bhere(?:\'s| is) (?:the|a)\b'
-    # Self-referential closing remarks about the reformatting itself, e.g.
-    # "Note that this reformatting strictly adheres only to applying the
-    # instructions above... all facts were preserved." — small local models
-    # commonly append this after otherwise-good output, and it must never be
-    # saved as if it were resume content.
-    r'|\bnote that this\b|\bthis reformatting\b|\bthis (?:summary|response|output)\s+(?:strictly\s+)?adheres\b'
-    r'|\b(?:was not|were not) (?:summarized|invented|omitted)\b|\ball facts were preserved\b'
-    r'|\binstructions? (?:above|provided)\b',
-    re.I,
-)
-
-
-def _strip_trailing_meta_paragraph(raw):
-    """Drop a trailing paragraph that's the model explaining what it just did
-    (e.g. a closing 'Note that this reformatting...' disclaimer) rather than
-    actual resume content, while keeping the genuinely reorganized content
-    before it. Only touches the last paragraph — never rejects the whole
-    response over a stray closing remark.
-    """
-    parts = raw.rsplit("\n\n", 1)
-    if len(parts) == 2 and _TRAINING_META_PHRASE_RE.search(parts[1]):
-        return parts[0].strip()
-    return raw
-
-
-def _apply_training_rules_to_verbatim_field(field_label, text, rules_text):
-    """Optionally refine a verbatim-extracted resume section (Work Experience,
-    Project Details) using active AI Training rules.
-
-    Experience/Projects are normally copied verbatim from the resume and never
-    reach Ollama at all (see _AI_FALLBACK, which doesn't cover them) — so a
-    saved rule about how they should be organized would otherwise never take
-    effect. This is opt-in per parse (only called when active rules exist) and
-    fails safe: on any error, empty output, or output that looks like invented
-    commentary rather than reorganized resume content, the original verbatim
-    text is kept unchanged. Returns (text, usage_note_or_None).
-    """
-    if not text or not text.strip() or not rules_text:
-        return text, None
-    prompt = (
-        rules_text +
-        f"You are given the exact verbatim '{field_label}' section extracted from a "
-        "resume, together with parsing instructions above. Apply only the "
-        "instructions that are relevant to this section, and return the corrected "
-        "version. Preserve every fact, project, company, date, and bullet point "
-        "from the original — only reorganize or reformat per the instructions. "
-        "Do not summarize, invent, or omit any detail. If no instruction applies, "
-        "return the original text unchanged. Return ONLY the resume section text "
-        "itself — no preamble, no closing remarks, and no explanation of what you "
-        "did or which instructions you applied.\n\n"
-        f"ORIGINAL {field_label.upper()} SECTION:\n" + text[:4000]
-    )
-    try:
-        raw = _ollama_chat(prompt, as_json=False, num_predict=1800, num_ctx=4096)
-    except Exception as e:
-        logger.warning(f"Training-rule refinement of '{field_label}' failed: {e}")
-        return text, None
-    raw = _strip_trailing_meta_paragraph((raw or "").strip())
-    looks_unsafe = (
-        not raw
-        or "**" in raw
-        or raw.startswith("```")
-        or bool(_TRAINING_META_PHRASE_RE.search(raw))
-        or len(raw) < 0.4 * len(text)
-    )
-    if looks_unsafe:
-        logger.warning(f"Training-rule refinement of '{field_label}' looked unsafe — keeping verbatim text")
-        return text, None
-    return raw, f"{field_label}: refined via active rules ({len(raw)} chars)"
-
-
-def _record_training_rule_usage(conn, rule_ids):
-    for rid in rule_ids:
-        conn.execute(
-            """
-            INSERT INTO training_rule_usage (rule_id, usage_count, last_used_at)
-            VALUES (%s, 1, NOW())
-            ON CONFLICT (rule_id) DO UPDATE SET
-                usage_count = training_rule_usage.usage_count + 1,
-                last_used_at = NOW()
-            """,
-            (rid,),
-        )
-
-
-def _log_training_parse(resume_name, rule_ids, prompt_excerpt, response_excerpt,
-                         final_json, duration_ms, success, error_detail=""):
-    """Best-effort logging for the AI Training analytics/logs pages. Never raises —
-    a logging failure must not affect the resume parse that triggered it."""
-    try:
-        with db_conn() as conn:
-            ensure_training_tables(conn)
-            conn.execute(
-                """
-                INSERT INTO training_parse_log
-                    (resume_name, rules_applied, prompt_excerpt, response_excerpt,
-                     final_json, duration_ms, success, error_detail)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                (resume_name, rule_ids, (prompt_excerpt or "")[:2000], (response_excerpt or "")[:2000],
-                 json.dumps(final_json) if final_json is not None else None,
-                 duration_ms, success, (error_detail or "")[:2000]),
-            )
-            _record_training_rule_usage(conn, rule_ids)
-    except Exception as e:
-        logger.warning(f"Could not write training parse log: {e}")
-
-
-def _snapshot_rule_version(conn, rule):
-    """Append the rule's current state to its version history before it's changed."""
-    conn.execute(
-        """
-        INSERT INTO training_rule_version
-            (rule_id, version, category, rule_text, priority, status, changed_by)
-        VALUES (%(id)s, %(version)s, %(category)s, %(rule_text)s, %(priority)s, %(status)s, %(changed_by)s)
-        """,
-        {**rule, "changed_by": session.get("username", "")},
-    )
-
-
-def _training_chat_reply(user_message):
-    """Ask Ollama to acknowledge a parsing instruction and suggest a category.
-
-    This is a separate, lightweight chat-style call — distinct from the resume
-    parsing prompts — so a slow/odd reply here can never affect parsing.
-    """
-    categories_list = ", ".join(TRAINING_CATEGORIES)
-    prompt = (
-        "You are a resume-parsing assistant helping a human refine parsing rules "
-        "for future resumes. The human will give you an instruction about how "
-        "resumes should be parsed. Acknowledge it in 1-2 short sentences, restating "
-        "what you understood in your own words, so the human can confirm before it "
-        "is saved as a rule. Do not ask questions, do not add extra commentary.\n\n"
-        f"Pick exactly ONE category for this instruction from this fixed list: "
-        f"{categories_list}.\n\n"
-        'Return ONLY this JSON: {"reply": "<your acknowledgement>", "category": "<one category>"}'
-        f"\n\nInstruction: {user_message}"
-    )
-    try:
-        raw = _ollama_chat(prompt, as_json=True, num_predict=150, num_ctx=1024)
-    except Exception as e:
-        logger.warning(f"Training chat reply failed: {e}")
-        raw = {}
-    if not isinstance(raw, dict) or not str(raw.get("reply", "")).strip():
-        return (f'Understood — I will apply this for future parsing: "{user_message.strip()}"', "General")
-    category = raw.get("category", "General")
-    if category not in TRAINING_CATEGORIES:
-        category = "General"
-    return str(raw["reply"]).strip(), category
-
-
-# ── AI Training Routes ───────────────────────────────────────────────────────
-
-@app.route("/ai-training")
-def ai_training_chat():
-    with db_conn() as conn:
-        ensure_training_tables(conn)
-        rows = list(conn.execute(
-            "SELECT * FROM training_chat_message ORDER BY id ASC"
-        ).fetchall())
-    # Pair up user/assistant rows into turns for the template. Both rows of a
-    # turn are inserted inside one db_conn transaction in ai_training_chat_send,
-    # so they always land together; this just handles it defensively.
-    turns = []
-    i = 0
-    while i < len(rows):
-        if rows[i]["role"] == "user" and i + 1 < len(rows) and rows[i + 1]["role"] == "assistant":
-            turns.append({"user": dict(rows[i]), "assistant": dict(rows[i + 1])})
-            i += 2
-        else:
-            turns.append({"user": dict(rows[i]), "assistant": None})
-            i += 1
-    return render_template("training_chat.html", turns=turns,
-                           prefill=request.args.get("prefill", ""))
-
-
-@app.route("/ai-training/chat", methods=["POST"])
-def ai_training_chat_send():
-    if not _require_admin():
-        abort(403)
-    user_message = request.form.get("message", "").strip()
-    if not user_message:
-        flash("Please enter an instruction.", "error")
-        return redirect(url_for("ai_training_chat"))
-    reply, category = _training_chat_reply(user_message)
-    with db_conn() as conn:
-        ensure_training_tables(conn)
-        conn.execute(
-            "INSERT INTO training_chat_message (role, message, created_by) VALUES ('user', %s, %s)",
-            (user_message, session.get("username", "")),
-        )
-        conn.execute(
-            "INSERT INTO training_chat_message (role, message, suggested_category, created_by) "
-            "VALUES ('assistant', %s, %s, %s)",
-            (reply, category, session.get("username", "")),
-        )
-    return redirect(url_for("ai_training_chat"))
-
-
-@app.route("/ai-training/chat/<int:message_id>/save-rule", methods=["POST"])
-def ai_training_save_rule(message_id):
-    if not _require_admin():
-        abort(403)
-    with db_conn() as conn:
-        ensure_training_tables(conn)
-        msg = conn.execute(
-            "SELECT * FROM training_chat_message WHERE id = %s", (message_id,)
-        ).fetchone()
-        if not msg:
-            flash("Chat message not found.", "error")
-            return redirect(url_for("ai_training_chat"))
-        # The rule text always comes from the user's own instruction, regardless
-        # of whether the user or assistant bubble was clicked.
-        if msg["role"] == "assistant":
-            user_msg = conn.execute(
-                "SELECT * FROM training_chat_message WHERE id < %s AND role = 'user' "
-                "ORDER BY id DESC LIMIT 1",
-                (message_id,),
-            ).fetchone()
-        else:
-            user_msg = msg
-        if not user_msg:
-            flash("Could not find the original instruction to save.", "error")
-            return redirect(url_for("ai_training_chat"))
-        category = request.form.get("category") or msg.get("suggested_category") or "General"
-        if category not in TRAINING_CATEGORIES:
-            category = "General"
-        new_rule = conn.execute(
-            """
-            INSERT INTO training_rule (category, rule_text, priority, source_chat_id, created_by)
-            VALUES (%s, %s, 100, %s, %s) RETURNING id
-            """,
-            (category, user_msg["message"], user_msg["id"], session.get("username", "")),
-        ).fetchone()
-        conn.execute(
-            "UPDATE training_chat_message SET saved_as_rule_id = %s WHERE id = %s",
-            (new_rule["id"], user_msg["id"]),
-        )
-    flash("Saved as a new parsing rule.", "success")
-    return redirect(url_for("ai_training_rules"))
-
-
-@app.route("/ai-training/rules")
-def ai_training_rules():
-    search = request.args.get("q", "").strip()
-    category = request.args.get("category", "").strip()
-    status = request.args.get("status", "").strip()
-    query = "SELECT * FROM training_rule WHERE 1=1"
-    params = []
-    if search:
-        query += " AND rule_text ILIKE %s"
-        params.append(f"%{search}%")
-    if category:
-        query += " AND category = %s"
-        params.append(category)
-    if status:
-        query += " AND status = %s"
-        params.append(status)
-    query += " ORDER BY priority ASC, id ASC"
-    with db_conn() as conn:
-        ensure_training_tables(conn)
-        rules = conn.execute(query, tuple(params)).fetchall()
-    return render_template("training_rules.html", rules=list(rules), categories=TRAINING_CATEGORIES,
-                           search=search, category=category, status=status)
-
-
-@app.route("/ai-training/rules/add", methods=["GET", "POST"])
-def ai_training_rule_add():
-    if not _require_admin():
-        abort(403)
-    if request.method == "POST":
-        category = request.form.get("category", "General")
-        if category not in TRAINING_CATEGORIES:
-            category = "General"
-        rule_text = request.form.get("rule_text", "").strip()
-        try:
-            priority = int(request.form.get("priority", "100") or "100")
-        except ValueError:
-            priority = 100
-        if not rule_text:
-            flash("Rule text is required.", "error")
-            return render_template("training_rule_form.html", rule=None, categories=TRAINING_CATEGORIES)
-        with db_conn() as conn:
-            ensure_training_tables(conn)
-            conn.execute(
-                "INSERT INTO training_rule (category, rule_text, priority, created_by) VALUES (%s, %s, %s, %s)",
-                (category, rule_text, priority, session.get("username", "")),
-            )
-        flash("Rule added.", "success")
-        return redirect(url_for("ai_training_rules"))
-    return render_template("training_rule_form.html", rule=None, categories=TRAINING_CATEGORIES)
-
-
-@app.route("/ai-training/rules/<int:rule_id>/edit", methods=["GET", "POST"])
-def ai_training_rule_edit(rule_id):
-    if not _require_admin():
-        abort(403)
-    with db_conn() as conn:
-        ensure_training_tables(conn)
-        rule = conn.execute("SELECT * FROM training_rule WHERE id = %s", (rule_id,)).fetchone()
-        if not rule:
-            return "Rule not found", 404
-        if request.method == "POST":
-            category = request.form.get("category", rule["category"])
-            if category not in TRAINING_CATEGORIES:
-                category = rule["category"]
-            rule_text = request.form.get("rule_text", "").strip() or rule["rule_text"]
-            try:
-                priority = int(request.form.get("priority", rule["priority"]))
-            except ValueError:
-                priority = rule["priority"]
-            _snapshot_rule_version(conn, dict(rule))
-            conn.execute(
-                """
-                UPDATE training_rule SET category=%s, rule_text=%s, priority=%s,
-                    version = version + 1, updated_at = NOW()
-                WHERE id = %s
-                """,
-                (category, rule_text, priority, rule_id),
-            )
-            flash("Rule updated.", "success")
-            return redirect(url_for("ai_training_rules"))
-    return render_template("training_rule_form.html", rule=dict(rule), categories=TRAINING_CATEGORIES)
-
-
-@app.route("/ai-training/rules/<int:rule_id>/toggle", methods=["POST"])
-def ai_training_rule_toggle(rule_id):
-    if not _require_admin():
-        abort(403)
-    with db_conn() as conn:
-        ensure_training_tables(conn)
-        rule = conn.execute("SELECT * FROM training_rule WHERE id = %s", (rule_id,)).fetchone()
-        if not rule:
-            return "Rule not found", 404
-        new_status = "disabled" if rule["status"] == "active" else "active"
-        _snapshot_rule_version(conn, dict(rule))
-        conn.execute(
-            "UPDATE training_rule SET status=%s, version = version + 1, updated_at = NOW() WHERE id = %s",
-            (new_status, rule_id),
-        )
-    flash(f"Rule {new_status}.", "success")
-    return redirect(url_for("ai_training_rules"))
-
-
-@app.route("/ai-training/rules/<int:rule_id>/delete", methods=["POST"])
-def ai_training_rule_delete(rule_id):
-    if not _require_admin():
-        abort(403)
-    with db_conn() as conn:
-        ensure_training_tables(conn)
-        conn.execute("DELETE FROM training_rule WHERE id = %s", (rule_id,))
-    flash("Rule deleted.", "success")
-    return redirect(url_for("ai_training_rules"))
-
-
-@app.route("/ai-training/rules/<int:rule_id>/history")
-def ai_training_rule_history(rule_id):
-    with db_conn() as conn:
-        ensure_training_tables(conn)
-        rule = conn.execute("SELECT * FROM training_rule WHERE id = %s", (rule_id,)).fetchone()
-        if not rule:
-            return "Rule not found", 404
-        versions = conn.execute(
-            "SELECT * FROM training_rule_version WHERE rule_id = %s ORDER BY version DESC",
-            (rule_id,),
-        ).fetchall()
-    return render_template("training_rule_history.html", rule=dict(rule), versions=list(versions))
-
-
-@app.route("/ai-training/rules/<int:rule_id>/restore/<int:version_id>", methods=["POST"])
-def ai_training_rule_restore(rule_id, version_id):
-    if not _require_admin():
-        abort(403)
-    with db_conn() as conn:
-        ensure_training_tables(conn)
-        rule = conn.execute("SELECT * FROM training_rule WHERE id = %s", (rule_id,)).fetchone()
-        version = conn.execute(
-            "SELECT * FROM training_rule_version WHERE id = %s AND rule_id = %s",
-            (version_id, rule_id),
-        ).fetchone()
-        if not rule or not version:
-            return "Not found", 404
-        _snapshot_rule_version(conn, dict(rule))
-        conn.execute(
-            """
-            UPDATE training_rule SET category=%s, rule_text=%s, priority=%s, status=%s,
-                version = version + 1, updated_at = NOW()
-            WHERE id = %s
-            """,
-            (version["category"], version["rule_text"], version["priority"], version["status"], rule_id),
-        )
-    flash(f"Restored version {version['version']}.", "success")
-    return redirect(url_for("ai_training_rule_history", rule_id=rule_id))
-
-
-@app.route("/ai-training/test", methods=["GET", "POST"])
-def ai_training_test():
-    result = None
-    prompt_preview = ""
-    if request.method == "POST":
-        uploaded = request.files.get("resume_file")
-        if not uploaded or not uploaded.filename:
-            flash("Please choose a resume file.", "error")
-            return redirect(url_for("ai_training_test"))
-        if not allowed_file(uploaded.filename):
-            flash("Please upload a PDF or DOCX file only.", "error")
-            return redirect(url_for("ai_training_test"))
-        name = secure_filename(uploaded.filename)
-        ext = name.rsplit(".", 1)[1].lower()
-        temp_path = UPLOAD_FOLDER / f"tmp-training-test.{ext}"
-        uploaded.save(str(temp_path))
-        try:
-            result, _parser_used = parse_resume_with_llm_text(temp_path)
-        except Exception as e:
-            flash(f"Parsing failed: {e}", "error")
-            result = None
-        finally:
-            temp_path.unlink(missing_ok=True)
-        prompt_preview, _ids = _active_training_rules_block()
-        if not prompt_preview:
-            prompt_preview = "(no active rules — base parsing prompts only)"
-    return render_template("training_test.html", result=result, prompt_preview=prompt_preview,
-                           categories=TRAINING_CATEGORIES)
-
-
-@app.route("/ai-training/analytics")
-def ai_training_analytics():
-    with db_conn() as conn:
-        ensure_training_tables(conn)
-        total = conn.execute("SELECT COUNT(*) AS c FROM training_rule").fetchone()["c"]
-        active = conn.execute("SELECT COUNT(*) AS c FROM training_rule WHERE status='active'").fetchone()["c"]
-        most_used = conn.execute(
-            """
-            SELECT r.id, r.category, r.rule_text, u.usage_count, u.last_used_at
-            FROM training_rule_usage u JOIN training_rule r ON r.id = u.rule_id
-            ORDER BY u.usage_count DESC LIMIT 10
-            """
-        ).fetchall()
-        total_parses = conn.execute("SELECT COUNT(*) AS c FROM training_parse_log").fetchone()["c"]
-        failed_parses = conn.execute(
-            "SELECT COUNT(*) AS c FROM training_parse_log WHERE success = FALSE"
-        ).fetchone()["c"]
-        recent_failures = conn.execute(
-            "SELECT * FROM training_parse_log WHERE success = FALSE ORDER BY created_at DESC LIMIT 10"
-        ).fetchall()
-    success_rate = round(100 * (total_parses - failed_parses) / total_parses, 1) if total_parses else None
-    return render_template(
-        "training_analytics.html",
-        total=total, active=active, disabled=total - active,
-        most_used=list(most_used), total_parses=total_parses,
-        failed_parses=failed_parses, recent_failures=list(recent_failures),
-        success_rate=success_rate,
-    )
-
-
-@app.route("/ai-training/logs")
-def ai_training_logs():
-    try:
-        page = max(int(request.args.get("page", 1) or 1), 1)
-    except ValueError:
-        page = 1
-    per_page = 25
-    with db_conn() as conn:
-        ensure_training_tables(conn)
-        total = conn.execute("SELECT COUNT(*) AS c FROM training_parse_log").fetchone()["c"]
-        logs = conn.execute(
-            "SELECT * FROM training_parse_log ORDER BY id DESC LIMIT %s OFFSET %s",
-            (per_page, (page - 1) * per_page),
-        ).fetchall()
-    total_pages = max((total + per_page - 1) // per_page, 1)
-    return render_template("training_logs.html", logs=list(logs), page=page, total_pages=total_pages)
 
 
 if __name__ == "__main__":

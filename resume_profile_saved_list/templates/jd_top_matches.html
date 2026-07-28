@@ -7,7 +7,10 @@
         <p class="eyebrow">Top Matching Resumes</p>
         <h1>{{ jd.title }}</h1>
         <p class="muted">Scored {{ total_scored }} stored resume(s) against this JD — showing the top {{ top_matches | length }}.
-            <span class="jdm-cat-badge {% if jd.category == 'Validation Roles' %}jdm-cat-val{% else %}jdm-cat-it{% endif %}" style="margin-left:8px;">
+            <span class="jdm-cat-badge
+                {%- if jd.category == 'Validation Roles' %} jdm-cat-val
+                {%- elif jd.category in ('IT Roles', 'IT Technology') %} jdm-cat-it
+                {%- else %} jdm-cat-general{% endif %}" style="margin-left:8px;">
                 {{ jd.category }}
             </span>
         </p>
@@ -28,10 +31,7 @@
     {% set result = entry.score %}
     {% set holistic = entry.holistic %}
     {% set verdict = holistic.verdict %}
-    {% set stroke_color = '#15803d' if 'strong' in verdict.lower()
-                     else '#1d4ed8' if 'good' in verdict.lower()
-                     else '#d97706' if 'partial' in verdict.lower()
-                     else '#dc2626' %}
+    {% set tier = verdict | verdict_tier %}
     {% set shown_matched = result.matched_skills[:10] %}
     {% set shown_missing = result.missing_skills[:10] %}
     <div class="card">
@@ -54,9 +54,9 @@
                 {% endif %}
             </div>
 
-            <div style="text-align:center; min-width:160px;">
-                <div class="cmr-level-badge" style="font-size:0.8rem; background:{{ stroke_color }}1a; color:{{ stroke_color }};">{{ holistic.tier_label }}</div>
-                <div style="font-size:0.78rem; font-weight:700; color:{{ stroke_color }}; margin-top:5px;">{{ holistic.recommendation }}</div>
+            <div class="verdict verdict-{{ tier }}" style="text-align:center; min-width:160px;">
+                <div class="cmr-level-badge verdict-badge" style="font-size:0.8rem;">{{ holistic.tier_label }}</div>
+                <div class="verdict-text" style="font-size:0.78rem; font-weight:700; margin-top:5px;">{{ holistic.recommendation }}</div>
             </div>
 
             <div style="display:flex; gap:8px; flex-wrap:wrap;">

@@ -8,7 +8,10 @@
         <p class="eyebrow">Resume vs JD Match</p>
         <h1>{{ resume.full_name }}</h1>
         <p class="muted">Compared against: <strong>{{ jd.title }}</strong>
-            <span class="jdm-cat-badge {% if jd.category == 'Validation Roles' %}jdm-cat-val{% else %}jdm-cat-it{% endif %}" style="margin-left:8px;">
+            <span class="jdm-cat-badge
+                {%- if jd.category == 'Validation Roles' %} jdm-cat-val
+                {%- elif jd.category in ('IT Roles', 'IT Technology') %} jdm-cat-it
+                {%- else %} jdm-cat-general{% endif %}" style="margin-left:8px;">
                 {{ jd.category }}
             </span>
         </p>
@@ -44,12 +47,12 @@
 
         <!-- Fit verdict — qualitative only, no percentage/score number -->
         <div class="card cmr-score-card">
-            <div class="cmr-level-badge cmr-level-blue" id="cmr-level-badge" style="font-size:1rem; padding:10px 18px;">
+            <div class="cmr-level-badge cmr-level-blue" id="cmr-level-badge" role="status" aria-live="polite" style="font-size:1rem; padding:10px 18px;">
                 Estimating fit&hellip;
             </div>
             <p id="cmr-recommendation" style="margin:8px 0 0; font-size:0.88rem; font-weight:700; text-align:center; min-height:1.3em;"></p>
-            <p id="cmr-score-tag" style="margin:6px 0 0; font-size:0.72rem; color:#9ca3af; text-align:center;">
-                <span class="spinner" style="width:9px; height:9px; border:2px solid rgba(109,40,217,0.25); border-top-color:#6d28d9; border-radius:50%; display:inline-block; animation:spin 0.8s linear infinite; vertical-align:middle; margin-right:5px;"></span>
+            <p id="cmr-score-tag" class="is-loading" style="margin:8px 0 0; font-size:0.72rem; justify-content:center;">
+                <span class="spinner-dot sm" aria-hidden="true"></span>
                 comparing full JD against full resume&hellip;
             </p>
 
@@ -90,19 +93,19 @@
             {% endif %}
         </div>
 
-        <!-- AI Holistic Assessment — loaded async; becomes the primary verdict badge above
-             once it resolves. Label text intentionally left as-is per prior direction. -->
+        <!-- AI Holistic Assessment — loaded async; also fills the verdict badge
+             at the top of the page once it resolves. -->
         <div class="card" id="ai-holistic-card">
             <div class="section-header" style="margin-bottom:12px;">
-                <div class="section-icon" style="background:#ede9fe; color:#6d28d9;">&#129302;</div>
-                <h2 style="font-size:1rem;">AI Holistic Assessment (primary score)</h2>
+                <div class="section-icon" style="background:#ede9fe; color:#6d28d9;" aria-hidden="true">&#129302;</div>
+                <h2 style="font-size:1rem;">AI Holistic Assessment</h2>
             </div>
             <p class="muted" style="font-size:0.82rem; margin-bottom:12px;">
-                This drives the score gauge above once it finishes — it weighs transferable/adjacent skills, not just exact keyword overlap.
+                Weighs transferable and adjacent skills across the whole resume and JD, not just exact keyword overlap.
             </p>
-            <div id="ai-holistic-body">
-                <div style="display:flex; align-items:center; gap:10px; color:#6b7280; font-size:0.9rem;">
-                    <span class="spinner" style="width:16px; height:16px; border:2px solid #e5e7eb; border-top-color:#6d28d9; border-radius:50%; display:inline-block; animation:spin 0.8s linear infinite;"></span>
+            <div id="ai-holistic-body" role="status" aria-live="polite">
+                <div class="is-loading">
+                    <span class="spinner-dot" aria-hidden="true"></span>
                     Analyzing holistic fit&hellip; (can take about a minute on local hardware)
                 </div>
             </div>
@@ -194,9 +197,6 @@
 
 </div>
 
-<style>
-@keyframes spin { to { transform: rotate(360deg); } }
-</style>
 <script>
 (function () {
     var body = document.getElementById('ai-holistic-body');
@@ -207,89 +207,113 @@
         });
     }
     var url = "{{ url_for('compare_ai_assessment', resume_id=resume.id, jd_id=jd.id) }}";
+    var TIMEOUT_MS = 90000;
 
-    // Colors keyed to the verdict's own wording, not a raw score — no percentage
-    // is ever surfaced here.
-    function verdictColor(verdict) {
-        var v = (verdict || '').toLowerCase();
-        if (v.indexOf('strong') !== -1) return '#15803d';
-        if (v.indexOf('good') !== -1) return '#1d4ed8';
-        if (v.indexOf('partial') !== -1) return '#d97706';
-        return '#dc2626';
-    }
+    // Keyword-scan result (server-rendered) — the fallback if the AI judge is
+    // unavailable or times out, so the verdict badge always resolves.
+    var kwLevel = {{ result.match_level | tojson }};
 
-    // Promotes the AI verdict to the primary badge at the top of the page once
-    // it resolves — the keyword-based checklist below stays visible as supporting detail.
-    function promoteToPrimary(tierLabel, recommendation, color) {
-        var levelBadge = document.getElementById('cmr-level-badge');
-        var recEl = document.getElementById('cmr-recommendation');
-        var scoreTag = document.getElementById('cmr-score-tag');
+    var levelBadge = document.getElementById('cmr-level-badge');
+    var recEl = document.getElementById('cmr-recommendation');
+    var scoreTag = document.getElementById('cmr-score-tag');
+
+    // Verdict colours come from the shared .verdict-* classes (verdict.js /
+    // styles.css) — no colour logic is duplicated here.
+    function badgeClass(tier) { return 'cmr-level-badge verdict-badge verdict verdict-' + tier; }
+
+    function promoteToPrimary(tier, tierLabel, recommendation, sourceNote) {
         if (levelBadge) {
+            levelBadge.className = badgeClass(tier);
             levelBadge.textContent = tierLabel || 'Fit assessed';
-            levelBadge.style.background = color + '1a';
-            levelBadge.style.color = color;
         }
-        if (recEl) {
-            recEl.textContent = recommendation || '';
-            recEl.style.color = color;
-        }
-        if (scoreTag) {
-            scoreTag.innerHTML = '&#129302; AI holistic assessment (primary)';
-            scoreTag.style.color = color;
-        }
-    }
-    function markAiUnavailable() {
-        var scoreTag = document.getElementById('cmr-score-tag');
-        if (scoreTag) scoreTag.innerHTML = 'AI assessment unavailable &mdash; showing keyword-based checklist.';
+        if (recEl) { recEl.className = 'verdict verdict-' + tier + ' verdict-text'; recEl.textContent = recommendation || ''; }
+        if (scoreTag) { scoreTag.className = 'ai-note'; scoreTag.innerHTML = sourceNote; }
     }
 
-    fetch(url)
+    // Falls the badge back to the keyword-scan verdict when the AI judge can't
+    // be reached — so a slow/offline local LLM never leaves the badge spinning.
+    function fallbackToKeyword(note) {
+        var tier = window.verdictTier ? window.verdictTier(kwLevel) : 'good';
+        var rec = kwLevel && kwLevel.toLowerCase().indexOf('no data') === -1
+            ? 'Keyword-based estimate — ' + esc(kwLevel) + ' overlap' : 'Keyword-based estimate';
+        promoteToPrimary(tier, kwLevel || 'Estimate', rec, note);
+    }
+
+    function render(d) {
+        var tier = window.verdictTier ? window.verdictTier(d.verdict) : 'good';
+        promoteToPrimary(tier, d.tier_label, d.recommendation, '&#129302; AI holistic assessment');
+        body.className = 'verdict verdict-' + tier;
+
+        var html = '<div class="ai-result-verdict">' + esc(d.verdict) + '</div>'
+            + '<div class="ai-result-rec">' + esc(d.recommendation || '') + '</div>';
+
+        // Labelled metrics — each number now says what it measures.
+        if (d.keyword_match_percentage != null || d.llm_fit_percentage != null || d.confidence_label) {
+            html += '<div class="ai-metrics">';
+            if (d.keyword_match_percentage != null) {
+                html += '<div class="ai-metric"><span class="ai-metric-val">' + esc(d.keyword_match_percentage) + '%</span>'
+                    + '<span class="ai-metric-label">Keyword overlap</span>'
+                    + '<span class="ai-metric-hint">Share of JD skill / requirement items found verbatim in the resume.</span></div>';
+            }
+            if (d.llm_fit_percentage != null) {
+                html += '<div class="ai-metric"><span class="ai-metric-val">' + esc(d.llm_fit_percentage) + '%</span>'
+                    + '<span class="ai-metric-label">AI judge</span>'
+                    + '<span class="ai-metric-hint">The AI model&#39;s holistic fit estimate.</span></div>';
+            }
+            if (d.confidence_label) {
+                // Confidence has its own High/Medium/Low semantics — reuse the
+                // shared tier colours (High=strong, Medium=partial, Low=low).
+                var confTier = {High: 'strong', Medium: 'partial', Low: 'low'}[d.confidence_label] || 'good';
+                var confReason = d.confidence_reason
+                    || (d.confidence === 25 ? 'AI judge unavailable — keyword estimate only.' : '');
+                html += '<div class="ai-metric"><span class="ai-metric-val verdict verdict-' + confTier + ' verdict-text">'
+                    + esc(d.confidence_label) + (d.confidence != null ? ' (' + esc(d.confidence) + '%)' : '') + '</span>'
+                    + '<span class="ai-metric-label">Confidence</span>'
+                    + '<span class="ai-metric-hint">' + esc(confReason) + '</span></div>';
+            }
+            html += '</div>';
+        }
+
+        html += '<p class="ai-result-rationale">' + esc(d.rationale) + '</p>';
+
+        if (d.strengths && d.strengths.length) {
+            html += '<p class="ai-result-heading good">&#10003; Shared Focus Areas</p><ul class="ai-result-list">'
+                + d.strengths.map(function (s) { return '<li>' + esc(s) + '</li>'; }).join('') + '</ul>';
+        }
+        if (d.concerns) {
+            html += '<p class="ai-result-heading warn">&#9888; Concern for this JD</p>'
+                + '<p class="ai-result-rationale">' + esc(d.concerns) + '</p>';
+        }
+        if (d.suggested_roles && d.suggested_roles.length) {
+            html += '<p class="ai-result-heading info">&#128161; Better-fit roles for this resume</p><div class="role-pill-row">'
+                + d.suggested_roles.map(function (r) { return '<span class="role-pill">' + esc(r) + '</span>'; }).join('')
+                + '</div>';
+        }
+        body.innerHTML = html;
+    }
+
+    var controller = new AbortController();
+    var timedOut = false;
+    var timer = setTimeout(function () { timedOut = true; controller.abort(); }, TIMEOUT_MS);
+
+    fetch(url, {signal: controller.signal})
         .then(function (r) { return r.json().then(function (data) { return {ok: r.ok, data: data}; }); })
         .then(function (res) {
+            clearTimeout(timer);
             if (!res.ok || res.data.error) {
-                body.innerHTML = '<p class="muted" style="font-size:0.85rem;">'
-                    + esc(res.data && res.data.error ? res.data.error : 'AI assessment unavailable right now.')
-                    + '</p>';
-                markAiUnavailable();
+                body.innerHTML = '<p class="ai-note">' + esc(res.data && res.data.error ? res.data.error : 'AI assessment unavailable right now.') + '</p>';
+                fallbackToKeyword('AI assessment unavailable &mdash; showing keyword-based checklist.');
                 return;
             }
-            var d = res.data;
-            var color = verdictColor(d.verdict);
-            promoteToPrimary(d.tier_label, d.recommendation, color);
-            var html =
-                '<div style="font-weight:700; font-size:1.05rem; color:' + color + '; margin-bottom:4px;">'
-                + esc(d.verdict) + '</div>'
-                + '<div style="font-weight:700; font-size:0.9rem; color:' + color + '; margin-bottom:8px;">'
-                + esc(d.recommendation || '') + '</div>'
-                + '<p style="font-size:0.87rem; line-height:1.6; color:#374151;">' + esc(d.rationale) + '</p>';
-
-            if (d.strengths && d.strengths.length) {
-                html += '<p style="font-size:0.78rem; font-weight:700; color:#15803d; text-transform:uppercase; '
-                    + 'letter-spacing:.04em; margin:14px 0 6px;">✓ Shared Focus Areas</p><ul style="margin:0 0 10px 18px; padding:0; '
-                    + 'font-size:0.85rem; line-height:1.6; color:#374151;">'
-                    + d.strengths.map(function (s) { return '<li>' + esc(s) + '</li>'; }).join('')
-                    + '</ul>';
-            }
-            if (d.concerns) {
-                html += '<p style="font-size:0.78rem; font-weight:700; color:#b45309; text-transform:uppercase; '
-                    + 'letter-spacing:.04em; margin:14px 0 6px;">⚠ Concern for this JD</p>'
-                    + '<p style="font-size:0.85rem; line-height:1.6; color:#374151;">' + esc(d.concerns) + '</p>';
-            }
-            if (d.suggested_roles && d.suggested_roles.length) {
-                html += '<p style="font-size:0.78rem; font-weight:700; color:#4f46e5; text-transform:uppercase; '
-                    + 'letter-spacing:.04em; margin:14px 0 6px;">💡 Better-fit roles for this resume</p>'
-                    + '<div style="display:flex; flex-wrap:wrap; gap:6px;">'
-                    + d.suggested_roles.map(function (r) {
-                        return '<span style="background:#eef2ff; color:#3730a3; border-radius:999px; padding:4px 10px; '
-                            + 'font-size:0.78rem; font-weight:600;">' + esc(r) + '</span>';
-                    }).join('')
-                    + '</div>';
-            }
-            body.innerHTML = html;
+            render(res.data);
         })
         .catch(function () {
-            body.innerHTML = '<p class="muted" style="font-size:0.85rem;">AI assessment unavailable right now.</p>';
-            markAiUnavailable();
+            clearTimeout(timer);
+            var msg = timedOut
+                ? 'AI assessment timed out &mdash; showing keyword-based checklist.'
+                : 'AI assessment unavailable right now.';
+            body.innerHTML = '<p class="ai-note warn">' + msg + '</p>';
+            fallbackToKeyword(msg);
         });
 })();
 </script>
