@@ -42,6 +42,15 @@
         </select>
     </div>
 
+    <div>
+        <label for="position_status">Position Status</label>
+        <select id="position_status" name="position_status" class="form-select">
+            {% for s in statuses %}
+            <option value="{{ s }}" {% if jd and jd.position_status == s %}selected{% elif not jd and s == default_status %}selected{% endif %}>{{ s }}</option>
+            {% endfor %}
+        </select>
+    </div>
+
     <div class="full">
         <label for="responsibilities">Responsibilities</label>
         <textarea id="responsibilities" name="responsibilities" rows="7"

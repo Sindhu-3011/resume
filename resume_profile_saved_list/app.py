@@ -6102,7 +6102,13 @@ def profile_detail(resume_id):
             return "Profile not found", 404
 
         # Calculate top 3 matching JDs
-        jds = conn.execute("SELECT * FROM job_description ORDER BY created_at DESC").fetchall()
+        # Resume matching only ever considers Open positions — Fulfilled/On
+        # Hold/Closed JDs are excluded before scoring, not after, so they can
+        # never occupy one of the top-3 slots.
+        jds = conn.execute(
+            "SELECT * FROM job_description WHERE position_status = %s ORDER BY created_at DESC",
+            (DEFAULT_POSITION_STATUS,),
+        ).fetchall()
         resume_dict = dict(resume)
 
         matches = []
@@ -6138,7 +6144,13 @@ def export_top_matches(resume_id):
             return jsonify({"error": "Profile not found"}), 404
 
         # Calculate top 3 matching JDs
-        jds = conn.execute("SELECT * FROM job_description ORDER BY created_at DESC").fetchall()
+        # Resume matching only ever considers Open positions — Fulfilled/On
+        # Hold/Closed JDs are excluded before scoring, not after, so they can
+        # never occupy one of the top-3 slots.
+        jds = conn.execute(
+            "SELECT * FROM job_description WHERE position_status = %s ORDER BY created_at DESC",
+            (DEFAULT_POSITION_STATUS,),
+        ).fetchall()
         resume_dict = dict(resume)
 
         matches = []
@@ -6508,7 +6520,13 @@ def export_top_matches_pdf(resume_id):
         resume = conn.execute("SELECT * FROM resume WHERE id = %s", (resume_id,)).fetchone()
         if not resume:
             return "Profile not found", 404
-        jds = conn.execute("SELECT * FROM job_description ORDER BY created_at DESC").fetchall()
+        # Resume matching only ever considers Open positions — Fulfilled/On
+        # Hold/Closed JDs are excluded before scoring, not after, so they can
+        # never occupy one of the top-3 slots.
+        jds = conn.execute(
+            "SELECT * FROM job_description WHERE position_status = %s ORDER BY created_at DESC",
+            (DEFAULT_POSITION_STATUS,),
+        ).fetchall()
 
     resume_dict = dict(resume)
 
@@ -6814,7 +6832,13 @@ def export_rich_profile_pdf(resume_id):
         resume = conn.execute("SELECT * FROM resume WHERE id = %s", (resume_id,)).fetchone()
         if not resume:
             return "Profile not found", 404
-        jds = conn.execute("SELECT * FROM job_description ORDER BY created_at DESC").fetchall()
+        # Resume matching only ever considers Open positions — Fulfilled/On
+        # Hold/Closed JDs are excluded before scoring, not after, so they can
+        # never occupy one of the top-3 slots.
+        jds = conn.execute(
+            "SELECT * FROM job_description WHERE position_status = %s ORDER BY created_at DESC",
+            (DEFAULT_POSITION_STATUS,),
+        ).fetchall()
 
     resume_dict = dict(resume)
     matches = []
@@ -8490,10 +8514,40 @@ def ensure_jd_table(conn):
             skills           TEXT DEFAULT '',
             keywords         TEXT DEFAULT '',
             jd_file          VARCHAR(500),
+            position_status  VARCHAR(20) DEFAULT 'Open',
             created_at       TIMESTAMP DEFAULT NOW(),
             updated_at       TIMESTAMP DEFAULT NOW()
         )
     """)
+
+
+# Single source of truth for the position-status enum — shared by JD Management
+# and Requirement Management so the two never drift apart (see REQUIREMENT_STATUSES
+# below, which reuses this list instead of defining its own).
+POSITION_STATUSES = ["Open", "Fulfilled", "On Hold", "Closed"]
+DEFAULT_POSITION_STATUS = "Open"
+
+
+def _ensure_jd_position_status_col():
+    """Add position_status to job_description for DBs created before this
+    column existed, and backfill any NULLs to the default — the ADD COLUMN
+    DEFAULT already back-fills existing rows, but a NULL can still slip in via
+    an explicit NULL insert, so this is a belt-and-braces pass."""
+    try:
+        with db_conn() as conn:
+            conn.execute(
+                "ALTER TABLE job_description ADD COLUMN IF NOT EXISTS "
+                "position_status VARCHAR(20) DEFAULT 'Open'"
+            )
+            conn.execute(
+                "UPDATE job_description SET position_status = 'Open' "
+                "WHERE position_status IS NULL"
+            )
+    except Exception:
+        pass
+
+
+_ensure_jd_position_status_col()
 
 
 PREDEFINED_JDS = [
@@ -9422,7 +9476,13 @@ def _llm_judge_match(resume_dict, jd_dict, keyword_result):
     )
 
     try:
-        raw = _ollama_chat(prompt, as_json=True, num_predict=700, num_ctx=8192)
+        # 700 output tokens was far more headroom than this JSON schema ever
+        # needs (a short rationale + a handful of short phrases realistically
+        # tops out well under 400) — on CPU-only Ollama, generation time scales
+        # with num_predict, and this is called 3x sequentially per profile
+        # view, so trimming the cap cuts real wall-clock time with no change
+        # to what's asked of the model.
+        raw = _ollama_chat(prompt, as_json=True, num_predict=400, num_ctx=8192)
     except Exception as e:
         logger.warning(f"LLM judge call failed: {e}", exc_info=True)
         return None
@@ -9511,14 +9571,23 @@ def _hybrid_match(resume_dict, jd_dict):
 
 @app.route("/jd-management")
 def jd_management():
+    status_filter = (request.args.get("status") or "").strip()
     with db_conn() as conn:
         ensure_jd_table(conn)
         seed_jds(conn)
-        jds = conn.execute(
-            "SELECT id, title, role, category, created_at"
-            " FROM job_description ORDER BY category, title"
-        ).fetchall()
-    return render_template("jd_management.html", jds=list(jds))
+        if status_filter in POSITION_STATUSES:
+            jds = conn.execute(
+                "SELECT id, title, role, category, position_status, created_at"
+                " FROM job_description WHERE position_status = %s ORDER BY category, title",
+                (status_filter,),
+            ).fetchall()
+        else:
+            jds = conn.execute(
+                "SELECT id, title, role, category, position_status, created_at"
+                " FROM job_description ORDER BY category, title"
+            ).fetchall()
+    return render_template("jd_management.html", jds=list(jds),
+                           statuses=POSITION_STATUSES, status_filter=status_filter)
 
 
 @app.route("/jd/add", methods=["GET", "POST"])
@@ -9527,6 +9596,9 @@ def jd_add():
         import time as _t
         data = {k: request.form.get(k, "").strip() for k in
                 ["title", "role", "category", "responsibilities", "requirements", "skills", "keywords"]}
+        data["position_status"] = request.form.get("position_status", "").strip() or DEFAULT_POSITION_STATUS
+        if data["position_status"] not in POSITION_STATUSES:
+            data["position_status"] = DEFAULT_POSITION_STATUS
         data["jd_file"] = None
         uploaded = request.files.get("jd_file")
         if uploaded and uploaded.filename and allowed_file(uploaded.filename):
@@ -9548,16 +9620,17 @@ def jd_add():
             conn.execute(
                 """
                 INSERT INTO job_description
-                    (title, role, category, responsibilities, requirements, skills, keywords, jd_file)
+                    (title, role, category, responsibilities, requirements, skills, keywords, jd_file, position_status)
                 VALUES
                     (%(title)s, %(role)s, %(category)s, %(responsibilities)s,
-                     %(requirements)s, %(skills)s, %(keywords)s, %(jd_file)s)
+                     %(requirements)s, %(skills)s, %(keywords)s, %(jd_file)s, %(position_status)s)
                 """,
                 data,
             )
         flash(f"Job Description '{data['title']}' added.", "success")
         return redirect(url_for("jd_management"))
-    return render_template("jd_form.html", jd=None, all_roles=ALL_JD_ROLES)
+    return render_template("jd_form.html", jd=None, all_roles=ALL_JD_ROLES,
+                           statuses=POSITION_STATUSES, default_status=DEFAULT_POSITION_STATUS)
 
 
 @app.route("/jd/<int:jd_id>")
@@ -9610,12 +9683,14 @@ def download_jd_pdf(jd_id):
     story.append(Paragraph(jd_dict.get('title', 'Job Description'), title_style))
 
     # Category & Role
-    if jd_dict.get('category') or jd_dict.get('role'):
+    if jd_dict.get('category') or jd_dict.get('role') or jd_dict.get('position_status'):
         meta_parts = []
         if jd_dict.get('category'):
             meta_parts.append(f"Category: {jd_dict['category']}")
         if jd_dict.get('role'):
             meta_parts.append(f"Role: {jd_dict['role']}")
+        if jd_dict.get('position_status'):
+            meta_parts.append(f"Position Status: {jd_dict['position_status']}")
         meta_style = ParagraphStyle(
             'Meta',
             parent=styles['Normal'],
@@ -9718,13 +9793,17 @@ def jd_edit(jd_id):
         if request.method == "POST":
             data = {k: request.form.get(k, "").strip() for k in
                     ["title", "role", "category", "responsibilities", "requirements", "skills", "keywords"]}
+            data["position_status"] = request.form.get("position_status", "").strip() or DEFAULT_POSITION_STATUS
+            if data["position_status"] not in POSITION_STATUSES:
+                data["position_status"] = DEFAULT_POSITION_STATUS
             data["id"] = jd_id
             conn.execute(
                 """
                 UPDATE job_description SET
                     title=%(title)s, role=%(role)s, category=%(category)s,
                     responsibilities=%(responsibilities)s, requirements=%(requirements)s,
-                    skills=%(skills)s, keywords=%(keywords)s, updated_at=NOW()
+                    skills=%(skills)s, keywords=%(keywords)s, position_status=%(position_status)s,
+                    updated_at=NOW()
                 WHERE id=%(id)s
                 """,
                 data,
@@ -9736,7 +9815,8 @@ def jd_edit(jd_id):
         ).fetchone()
         if not jd:
             return "Job Description not found", 404
-    return render_template("jd_form.html", jd=dict(jd), all_roles=ALL_JD_ROLES)
+    return render_template("jd_form.html", jd=dict(jd), all_roles=ALL_JD_ROLES,
+                           statuses=POSITION_STATUSES, default_status=DEFAULT_POSITION_STATUS)
 
 
 @app.route("/jd/<int:jd_id>/delete", methods=["POST"])
@@ -10095,7 +10175,24 @@ _migrate_jd_category_it_roles()
 
 DEPARTMENTS = ["IT", "QA", "Finance", "HR", "Sales", "Marketing", "Operations", "Other"]
 
-REQUIREMENT_STATUSES = ["Open", "On Hold", "Filled", "Closed"]
+# Requirement Management reuses the same Position Status enum as JD Management
+# (POSITION_STATUSES, defined alongside job_description) rather than keeping a
+# second, drift-prone copy of the same four values.
+REQUIREMENT_STATUSES = POSITION_STATUSES
+
+
+def _migrate_requirement_status_filled_to_fulfilled():
+    """One-time rename: the requirement.status enum used to say 'Filled'
+    where it now says 'Fulfilled' (to match JD Management's Position Status
+    wording) — existing rows must be updated or they'd show a value that no
+    longer appears in the dropdown."""
+    try:
+        with db_conn() as conn:
+            conn.execute(
+                "UPDATE requirement SET status = 'Fulfilled' WHERE status = 'Filled'"
+            )
+    except Exception:
+        pass
 
 
 def ensure_requirement_table(conn):
@@ -10117,6 +10214,9 @@ def ensure_requirement_table(conn):
         )
         """
     )
+
+
+_migrate_requirement_status_filled_to_fulfilled()
 
 
 def ensure_interview_schedule_table(conn):

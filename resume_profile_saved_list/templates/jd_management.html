@@ -23,6 +23,15 @@
     {% endfor %}
 </div>
 
+<!-- Position Status filter tabs -->
+<div class="jdm-tabs" id="jdm-status-tabs" style="margin-top:8px;">
+    <button class="jdm-tab active" data-status="all">All Statuses</button>
+    {% for s in statuses %}
+        {% set status_count = jds | selectattr('position_status', 'equalto', s) | list | length %}
+        <button class="jdm-tab" data-status="{{ s }}">{{ s }} <span class="jdm-tab-badge">{{ status_count }}</span></button>
+    {% endfor %}
+</div>
+
 {% if jds %}
 <div class="card" style="padding:0; overflow:hidden;">
     <table class="jdm-table" id="jdm-table">
@@ -32,13 +41,14 @@
                 <th>Job Title</th>
                 <th>Role</th>
                 <th>Category</th>
+                <th>Position Status</th>
                 <th>Added On</th>
                 <th>Actions</th>
             </tr>
         </thead>
         <tbody>
         {% for jd in jds %}
-            <tr data-cat="{{ jd.category }}">
+            <tr data-cat="{{ jd.category }}" data-status="{{ jd.position_status or 'Open' }}">
                 <td class="jdm-td-num">{{ loop.index }}</td>
                 <td>
                     <a class="jdm-link" href="{{ url_for('jd_detail', jd_id=jd.id) }}">{{ jd.title }}</a>
@@ -49,6 +59,12 @@
                 <td>
                     <span class="jdm-cat-badge {% if jd.category == 'Validation Roles' %}jdm-cat-val{% else %}jdm-cat-it{% endif %}">
                         {{ jd.category }}
+                    </span>
+                </td>
+                <td>
+                    {% set _status = jd.position_status or 'Open' %}
+                    <span class="jdm-cat-badge {{ {'Open': 'jdm-status-open', 'Fulfilled': 'jdm-status-fulfilled', 'On Hold': 'jdm-status-hold', 'Closed': 'jdm-status-closed'}.get(_status, '') }}">
+                        {{ _status }}
                     </span>
                 </td>
                 <td class="text-muted">
@@ -78,16 +94,35 @@
 
 <script>
 (function () {
-    var tabs  = document.querySelectorAll('.jdm-tab');
-    var rows  = document.querySelectorAll('#jdm-table tbody tr');
-    tabs.forEach(function (tab) {
+    var catTabs    = document.querySelectorAll('#jdm-tabs .jdm-tab');
+    var statusTabs = document.querySelectorAll('#jdm-status-tabs .jdm-tab');
+    var rows       = document.querySelectorAll('#jdm-table tbody tr');
+    var activeCat    = 'all';
+    var activeStatus = 'all';
+
+    function applyFilters() {
+        rows.forEach(function (row) {
+            var matchesCat    = (activeCat === 'all' || row.dataset.cat === activeCat);
+            var matchesStatus = (activeStatus === 'all' || row.dataset.status === activeStatus);
+            row.style.display = (matchesCat && matchesStatus) ? '' : 'none';
+        });
+    }
+
+    catTabs.forEach(function (tab) {
         tab.addEventListener('click', function () {
-            tabs.forEach(function (t) { t.classList.remove('active'); });
+            catTabs.forEach(function (t) { t.classList.remove('active'); });
             tab.classList.add('active');
-            var cat = tab.dataset.cat;
-            rows.forEach(function (row) {
-                row.style.display = (cat === 'all' || row.dataset.cat === cat) ? '' : 'none';
-            });
+            activeCat = tab.dataset.cat;
+            applyFilters();
+        });
+    });
+
+    statusTabs.forEach(function (tab) {
+        tab.addEventListener('click', function () {
+            statusTabs.forEach(function (t) { t.classList.remove('active'); });
+            tab.classList.add('active');
+            activeStatus = tab.dataset.status;
+            applyFilters();
         });
     });
 })();

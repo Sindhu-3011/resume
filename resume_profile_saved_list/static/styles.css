@@ -874,6 +874,12 @@ select.field-error { border-color: var(--clr-danger) !important; box-shadow: 0 0
 .jdm-cat-val { background: #dbeafe; color: #1e40af; }
 .jdm-cat-it  { background: #d1fae5; color: #065f46; }
 
+/* Position Status badges — shared by JD Management and Requirement Management */
+.jdm-status-open      { background: #d1fae5; color: #065f46; }
+.jdm-status-fulfilled { background: #dbeafe; color: #1e40af; }
+.jdm-status-hold      { background: #fef3c7; color: #92400e; }
+.jdm-status-closed    { background: #fee2e2; color: #991b1b; }
+
 .jd-content-text { font-size: 1rem; line-height: 1.85; color: var(--tx-2); }
 .jd-skills-wrap { display: flex; flex-wrap: wrap; gap: 6px; }
 .jd-skill-tag { background: var(--surface-raised); color: var(--tx-2); border-radius: 6px; padding: 4px 11px; font-size: 1rem; font-weight: 500; border: 1px solid var(--border); }

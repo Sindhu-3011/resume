@@ -23,7 +23,7 @@
                 <th>Client</th>
                 <th>Division/Group</th>
                 <th># of Requirement</th>
-                <th>Status</th>
+                <th>Position Status</th>
                 <th># of Profiles Shared</th>
                 <th>Interviewed</th>
                 <th>Offered</th>
@@ -40,7 +40,7 @@
                 <td>{{ r.division or '—' }}</td>
                 <td>{{ r.num_requirement }}</td>
                 <td>
-                    <span class="jdm-cat-badge {% if r.status == 'Open' %}jdm-cat-it{% elif r.status == 'Filled' %}jdm-cat-val{% else %}{% endif %}">
+                    <span class="jdm-cat-badge {{ {'Open': 'jdm-status-open', 'Fulfilled': 'jdm-status-fulfilled', 'On Hold': 'jdm-status-hold', 'Closed': 'jdm-status-closed'}.get(r.status, '') }}">
                         {{ r.status }}
                     </span>
                 </td>

@@ -8,6 +8,8 @@
         <h1>{{ jd.title }}</h1>
         <div style="display:flex; gap:10px; margin-top:8px; flex-wrap:wrap;">
             <span class="jdm-cat-badge {% if jd.category == 'Validation Roles' %}jdm-cat-val{% else %}jdm-cat-it{% endif %}">{{ jd.category }}</span>
+            {% set _status = jd.position_status or 'Open' %}
+            <span class="jdm-cat-badge {{ {'Open': 'jdm-status-open', 'Fulfilled': 'jdm-status-fulfilled', 'On Hold': 'jdm-status-hold', 'Closed': 'jdm-status-closed'}.get(_status, '') }}">{{ _status }}</span>
             {% if jd.role %}<span class="role-badge">{{ jd.role }}</span>{% endif %}
             {% if jd.jd_file %}
             <a class="button secondary" style="padding:4px 12px; font-size:0.85rem;"

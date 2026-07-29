@@ -51,7 +51,7 @@
         <h2>Requirement Details</h2>
     </div>
     <div class="field-grid">
-        <div><label>Status</label><p>{{ requirement.status }}</p></div>
+        <div><label>Position Status</label><p>{{ requirement.status }}</p></div>
         <div><label>Added On</label><p>{{ requirement.created_at.strftime('%Y-%m-%d') if requirement.created_at else '—' }}</p></div>
         <div><label>Last Updated</label><p>{{ requirement.updated_at.strftime('%Y-%m-%d') if requirement.updated_at else '—' }}</p></div>
     </div>

@@ -44,7 +44,7 @@
     </div>
 
     <div>
-        <label for="status">Status</label>
+        <label for="status">Position Status</label>
         <select id="status" name="status" class="form-select">
             {% for s in statuses %}
             <option value="{{ s }}" {% if requirement and requirement.status == s %}selected{% elif not requirement and s == 'Open' %}selected{% endif %}>{{ s }}</option>
