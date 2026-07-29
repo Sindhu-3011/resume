@@ -219,6 +219,172 @@ def _two_column_pdf(path):
     _make_pdf(path, [tbl])
 
 
+def _summary_alias_pdf(path):
+    """Resume using 'EXECUTIVE SUMMARY' (not the far more common 'SUMMARY') plus a
+    separate later 'OBJECTIVE' heading. Exercises two things end-to-end through the
+    real AI-path pipeline: (1) 'EXECUTIVE SUMMARY' must be recognized as a summary
+    heading by the verbatim/_EXACT_HEADINGS table, not just the base SECTION_ALIASES
+    table; (2) its content must not be silently overwritten when the later OBJECTIVE
+    heading (same canonical section) is reached — both must be present."""
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.platypus import Paragraph
+    ss = getSampleStyleSheet()
+    h, n = ss["Heading2"], ss["BodyText"]
+    story = [
+        Paragraph("JORDAN LEE", ss["Title"]),
+        Paragraph("Quality Engineer", n),
+        Paragraph("EXECUTIVE SUMMARY", h),
+        Paragraph("Quality engineer with 9 years in medical device design control.", n),
+        Paragraph("SKILLS", h),
+        Paragraph("ISO 13485", n), Paragraph("CAPA", n), Paragraph("Risk Management", n),
+        Paragraph("OBJECTIVE", h),
+        Paragraph("Seeking a senior design control role in a growing organization.", n),
+        Paragraph("WORK EXPERIENCE", h),
+        Paragraph("Acme Devices, Quality Engineer, Jan 2018 - Present", n),
+        Paragraph("Led DHF remediation across the product portfolio.", n),
+    ]
+    _make_pdf(path, story)
+
+
+def _assert_summary_alias(parsed):
+    problems = []
+    summary = str(parsed.get("summary") or "")
+    if "9 years in medical device" not in summary:
+        problems.append("'EXECUTIVE SUMMARY' content missing — heading not recognized")
+    if "senior design control role" not in summary:
+        problems.append("later 'OBJECTIVE' content was not merged (overwrote EXECUTIVE SUMMARY instead)")
+    return problems
+
+
+def _edu_cgpa_tail_pdf(path):
+    """Education is the LAST section, and its final line is a bare CGPA value
+    with no '%' sign (e.g. "7.5)") — the "2a-pre-2" rescue (stray Skills content
+    stranded past Education) must recognize this as still-education content, not
+    an unmarked stray line to sweep into Skills. Real-world case: a resume whose
+    last Education line reads "...SRM Institute of Science & Technology (CGPA:
+    7.5)" split across two lines by the PDF layout, where "7.5)" alone doesn't
+    obviously look like education without a percent sign or degree keyword."""
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.platypus import Paragraph
+    ss = getSampleStyleSheet()
+    h, n = ss["Heading2"], ss["BodyText"]
+    story = [
+        Paragraph("TAYLOR MORGAN", ss["Title"]),
+        Paragraph("Senior Fund Accountant", n),
+        Paragraph("TECHNICAL SKILLS", h),
+        Paragraph("NAV Calculation & Validation", n),
+        Paragraph("Capital Calls & Investor Distributions", n),
+        Paragraph("SAP ERP & Tally", n),
+        Paragraph("EDUCATION", h),
+        Paragraph("Master of Business Administration - SRM Institute of Science & Technology", n),
+        Paragraph("(CGPA: 9.0) Bachelor of Commerce (General) - SRM Institute (CGPA:", n),
+        Paragraph("7.5)", n),
+    ]
+    _make_pdf(path, story)
+
+
+def _assert_edu_cgpa_tail(parsed):
+    problems = []
+    skills = str(parsed.get("skills") or "")
+    education = str(parsed.get("education") or "")
+    if "7.5" in skills:
+        problems.append("bare CGPA tail '7.5)' was wrongly swept from Education into Skills: %r" % skills)
+    if "7.5" not in education:
+        problems.append("bare CGPA tail '7.5)' was lost from Education entirely: %r" % education)
+    return problems
+
+
+def _roles_resp_table_pdf(path):
+    """A 'Project Details | Roles and Responsibilities' table (common in Indian
+    IT/validation CVs) linearizes as two adjacent heading-like lines with an
+    empty span between them, then everything after — real-world case: Satheesh
+    Kumar's resume. "Roles and Responsibilities" maps to "experience" by
+    default (it's also a legitimate per-job Experience sub-heading elsewhere),
+    but here it must route to "projects" since it immediately follows a
+    "Project Details"-family heading — otherwise the entire project table gets
+    swallowed into Experience and Projects stays empty."""
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.platypus import Paragraph
+    ss = getSampleStyleSheet()
+    h, n = ss["Heading2"], ss["BodyText"]
+    story = [
+        Paragraph("MORGAN LEE", ss["Title"]),
+        Paragraph("Validation Analyst", n),
+        Paragraph("Work Experience", h),
+        Paragraph("Acme Labs, CSV Analyst, Jan 2021 - Present", n),
+        Paragraph("Relevant Project/Organizational Details", h),
+        Paragraph("Project/Organizational Details", h),
+        Paragraph("Roles and Responsibilities", h),
+        Paragraph("Client: Acme Pharma", n),
+        Paragraph("Project 1: Batch Record System (Jan 2022 to Dec 2022)", n),
+        Paragraph("Project Description: Electronic batch record system for manufacturing.", n),
+        Paragraph("Validation tester and handled the project as single member.", n),
+        Paragraph("Supported validation plan.", n),
+    ]
+    _make_pdf(path, story)
+
+
+def _assert_roles_resp_table(parsed):
+    problems = []
+    experience = str(parsed.get("experience") or "")
+    projects = str(parsed.get("projects") or "")
+    if "Batch Record System" not in projects:
+        problems.append("project table content was not routed to 'projects': %r" % projects)
+    if "Validation tester and handled the project" not in projects:
+        problems.append("'Roles and Responsibilities' content was not routed to 'projects': %r" % projects)
+    if "Batch Record System" in experience or "Validation tester and handled" in experience:
+        problems.append("project table content leaked into 'experience' instead of (or in addition to) 'projects': %r" % experience)
+    if "Acme Labs" not in experience:
+        problems.append("genuine Work Experience content was lost: %r" % experience)
+    return problems
+
+
+def _sidebar_personal_bleed_pdf(path):
+    """A 2-column sidebar layout where 'WEBSITES, PORTFOLIOS AND PROFILES' is
+    fused with its own URL on one line (so it can't be an exact heading match),
+    and 'PERSONAL INFORMATION' wraps across two lines each fused with
+    unrelated main-column content at the same Y-position ('PERSONAL' + a DOB
+    line, 'INFORMATION' + 'Gender: Female') — real-world case: Sindhu
+    Sundaramoorthy's resume. Two separate bugs let this leak into Skills:
+    (1) a CGPA-decimal marker regex falsely matched the '30.11' inside the DOB
+    date, shifting the Education 'last marker' index past the DOB line and
+    misclassifying the bare 'INFORMATION Gender: Female' continuation as an
+    unmarked stray line to rescue into Skills; (2) the Skills-bleed truncation
+    only matched a whole-line heading, never the fused 'WEBSITES, PORTFOLIOS
+    <url>' line."""
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.platypus import Paragraph
+    ss = getSampleStyleSheet()
+    h, n = ss["Heading2"], ss["BodyText"]
+    story = [
+        Paragraph("SINDHU SUNDARAMOORTHY", ss["Title"]),
+        Paragraph("Quality Analyst", n),
+        Paragraph("SKILLS", h),
+        Paragraph("Requirements analysis, Validation testing, Project management", n),
+        Paragraph("WEBSITES, PORTFOLIOS https://www.linkedin.com/in/sindhu-example/", n),
+        Paragraph("EDUCATION", h),
+        Paragraph("SRM University, B.Com (CGPA: 7.5)", n),
+        Paragraph("PERSONAL Date of birth: 30.11.1995 Nationality: Indian", n),
+        Paragraph("INFORMATION Gender: Female", n),
+    ]
+    _make_pdf(path, story)
+
+
+def _assert_sidebar_personal_bleed(parsed):
+    problems = []
+    skills = str(parsed.get("skills") or "")
+    education = str(parsed.get("education") or "")
+    up_skills = skills.upper()
+    for sign in ("WEBSITES", "GENDER", "NATIONALITY", "DATE OF BIRTH", "INFORMATION"):
+        if sign in up_skills:
+            problems.append("personal-info/website bleed leaked into Skills (%r found): %r" % (sign, skills))
+    if "Requirements analysis" not in skills:
+        problems.append("genuine Skills content was lost: %r" % skills)
+    if "7.5" not in education and "CGPA" not in education.upper():
+        problems.append("genuine Education content (CGPA) was lost: %r" % education)
+    return problems
+
+
 def _stub_out_ai(app):
     """Neutralize every LLM call so the check is fast and offline. We test the
     deterministic pipeline + crash-safety, not the model."""
@@ -258,6 +424,20 @@ def check_parsing_runtime():
         ("two-column", os.path.join(tmp, "two.pdf"), _two_column_pdf,
          # two-column quality is a known limitation → assert only crash-safety + experience
          ["experience"], None),
+        ("summary-alias", os.path.join(tmp, "summary_alias.pdf"), _summary_alias_pdf,
+         # "EXECUTIVE SUMMARY" heading recognized + merged with a later "OBJECTIVE"
+         ["summary", "skills", "experience"], _assert_summary_alias),
+        ("edu-cgpa-tail", os.path.join(tmp, "edu_cgpa_tail.pdf"), _edu_cgpa_tail_pdf,
+         # bare CGPA value ("7.5)") at the end of Education must stay in Education
+         ["skills", "education"], _assert_edu_cgpa_tail),
+        ("roles-resp-table", os.path.join(tmp, "roles_resp_table.pdf"), _roles_resp_table_pdf,
+         # "Project Details | Roles and Responsibilities" table must route to
+         # 'projects', not swallow itself into 'experience'
+         ["experience", "projects"], _assert_roles_resp_table),
+        ("sidebar-personal-bleed", os.path.join(tmp, "sidebar_personal_bleed.pdf"), _sidebar_personal_bleed_pdf,
+         # fused "WEBSITES, PORTFOLIOS <url>" and wrapped "PERSONAL"/"INFORMATION"
+         # sidebar lines must never leak into Skills
+         ["skills", "education"], _assert_sidebar_personal_bleed),
     ]
     for label, path, builder, required, custom in cases:
         try:
@@ -284,6 +464,26 @@ def check_parsing_runtime():
                 _fail("%s fixture: %s" % (label, p))
         else:
             print("  OK: %s fixture parsed and passed all checks" % label)
+
+    # The stranded-experience rescue must also work through the Quick-Parse path
+    # (parse_resume_text/find_sections) directly — this is the path Bulk Upload
+    # always uses (no AI), so a rescue that only works via parse_resume_with_llm_text
+    # silently fails to help the far more common bulk-uploaded multi-page resume.
+    stranded_path = os.path.join(tmp, "stranded.pdf")
+    try:
+        raw_text = app.extract_resume_text(stranded_path, "pdf")
+        quick_parsed = app.parse_resume_text(raw_text)
+    except Exception as exc:
+        import traceback
+        _fail("parse_resume_text CRASHED on stranded-experience fixture: %r" % exc)
+        traceback.print_exc()
+    else:
+        problems = list(_assert_stranded(quick_parsed))
+        if problems:
+            for p in problems:
+                _fail("stranded-experience (Quick-Parse path): %s" % p)
+        else:
+            print("  OK: stranded-experience fixture also rescued via Quick-Parse path")
 
 
 def check_skill_fragment_helper():
@@ -370,6 +570,40 @@ def check_skill_fragment_helper():
         if "Power BI" not in exp:
             _fail("find_sections dropped real content after a heading-alias lead-in: %r" % exp)
 
+        # Two DIFFERENT headings mapping to the same canonical section (e.g. a
+        # resume with both "SUMMARY" and, further down, a separate "OBJECTIVE")
+        # must MERGE, not have the second one silently overwrite the first. This
+        # was a real bug: Suresh's actual profile-summary paragraph under "SUMMARY"
+        # was being wiped out entirely by a later "OBJECTIVE" heading's content.
+        summary_lines = [
+            "SUMMARY",
+            "Highly accomplished engineer with 7+ years of experience.",
+            "SKILLS",
+            "AutoCAD", "SolidWorks",
+            "OBJECTIVE",
+            "To secure a challenging position in product design.",
+        ]
+        merged = fs(summary_lines).get("summary", "")
+        if "Highly accomplished engineer" not in merged:
+            _fail("SUMMARY content was lost when a later OBJECTIVE heading was reached: %r" % merged)
+        if "challenging position" not in merged:
+            _fail("OBJECTIVE content was not merged into summary: %r" % merged)
+
+        # New summary-alias headings (Executive Summary, Professional Profile,
+        # Profile, Career Objective) must resolve to canonical "summary" and
+        # extract their content — these were previously missing from the
+        # verbatim/_EXACT_HEADINGS table used by the AI parsing path, even
+        # though the base SECTION_ALIASES table already recognized them.
+        canon = getattr(app, "canonical_section_name", None)
+        if canon is not None:
+            for heading, expect in (
+                ("EXECUTIVE SUMMARY", "summary"), ("Professional Profile", "summary"),
+                ("Profile", "summary"), ("Career Objective", "summary"),
+                ("About Me", "summary"), ("SUMMARY", "summary"),
+            ):
+                if canon(heading) != expect:
+                    _fail("canonical_section_name(%r) = %r, expected %r" % (heading, canon(heading), expect))
+
     # Wrapped-heading remnants ("ME" from "ABOUT ME", "COMPELTED" from "PROJECTS
     # COMPELTED") must be stripped from a section's first line; normal content kept.
     striptail = getattr(app, "_strip_heading_tail_prefix", None)
@@ -407,6 +641,60 @@ def check_skill_fragment_helper():
         clean = "Selenium WebDriver\nJAVA\nCypress\nPlaywright\nPuppeteer"
         if kw(clean) != clean:
             _fail("keyword extraction wrongly altered an already-clean skills list: %r" % kw(clean))
+        # A resume that lists "Category – item1, item2, item3" per bullet (no filler
+        # verbs — just naturally long lines enumerating many items) is ALREADY a
+        # clean, structured skills list and must be left completely untouched, one
+        # bullet per category, not shredded into individual tokens. Line length
+        # alone must never be the trigger for atomization — only genuine prose
+        # filler-verb evidence should be.
+        structured = (
+            "Design Control & Design History File (DHF)\n"
+            "Verification & Validation (V&V) – Protocols, Reports, Aging studies, Functional & Packaging tests\n"
+            "Regulatory Compliance – MDR, 21 CFR 820, ISO 13485, ISO 14971, ISO 10993, ISO 15223\n"
+            "Risk Management – DFMEA, PFMEA, UFMEA, RMP"
+        )
+        if kw(structured) != structured:
+            _fail("keyword extraction wrongly shredded a clean 'Category - item, item' skills list: %r" % kw(structured))
+
+    # "Category – detail1, detail2" on a SINGLE line (em-dash separator, not the
+    # two-line "Header\nProficient in ..." format) must split so the category
+    # label doesn't glue onto the first detail into one over-long chunk that
+    # then fails the length filter and drops the ENTIRE bullet, header included.
+    split_fn = getattr(app, "_split_desc_to_skills", None)
+    if split_fn is None:
+        _fail("_split_desc_to_skills helper is missing")
+    else:
+        items = split_fn("Verification & Validation (V&V) – Protocols, Reports, Aging studies")
+        for need in ("Verification", "Validation", "Protocols", "Reports", "Aging studies"):
+            if need not in items:
+                _fail("dash-separated category/detail line lost %r: %r" % (need, items))
+        # A tight hyphenated compound (no surrounding spaces) must NOT be split.
+        tight = split_fn("Stack-up analysis")
+        if tight != ["Stack-up analysis"]:
+            _fail("dash-splitting wrongly broke a hyphenated compound word: %r" % tight)
+
+    # The candidate's own name/title bleeding into Skills from a column boundary
+    # must be dropped, but short legitimate skill CODES ("8D", "5S") must survive —
+    # this exact regression happened once: the filter was wired in AFTER keyword
+    # extraction already atomized skills, so a real 2-char code looked like a
+    # "bare gutter-bleed fragment" and got dropped along with the real leak.
+    nametitle = getattr(app, "_drop_name_title_and_gutter_bleed", None)
+    if nametitle is None:
+        _fail("_drop_name_title_and_gutter_bleed helper is missing")
+    else:
+        bled = ["ISO 13485", "Solid Works", "Malthesh Karnam", "Design Engineer", "GD&T knowledge"]
+        got = nametitle(bled, "Malthesh Karnam", "")
+        if "Malthesh Karnam" in got:
+            _fail("name/title filter did not drop the candidate's own name from skills: %r" % got)
+        if "Design Engineer" in got:
+            _fail("name/title filter did not drop a bare role-title leak from skills: %r" % got)
+        for keep in ("ISO 13485", "Solid Works", "GD&T knowledge"):
+            if keep not in got:
+                _fail("name/title filter wrongly dropped a real skill %r: %r" % (keep, got))
+        atomized = ["CAPA", "8D", "PPAP", "5S", "Six Sigma"]
+        got2 = nametitle(atomized, "Malthesh Karnam", "")
+        if got2 != atomized:
+            _fail("name/title filter dropped a short legitimate skill code: %r -> %r" % (atomized, got2))
 
     # Unlabeled skills-sidebar continuation bleeding into Experience (a run of
     # 3+ "Category Header" + "description" pairs, no bullets/dates between) must

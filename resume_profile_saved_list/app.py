@@ -597,6 +597,22 @@ _SECTION_FOLD = {
     "career_highlights": "summary",
 }
 
+# Sections that are always discarded (fold to nothing) — e.g. "Interests"/"Hobbies",
+# "References", "Contact". find_sections() treats passing through one of these as
+# noise, not as evidence that an interrupted section (mid numbered-list) is done.
+_THROWAWAY_SECTIONS = frozenset(k for k, v in _SECTION_FOLD.items() if v is None)
+
+# Resume-builder-template watermarks (e.g. "webuildcv.com", "Powered by ...") that
+# templates place as a bare branding line/paragraph, which then gets swept up
+# verbatim into whichever section it happens to fall in. The two fragments
+# sometimes appear combined on a single line (e.g. table-cell layout joins them
+# with a tab), so match any whole line made up of nothing but 1-3 repetitions of
+# either fragment rather than requiring each to be alone on its own line.
+_WATERMARK_LINE_RE = re.compile(
+    r'^\s*(?:(?:powered\s+by\b\s*)|(?:[\w-]+\.(?:com|io|co|net|ai)\b\s*)){1,3}$',
+    re.I,
+)
+
 # ── DB context manager ────────────────────────────────────────────────────────
 
 class _PgConn:
@@ -1884,6 +1900,34 @@ def find_sections(lines):
     bucket = []
     lines = list(lines)  # materialise so we can do lookahead
     _work_meta_re = re.compile(r'^\s*(duration|designation|project)\s*:', re.I)
+    _numbered_item_re = re.compile(r'^\s*(\d+)\.\s')
+    # When a skip-heading block (Contact/Hobbies/Languages/etc.) interrupts a
+    # NUMBERED list mid-section — common on a page break where a sidebar column
+    # continues between two halves of the same Work Experience/Projects list —
+    # remember which section to resume into if the next real content picks the
+    # numbering back up exactly where it left off. Content that ISN'T a matching
+    # continuation stays unmapped, same as before this existed.
+    _resume_candidate = None
+
+    def _flush(section, bucket_lines):
+        # Append rather than overwrite when this section already holds content
+        # from an earlier, separate run — e.g. a resume with both "SUMMARY" and
+        # a later "OBJECTIVE" heading (both canonical "summary") previously had
+        # the second heading's flush silently wipe out the first heading's
+        # content instead of combining them, since a plain reassignment doesn't
+        # care whether anything was already there. This also covers the
+        # numbered-list resume case (current was reactivated into a section that
+        # already has its earlier bullets flushed) with no special-casing needed.
+        if not (section and bucket_lines):
+            return
+        content = "\n".join(bucket_lines).strip()
+        if not content:
+            return
+        if sections.get(section):
+            sections[section] = sections[section] + "\n" + content
+        else:
+            sections[section] = content
+
     for _line_idx, line in enumerate(lines):
         # A single lowercase word ending with a period is a sentence continuation
         # (e.g. "projects." wrapped from "...strategies for GxP projects."), not a heading.
@@ -1901,7 +1945,9 @@ def find_sections(lines):
         )
         if _is_skip:
             if current and bucket:
-                sections[current] = "\n".join(bucket).strip()
+                _flush(current, bucket)
+                if current not in _THROWAWAY_SECTIONS:
+                    _resume_candidate = current
             current = None
             bucket = []
             continue
@@ -1927,27 +1973,31 @@ def find_sections(lines):
                 # Lines starting with a non-letter character (bullet markers ✓, •, –,
                 # numbered-list "1.", etc.) are list items, never section headings.
                 # Skip the prefix-heading scan to avoid e.g. "✓ Expertise in Defect Tracking"
-                # being parsed as a 2-word "✓ Expertise" → skills heading.
-                if words and not words[0][0].isalpha():
-                    if current:
-                        bucket.append(line)
+                # being parsed as a 2-word "✓ Expertise" → skills heading. When current is
+                # None, fall through to the numbered-continuation resume check below instead
+                # of dropping it outright — this is exactly the shape of a rescued line
+                # ("12. ...") picking a numbered list back up after a sidebar interruption.
+                _is_list_marker_line = bool(words) and not words[0][0].isalpha()
+                if _is_list_marker_line and current:
+                    bucket.append(line)
                     continue
-                for n in range(min(3, len(words)), 0, -1):
-                    prefix_section = canonical_section_name(" ".join(words[:n]))
-                    if prefix_section:
-                        remainder = " ".join(words[n:]).strip()
-                        # Single-word prefix only counts as a heading when:
-                        #   • it IS the entire line (no remainder), OR
-                        #   • it ends with a separator like "Skills:", OR
-                        #   • it is ALL-CAPS (e.g. "EXPERIENCE VALIDATION ENGINEER..." from
-                        #     row-interleaved PDF extraction — heading + inline content on same line).
-                        # Title-Case words like "Experience on all ALM modules" are content.
-                        _word0_bare = words[0].rstrip('.,;:!?')
-                        if n == 1 and remainder and not words[0].endswith(':') and not _word0_bare.isupper():
-                            break  # "Experience on all ALM modules" → content, not heading
-                        section = prefix_section
-                        inline_remainder = remainder if remainder else None
-                        break
+                if not _is_list_marker_line:
+                    for n in range(min(3, len(words)), 0, -1):
+                        prefix_section = canonical_section_name(" ".join(words[:n]))
+                        if prefix_section:
+                            remainder = " ".join(words[n:]).strip()
+                            # Single-word prefix only counts as a heading when:
+                            #   • it IS the entire line (no remainder), OR
+                            #   • it ends with a separator like "Skills:", OR
+                            #   • it is ALL-CAPS (e.g. "EXPERIENCE VALIDATION ENGINEER..." from
+                            #     row-interleaved PDF extraction — heading + inline content on same line).
+                            # Title-Case words like "Experience on all ALM modules" are content.
+                            _word0_bare = words[0].rstrip('.,;:!?')
+                            if n == 1 and remainder and not words[0].endswith(':') and not _word0_bare.isupper():
+                                break  # "Experience on all ALM modules" → content, not heading
+                            section = prefix_section
+                            inline_remainder = remainder if remainder else None
+                            break
 
         if section:
             # Guard: a single Title-case word (e.g. "Qualifications") that immediately
@@ -1967,6 +2017,16 @@ def find_sections(lines):
                 if _prev and _prev[-1] not in '.!?;:':
                     bucket.append(line)
                     continue
+            if section not in _THROWAWAY_SECTIONS:
+                _resume_candidate = None  # a genuine heading resolves any skip ambiguity
+            elif current and current not in _THROWAWAY_SECTIONS:
+                # Entering a throwaway section (e.g. "Hobbies" → canonical "interests")
+                # straight from a meaningful one is the same shape as a _SKIP_HEADINGS
+                # interruption — remember it so a numbered list can resume afterward.
+                # Guard on `current` being set: if we're already inside a skip/throwaway
+                # run (current is None), a chained throwaway heading must NOT clobber
+                # whatever _resume_candidate that run already recorded.
+                _resume_candidate = current
             if section == current:
                 # A bare repeat of the heading word itself (e.g. "Summary" wrapped mid-
                 # summary from "Validation Summary Report.") is ignored so the section
@@ -1978,11 +2038,15 @@ def find_sections(lines):
                 if inline_remainder:
                     bucket.append(inline_remainder)
                 continue
-            if current and bucket:
-                sections[current] = "\n".join(bucket).strip()
-            current = section
+            _flush(current, bucket)
+            # A throwaway section (e.g. "Hobbies" → canonical "interests") is discarded
+            # unconditionally at the very end (its _SECTION_FOLD target is None), so its
+            # content is never collected in the first place — same as current=None does
+            # for a literal _SKIP_HEADINGS match. This lets a numbered list resume through
+            # it exactly like it would through an explicit skip heading.
+            current = None if section in _THROWAWAY_SECTIONS else section
             bucket = []
-            if inline_remainder:
+            if inline_remainder and current is not None:
                 bucket.append(inline_remainder)
             continue
 
@@ -1992,9 +2056,27 @@ def find_sections(lines):
             # end of the last page). Legitimate content never appears as a bare digit.
             if not re.match(r'^\s*\d{1,3}\s*$', line):
                 bucket.append(line)
+            continue
 
-    if current and bucket:
-        sections[current] = "\n".join(bucket).strip()
+        # current is None: either nothing has started yet, or a skip-heading block
+        # (Contact/Hobbies/Languages/etc.) just interrupted a section. In the latter
+        # case, resume into that section if a line picks its numbered list back up
+        # exactly where it left off — e.g. Work Experience bullets 1-11 on page 1,
+        # then a whole sidebar column (contact/hobbies/languages), then "12. ..." /
+        # "13. ..." continuing on page 2. Keep watching across the entire unmapped
+        # stretch (it isn't going anywhere else either way) until either a match is
+        # found or a genuine new heading resolves the ambiguity for good.
+        if _resume_candidate is not None:
+            _m = _numbered_item_re.match(line)
+            if _m:
+                _prev_nums = re.findall(r'(?:^|\n)\s*(\d+)\.\s', sections.get(_resume_candidate, ""))
+                if _prev_nums and int(_m.group(1)) == int(_prev_nums[-1]) + 1:
+                    current = _resume_candidate
+                    bucket = [line]
+                    _resume_candidate = None
+                    continue
+
+    _flush(current, bucket)
 
     # Fold extended sections into the 6 core display sections, then return only those.
     for src, dst in _SECTION_FOLD.items():
@@ -2799,17 +2881,28 @@ _SKILLS_BLEED_HEADINGS = frozenset({
     "references", "extra curricular", "extracurricular",
 })
 
+# Unlike the exact-match headings above, "Websites, Portfolios and Profiles" is
+# commonly fused with its own URL on the same line by a 2-column sidebar (e.g.
+# "WEBSITES, PORTFOLIOS https://www.linkedin.com/in/..."), so it can never
+# equal a clean heading string outright — it must be matched as a LEAD-IN
+# instead of a whole-line match.
+_SKILLS_BLEED_PREFIXES = (
+    "websites portfolios", "websites and profiles", "websites portfolio",
+    "website portfolio", "and profiles",
+)
+
 
 def _truncate_skills_at_bleed(lines):
     """Cut the skills list at the first line that is actually the heading of a
     following section (e.g. a 'Languages' sidebar block read straight after the
-    skills). Removes 'extra information apart from skills' without touching real
-    skill entries above the boundary."""
+    skills, or a 'Websites, Portfolios' sidebar heading fused with its own URL
+    on the same line). Removes 'extra information apart from skills' without
+    touching real skill entries above the boundary."""
     out = []
     for l in lines:
         key = re.sub(r'[^a-z ]', ' ', l.strip().lower())
         key = re.sub(r'\s+', ' ', key).strip()
-        if key in _SKILLS_BLEED_HEADINGS:
+        if key in _SKILLS_BLEED_HEADINGS or key.startswith(_SKILLS_BLEED_PREFIXES):
             break
         out.append(l)
     return out
@@ -2830,24 +2923,36 @@ _SKILL_JUNK_TOKENS = frozenset({
 
 
 def _looks_like_prose_skills(skills_text):
-    """True when the skills section is written as category labels + prose sentences
+    """True when the skills section is written as category labels + prose SENTENCES
     (e.g. 'Proficient in PTC CREO, Solid Works, ...') rather than atomic entries.
     Deliberately narrow so already-clean skill lists are left completely untouched.
+
+    Gated on genuine filler-verb evidence ("Proficient in", "Skilled in", ...) only —
+    NOT on line length. A resume that lists "Category – item1, item2, item3" or
+    "Category: item1, item2" per bullet is already a clean, structured skills list
+    (just naturally long because it enumerates many items); it must be displayed
+    as-is, one bullet per category, not shredded into individual tokens. Line
+    length alone can't tell those two formats apart, but the presence of filler
+    verbs can.
     """
     lines = [l.strip() for l in (skills_text or "").split('\n') if l.strip()]
     if len(lines) < 4:
         return False
     filler = sum(1 for l in lines if _SKILL_FILLER_LEAD.match(l))
-    longish = sum(1 for l in lines if len(l) > 60)
-    return filler >= 2 or longish >= 3
+    return filler >= 2
 
 
 def _split_desc_to_skills(line):
     s = re.sub(r'\([^)]*\)', ' ', line)                    # drop parentheticals
     items = []
     # Split on list separators. `and`/`&` require surrounding spaces so intra-token
-    # forms like "GD&T", "R&D", "NX CAD/CAM" are never broken apart.
-    for p in re.split(r'[;,:]|\s+and\s+|\s+&\s+', s, flags=re.I):
+    # forms like "GD&T", "R&D", "NX CAD/CAM" are never broken apart. A dash used as
+    # a "Category – detail1, detail2" separator (spaces on both sides) is split too,
+    # so the category label and its first item don't glue into one over-long chunk
+    # that then fails the length/word-count filters below and gets dropped entirely.
+    # Requiring surrounding spaces keeps tight hyphenated compounds intact
+    # ("Stack-up analysis", "SAP-E Chain").
+    for p in re.split(r'[;,:]|\s+and\s+|\s+&\s+|\s+[–—-]\s+', s, flags=re.I):
         p = _SKILL_FILLER_LEAD.sub('', p).strip(' .:-\t')  # strip leading filler
         # A bare leading preposition ("in Power BI" left behind when an upstream
         # heading-alias match consumed only "Professional Experience" from
@@ -2911,6 +3016,73 @@ def _drop_trailing_skill_fragments(lines):
         else:
             break
     return lines
+
+
+_SKILL_SOCIAL_FRAG_RE = re.compile(
+    r'^(?:n?ked[Ii]n|[Ll]inked[Ii]n|[Ll]inked?|[Ff]acebook|[Tt]witter|'
+    r'[Ii]nstagram|[Yy]outube|[Gg]ithub|[Gg]itlab)\s*$'
+)
+_SKILL_ROLE_ONLY_RE = re.compile(r'^[A-Z][a-z]+(?: [A-Z][a-z]+){0,3}$')  # Title-case, 1-4 words
+_SKILL_ROLE_KW_RE = re.compile(
+    r'\b(analyst|engineer|manager|consultant|officer|executive|director|'
+    r'lead|specialist|developer|designer|coordinator|associate|intern)\b',
+    re.I,
+)
+
+
+def _drop_name_title_and_gutter_bleed(lines, full_name, title):
+    """Remove the candidate's own name/title and column-gutter-bleed fragments
+    from a skills list — a 2-column layout can place the resume's own name/title
+    header at the same y-position as the tail of the Skills sidebar, so the
+    linear text extractor reads it as if it were another skill line.
+
+    - Drops a line that exactly matches the already-extracted full_name/title.
+    - Drops bare 1-2 char fragments (never a valid skill).
+    - Drops social-media link truncations ("nkedIn", "acebook", ...).
+    - Drops a bare Title-Case 1-4 word role phrase containing a job-role keyword
+      (e.g. "Design Engineer") with no tool/tech markers — this catches a leaked
+      title even when the `title` field itself wasn't extracted correctly.
+    """
+    _name = (full_name or "").strip().upper()
+    _title = (title or "").strip().lower()
+    out = []
+    for l in lines:
+        s = l.strip()
+        if not s:
+            continue
+        if s.upper() == _name or (_title and s.lower() == _title):
+            continue
+        # Bare 1-2 char fragments are gutter-bleed noise ("s", "li" left over from
+        # a wrapped word) — but only when purely alphabetic. A short alphanumeric
+        # code ("8D", "5S") is a real, well-known quality-methodology skill.
+        if len(s) <= 2 and s.isalpha():
+            continue
+        if _SKILL_SOCIAL_FRAG_RE.match(s):
+            continue
+        if (_SKILL_ROLE_ONLY_RE.match(s) and _SKILL_ROLE_KW_RE.search(s)
+                and not re.search(r'[/(]|\d', s)):
+            continue
+        out.append(l)
+    return out
+
+
+def _looks_like_stray_experience_bullet(line):
+    """True for a bulleted line that reads like a job-responsibility SENTENCE
+    ("• Reviewed and approved V&V protocols...") rather than a short Skills
+    category item ("• DHF / DMR Authorship & Review"). Used to detect Experience
+    content stranded past a Skills heading — bullet punctuation alone isn't a
+    reliable signal, since plenty of legitimate Skills sections bullet their own
+    short items.
+    """
+    s = line.strip()
+    if not s.startswith(("•", "●", "▪", "◦")):
+        return False
+    body = s.lstrip("•●▪◦").strip()
+    if not body:
+        return False
+    if len(body) > 60:
+        return True
+    return body[-1:] in ".;:"
 
 
 def parse_resume_text(text, name_hint=None):
@@ -3281,11 +3453,16 @@ def parse_resume_text(text, name_hint=None):
             clean_skill_lines.append(cleaned_sl)
         clean_skill_lines = _truncate_skills_at_bleed(clean_skill_lines)
         clean_skill_lines = _drop_trailing_skill_fragments(clean_skill_lines)
+        # Remove the person's own name/title and column-gutter-bleed fragments (e.g.
+        # "Design Engineer" bleeding in from the right-column header at the same
+        # y-level as the tail of the Skills sidebar). Must run on whole, not-yet-
+        # atomized lines — a short legitimate skill code ("8D", "5S") only looks
+        # like a "bare 1-2 char fragment" AFTER the keyword-extraction step below
+        # splits prose into individual tokens, so this has to run first.
+        clean_skill_lines = _drop_name_title_and_gutter_bleed(
+            clean_skill_lines, parsed.get("full_name", ""), parsed.get("title", "")
+        )
         parsed["skills"] = "\n".join(clean_skill_lines).strip()
-        # Category-label + prose skills ("CAD Design Tools" / "Proficient in PTC CREO,
-        # Solid Works, ...") → atomic one-per-line keywords. No-op for already-clean lists.
-        if parsed["skills"]:
-            parsed["skills"] = _extract_skill_keywords(parsed["skills"])
 
     if parsed.get("education"):
         _personal_pat = re.compile(
@@ -3362,13 +3539,12 @@ def parse_resume_text(text, name_hint=None):
     # Recover a skills sidebar block that a 2-column layout interleaved into Work
     # Experience: an unlabeled run of "category header" + "description" pairs with
     # no distinguishing heading of its own (common when the sidebar's Skills column
-    # continues onto a later page), then re-flatten it into atomic keywords too.
+    # continues onto a later page).
     if parsed.get("experience"):
         _clean_exp, _rescued_text = _rescue_skill_sidebar_from_experience(parsed["experience"])
         if _rescued_text:
             parsed["skills"] = (parsed["skills"] + "\n" + _rescued_text) if parsed.get("skills") else _rescued_text
             parsed["experience"] = _clean_exp
-            parsed["skills"] = _extract_skill_keywords(parsed["skills"])
 
     # Recover a contact/skills sidebar block (Contact/Phone/Email/LinkedIn + a
     # Skills list) that a 2-column layout interleaved into Work Experience.
@@ -3378,7 +3554,16 @@ def parse_resume_text(text, name_hint=None):
             parsed["experience"] = _clean_exp
             if _recovered_skills:
                 parsed["skills"] = _merge_recovered_skills(parsed.get("skills", ""), _recovered_skills)
-                parsed["skills"] = _extract_skill_keywords(parsed["skills"])
+
+    # Strip resume-builder-template watermarks (e.g. "webuildcv.com", "Powered by
+    # ...") that land as a bare branding line inside whichever section they
+    # happen to fall in — most commonly the tail of Skills.
+    for _wm_field in ("summary", "skills", "experience", "education",
+                      "certifications", "projects"):
+        _wm_text = parsed.get(_wm_field)
+        if _wm_text:
+            _wm_lines = [l for l in _wm_text.splitlines() if not _WATERMARK_LINE_RE.match(l.strip())]
+            parsed[_wm_field] = "\n".join(_wm_lines).strip()
 
     return parsed
 
@@ -4167,7 +4352,33 @@ def parse_resume_with_llm_text(path):
                         if _m and _m.group(1) not in _FRAG_EXCL:
                             c += 1
                 return c
-            if _frag_lines(_tc) <= _frag_lines(raw_text) + 2:
+            # A WHOLE line that's just 1-2 letters (with optional trailing period,
+            # e.g. "s." or "on" sitting alone) is a stronger corruption signal than
+            # a trailing fragment — it means the column crop split a word/phrase
+            # apart entirely, not just at a line's tail. `_frag_lines` alone misses
+            # this since it only inspects lines >= 15 chars. Seen in practice: a
+            # skills-sidebar column crop leaving "s.\non Selenium WebDriver" where
+            # the source read "Skilled in Selenium WebDriver" as one line.
+            _ORPHAN_FRAG_RE = re.compile(r'^[a-z]{1,2}\.?$')
+            def _has_orphan_fragment_lines(t):
+                return any(_ORPHAN_FRAG_RE.match(_l.strip()) for _l in t.splitlines())
+            # A column crop can also misplace a fragment from the MIDDLE of a
+            # sentence to the very END of the document — e.g. "...suspicious user
+            # activities." loses its own tail into a stray "ser activities." line
+            # appended after the resume's true last content (its Education entry).
+            # A genuine re-extraction reorders content; it never invents new
+            # trailing material past where the document actually ends. So when the
+            # original raw_text's own true ending IS found inside two_col, anything
+            # non-trivial appended after that point is fabricated, not reordered.
+            _orig_tail = raw_text.strip()[-60:]
+            _tail_ok = True
+            if _orig_tail:
+                _tail_pos = _tc.find(_orig_tail)
+                if _tail_pos != -1:
+                    _extra_after_tail = _tc[_tail_pos + len(_orig_tail):].strip()
+                    _tail_ok = len(_extra_after_tail) <= 20
+            if (_frag_lines(_tc) <= _frag_lines(raw_text) + 2
+                    and not _has_orphan_fragment_lines(_tc) and _tail_ok):
                 raw_text = _tc
             else:
                 logger.info("two_col rejected: pdfplumber false column split detected (word fragments)")
@@ -4248,6 +4459,7 @@ def parse_resume_with_llm_text(path):
     _EXACT_HEADINGS = [
         "PROFESSIONAL EXPERIENCE", "WORK EXPERIENCE", "EMPLOYMENT HISTORY",
         "PROFESSIONAL SUMMARY", "PROFILE SUMMARY", "APPLICATIONS SUMMARY",
+        "EXECUTIVE SUMMARY", "CAREER OBJECTIVE", "PROFESSIONAL PROFILE", "PROFILE",
         "AREAS OF EXPERTISE", "TECHNICAL SKILLS", "CORE COMPETENCIES", "KEY SKILLS",
         "ACADEMIC BACKGROUND", "ACADEMIC QUALIFICATIONS",
         "EDUCATIONAL QUALIFICATION", "EDUCATIONAL QUALIFICATIONS",
@@ -4319,9 +4531,10 @@ def parse_resume_with_llm_text(path):
     def _heading_field(h):
         u = h.strip().upper()
         if u in ("SUMMARY", "PROFILE SUMMARY", "PROFESSIONAL SUMMARY",
-                 "APPLICATIONS SUMMARY", "CAREER SUMMARY",
+                 "CAREER SUMMARY", "EXECUTIVE SUMMARY",
                  "PROFESSIONAL SUMMARY & SKILL SET",
-                 "ABOUT ME", "ABOUT", "OBJECTIVE"):
+                 "ABOUT ME", "ABOUT", "OBJECTIVE", "CAREER OBJECTIVE",
+                 "PROFESSIONAL PROFILE", "PROFILE"):
             return "summary"
         if u in ("EXPERIENCE", "PROFESSIONAL EXPERIENCE", "WORK EXPERIENCE",
                  "EMPLOYMENT HISTORY", "EMPLOYMENT",
@@ -4332,7 +4545,14 @@ def parse_resume_with_llm_text(path):
         if u in ("SKILLS", "TECHNICAL SKILLS", "KEY SKILLS", "CORE COMPETENCIES",
                  "AREAS OF EXPERTISE", "AREA OF EXPERTISE",
                  "TECHNICAL SKILLS & TOOLS", "TECHNICAL SKILLS AND TOOLS",
-                 "TECHNICAL & OTHER PROFICIENCY", "TECHNICAL EXPERTISE"):
+                 "TECHNICAL & OTHER PROFICIENCY", "TECHNICAL EXPERTISE",
+                 "APPLICATIONS SUMMARY"):
+            # "Applications Summary" lists tools/applications (e.g. "LIMS", "JIRA",
+            # "Veeva Vault") despite the word "Summary" in its name — it belongs
+            # with Skills, matching the base parser's SECTION_ALIASES classification.
+            # This table previously classified it as "summary" instead, so it was
+            # captured TWICE: once as skills by the base parser, once appended to
+            # summary here — the same content duplicated across two fields.
             return "skills"
         if u in ("EDUCATION", "QUALIFICATIONS", "ACADEMIC BACKGROUND",
                  "ACADEMIC QUALIFICATIONS", "EDUCATIONAL QUALIFICATIONS",
@@ -4453,12 +4673,46 @@ def parse_resume_with_llm_text(path):
     # these, stranding them here where they'd otherwise be dropped. Collected so
     # the numbered-continuation rescue below can recover them.
     _unmapped_chunks = []
+    # A two-column "Project Details | Roles and Responsibilities" TABLE (one
+    # heading row shared across every project row, not a per-job sub-heading)
+    # linearizes as two adjacent heading-like lines with nothing between them —
+    # e.g. "...Relevant Project/Organizational Details\nProject/Organizational
+    # Details\nRoles and Responsibilities\n<all 8 projects...>" (table header
+    # split across two adjacent lines), or "...Project Details\n<5 projects'
+    # descriptions>\nRole and Responsibilities\n<their role bullets>" (one
+    # heading per table column, each opening its own span). Either way, "Roles
+    # and Responsibilities" is always paired with a "Project Details"-family
+    # heading in these validation-CV-style resumes — never a genuine standalone
+    # Experience sub-heading in that context — so when it's immediately preceded
+    # by one, route it to "projects" instead of the "experience" default that
+    # applies when it appears as a per-job sub-heading elsewhere.
+    _PROJECT_DETAILS_HEADINGS = {
+        "PROJECT/ORGANIZATIONAL DETAILS", "RELEVANT PROJECT/ORGANIZATIONAL DETAILS",
+        "RELEVANT PROJECT ORGANIZATIONAL DETAILS", "PROJECT DETAILS",
+        "RELEVANT PROJECT EXPERIENCE",
+    }
+    _ROLES_RESP_HEADINGS = {
+        "ROLES AND RESPONSIBILITIES", "ROLE AND RESPONSIBILITIES",
+        "KEY RESPONSIBILITIES", "RESPONSIBILITIES",
+    }
+
     for i, (pos, heading) in enumerate(headings):
         field = _heading_field(heading)
         nl_pos = raw_text.find("\n", pos)
         content_start = nl_pos + 1 if nl_pos != -1 else pos + len(heading)
         content_end = headings[i + 1][0] if i + 1 < len(headings) else len(raw_text)
         text = raw_text[content_start:content_end].strip()
+
+        if heading.upper() in _ROLES_RESP_HEADINGS and i > 0:
+            _prev_heading = headings[i - 1][1]
+            if _prev_heading.upper() in _PROJECT_DETAILS_HEADINGS:
+                field = "projects"
+                logger.info(
+                    "'%s' routed to 'projects' — immediately follows '%s' "
+                    "(paired project-details/role-responsibilities table, not a "
+                    "standalone Experience sub-heading)",
+                    heading, _prev_heading,
+                )
 
         # "Qualifications" headings are ambiguous — inspect content before routing.
         if heading.upper() == "QUALIFICATIONS" and text:
@@ -4601,15 +4855,16 @@ def parse_resume_with_llm_text(path):
     # heading's own content span runs right into whatever Experience bullets
     # happen to follow it before the next real heading (e.g. Education) —
     # nothing marks where the sidebar's own skill items end and the
-    # continuation of the interrupted job entry begins. Genuine Skills entries
-    # in every format this parser recognizes are short phrases, never
-    # "•"-prefixed full sentences, so the first bulleted line inside Skills is
-    # a reliable signal that everything from there on is stray Experience
-    # content, not more skills.
+    # continuation of the interrupted job entry begins. A bulleted line inside
+    # Skills is only treated as stray Experience when it also READS like a full
+    # job-responsibility sentence (long, or ending in sentence-terminal
+    # punctuation) — plenty of legitimate Skills sections bullet their own
+    # short category items (e.g. "•  DHF / DMR Authorship & Review"), and those
+    # must never be mistaken for stray Experience just for having a bullet.
     if result.get("skills"):
         _sk_lines = result["skills"].split("\n")
         _bullet_idx = next(
-            (i for i, l in enumerate(_sk_lines) if l.strip().startswith(("•", "●", "▪", "◦"))),
+            (i for i, l in enumerate(_sk_lines) if _looks_like_stray_experience_bullet(l)),
             None,
         )
         if _bullet_idx is not None and _bullet_idx > 0:
@@ -4634,7 +4889,13 @@ def parse_resume_with_llm_text(path):
             r'\b(19|20)\d{2}\b|'
             r'\b(b\.?\s?e|b\.?\s?tech|m\.?\s?tech|mba|mca|bca|b\.?\s?sc|m\.?\s?sc|'
             r'b\.?\s?com|m\.?\s?com|phd|ph\.?d|cgpa|gpa)\b|'
-            r'\b(university|college|institute|school|academy)\b',
+            r'\b(university|college|institute|school|academy)\b|'
+            r'\d+(?:\.\d+)?\s*%|'  # a bare grade/percentage line (e.g. "63%") is still education
+            # A bare CGPA/GPA value (e.g. "7.5)", "9.0") is still education — but a
+            # DOB-style date (e.g. "30.11.1995") must NOT match: exclude when a
+            # third ".digit" group follows or precedes (a real CGPA is exactly
+            # one decimal point, never three dot-separated number groups).
+            r'(?<!\d\.)\b\d{1,2}\.\d{1,2}\b(?!\.\d)',
             re.IGNORECASE,
         )
         _edu_lines = result["education"].split("\n")
@@ -4647,6 +4908,34 @@ def parse_resume_with_llm_text(path):
                 l for l in _edu_lines[_last_marker_idx + 1:]
                 if len(l.strip(" .")) > 1  # drop stray punctuation-only artifact lines
             ]
+            # The tail past the last education marker is just as often a Declaration/
+            # signature/personal-info block (e.g. "Declaration" / "I hereby declare..."
+            # / "Place: ... <name>") as it is a genuine stray skills list — and that
+            # content must never be rescued into Skills. Cut the tail at the first such
+            # marker, mirroring the boundary the later "2a-post" Education cleanup uses,
+            # so this rescue can't fire before that cleanup gets a chance to apply it.
+            _edu_tail_pi_re = re.compile(
+                r"^(?:personal(?:\s+(?:information|details?))?|other\s+personal|"
+                r"declaration|i\s+hereby\s+declare\b.*|place\s*:.*|"
+                r"father|mother|parent|guardian|date\s+of\s+birth|dob|gender|"
+                r"marital\s+status|nationality|passport\s+no\.?|"
+                # A 2-column sidebar can wrap "PERSONAL INFORMATION" so "PERSONAL"
+                # lands on one line and "INFORMATION" lands on the next, fused with
+                # whatever main-column content shares that row (e.g. "INFORMATION
+                # Gender: Female") — recognized by "information" followed shortly by
+                # an actual personal-detail field, not just the bare word alone
+                # (which could otherwise misfire on real content like "Information
+                # Technology").
+                r"information\b.{0,30}(?:gender|nationality|date\s+of\s+birth|"
+                r"marital\s+status))\b",
+                re.I,
+            )
+            _pi_idx = next(
+                (i for i, l in enumerate(_edu_tail) if _edu_tail_pi_re.match(l.strip())),
+                None,
+            )
+            if _pi_idx is not None:
+                _edu_tail = _edu_tail[:_pi_idx]
             _edu_stray = "\n".join(_edu_tail).strip()
             if _edu_stray:
                 result["education"] = "\n".join(_edu_lines[:_last_marker_idx + 1]).strip()
@@ -4758,43 +5047,12 @@ def parse_resume_with_llm_text(path):
                         vsk_lines.append(p)
             else:
                 vsk_lines.append(s.lstrip("•● -").strip())
-        # Remove the person's own name/title if they leaked into skills from the
-        # column boundary (left sidebar ends → right column starts with name+title).
-        _sk_name = result.get("full_name", "").strip().upper()
-        _sk_title = result.get("title", "").strip().lower()
-        vsk_lines = [
-            l for l in vsk_lines
-            if not (l.strip().upper() == _sk_name or
-                    (_sk_title and l.strip().lower() == _sk_title))
-        ]
-        # Remove gutter-bleed fragments:
-        #   • Single/double char lines ("s", "li") — never a valid skill
-        #   • Social-media truncations ("nkedIn" from LinkedIn, "acebook", "witter")
-        #   • Lines whose TITLE CASE matches a known job-role phrase but has no
-        #     tool/tech content — e.g. "Regulatory Analyst", "Medical Device" when
-        #     those bleed from the right column header at the same y-level as skills
-        _social_frag = re.compile(
-            r'^(?:n?ked[Ii]n|[Ll]inked[Ii]n|[Ll]inked?|[Ff]acebook|[Tt]witter|'
-            r'[Ii]nstagram|[Yy]outube|[Gg]ithub|[Gg]itlab)\s*$'
+        # Remove the person's own name/title and column-gutter-bleed fragments
+        # (e.g. "Design Engineer" bleeding in from the right-column header at the
+        # same y-level as the tail of the Skills sidebar).
+        vsk_lines = _drop_name_title_and_gutter_bleed(
+            vsk_lines, result.get("full_name", ""), result.get("title", "")
         )
-        _role_only = re.compile(
-            r'^[A-Z][a-z]+(?: [A-Z][a-z]+){0,3}$'  # Title-case, 1–4 words
-        )
-        _role_kw = re.compile(
-            r'\b(analyst|engineer|manager|consultant|officer|executive|director|'
-            r'lead|specialist|developer|designer|coordinator|associate|intern)\b',
-            re.I,
-        )
-        vsk_lines = [
-            l for l in vsk_lines
-            if len(l.strip()) > 2                      # drop bare fragments ("s")
-            and not _social_frag.match(l.strip())      # drop social-media truncations
-            and not (                                   # drop pure role-title leakage
-                _role_only.match(l.strip())
-                and _role_kw.search(l.strip())
-                and not re.search(r'[/(]|\d', l)       # keep if has slash/paren/digit
-            )
-        ]
         # Cut a bled-in next-section heading (e.g. a "Languages" sidebar block read
         # right after skills), then drop a trailing single-word wrap fragment
         # ("Medical" left from "Medical Device Classification").
@@ -5195,8 +5453,18 @@ def parse_resume_with_llm_text(path):
             raw_text, False, 1600, 4096,
         ),
         "skills": (
-            "Extract all skills and tools from this resume. "
-            'Return ONLY JSON: {"skills":["s1","s2",...]}.\n\nRESUME:\n',
+            "This resume's Skills/Technical Skills/Core Competencies section could not be "
+            "found by normal parsing. Read the whole resume (summary, experience, tools "
+            "mentioned) and identify the specific skills, tools, technologies, and "
+            "methodologies the candidate ACTUALLY used or names — e.g. if it says "
+            "'experience on all ALM modules like Requirements, Test Lab, Test Plan and "
+            "Defects', extract each of those as its own item. "
+            "Every item must be traceable to something explicitly written in the resume — "
+            "never add a generic skill for the candidate's role/domain that isn't actually "
+            "named in the text. Never repeat the same skill twice. Keep each item short "
+            "(a skill/tool name, not a full sentence). If truly nothing skill-like is "
+            "mentioned anywhere, return an empty array. "
+            'Return ONLY JSON: {"skills":["s1","s2",...]} or {"skills":[]}.\n\nRESUME:\n',
             raw_text[:3000], True, 400, 1024,
         ),
         "education": (
@@ -5533,15 +5801,11 @@ def parse_resume_with_llm_text(path):
     # single line (e.g. table-cell layout joins them with a tab), so match
     # any whole line made up of nothing but 1-3 repetitions of either
     # fragment rather than requiring each to be alone on its own line.
-    _watermark_line_re = re.compile(
-        r'^\s*(?:(?:powered\s+by\b\s*)|(?:[\w-]+\.(?:com|io|co|net|ai)\b\s*)){1,3}$',
-        re.I,
-    )
     for _wm_field in ("summary", "skills", "experience", "education",
                       "certifications", "projects", "references"):
         _wm_text = result.get(_wm_field)
         if _wm_text:
-            _wm_lines = [l for l in _wm_text.splitlines() if not _watermark_line_re.match(l.strip())]
+            _wm_lines = [l for l in _wm_text.splitlines() if not _WATERMARK_LINE_RE.match(l.strip())]
             result[_wm_field] = "\n".join(_wm_lines).strip()
 
     result["experience"], result["projects"] = _reassign_project_specific_bullets(
@@ -5584,11 +5848,6 @@ def parse_resume_with_llm_text(path):
     for _f in ("summary", "projects", "certifications"):
         if result.get(_f):
             result[_f] = _strip_heading_tail_prefix(result[_f])
-
-    # Category-label + prose skills ("CAD Design Tools" / "Proficient in PTC CREO,
-    # Solid Works, ...") → atomic one-per-line keywords. No-op for already-clean lists.
-    if result.get("skills"):
-        result["skills"] = _extract_skill_keywords(result["skills"])
 
     # Recover a full-width summary paragraph that the linear extractor split across
     # a 2-column boundary (only when the block version is clearly more complete).
@@ -7768,6 +8027,24 @@ def process_raw_files():
     if not RAW_UPLOAD_FOLDER.exists():
         return jsonify({"processed": 0, "errors": [], "skipped": 0})
 
+    # A file's "parsed" flag can go stale if its resume record was later deleted
+    # (or the dev DB was reset) — the meta tracking has no way to notice that on
+    # its own, so every subsequent bulk-upload run silently skips it forever,
+    # never re-parsing it even though there's no matching profile anymore. Check
+    # which referenced resume_ids are still real in one query, and treat a
+    # "parsed" flag pointing at a deleted resume as if the file were unparsed.
+    _referenced_ids = {
+        fm.get("resume_id") for fm in meta.values()
+        if fm.get("parsed") and fm.get("resume_id") is not None
+    }
+    _live_ids = set()
+    if _referenced_ids:
+        with db_conn() as conn:
+            _rows = conn.execute(
+                "SELECT id FROM resume WHERE id = ANY(%s)", (list(_referenced_ids),)
+            ).fetchall()
+            _live_ids = {r["id"] for r in _rows}
+
     files_to_process = []
     for p in RAW_UPLOAD_FOLDER.iterdir():
         if not p.is_file():
@@ -7775,7 +8052,8 @@ def process_raw_files():
         if p.name.startswith('_') or p.suffix.lower() not in ('.pdf', '.docx', '.doc'):
             continue
         fm = meta.get(p.name, {})
-        if fm.get('parsed'):
+        _rid = fm.get('resume_id')
+        if fm.get('parsed') and (_rid is None or _rid in _live_ids):
             continue
         files_to_process.append(p)
 
