@@ -206,8 +206,23 @@
             return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
         });
     }
-    var url = "{{ url_for('compare_ai_assessment', resume_id=resume.id, jd_id=jd.id) }}";
-    var TIMEOUT_MS = 90000;
+    var statusUrl = "{{ url_for('compare_ai_status', resume_id=resume.id, jd_id=jd.id) }}";
+    var POLL_INTERVAL_MS = 4000;
+    // Generous ceiling exceeding the backend's own Ollama timeout (see
+    // OLLAMA_TEXT_TIMEOUT, default 300s) with headroom — the previous
+    // single-fetch-with-a-90s-abort design gave up on "unavailable" while
+    // the analysis was often still healthy and still running server-side.
+    var MAX_WAIT_MS = 360000;
+
+    // Mirrors app.py's _CATEGORY_WEIGHTS / _CATEGORY_LABELS order — display
+    // only, the actual weighting happens once, server-side, in _hybrid_match.
+    var CATEGORY_ORDER = ["skills", "responsibilities", "experience", "domain",
+        "certifications", "education", "regulatory", "tools", "soft_skills"];
+    var CATEGORY_LABELS = {
+        skills: "Skills", responsibilities: "Responsibilities", experience: "Experience",
+        domain: "Domain Experience", certifications: "Certifications", education: "Education",
+        regulatory: "Regulatory/Standards", tools: "Tools & Technologies", soft_skills: "Soft Skills"
+    };
 
     // Keyword-scan result (server-rendered) — the fallback if the AI judge is
     // unavailable or times out, so the verdict badge always resolves.
@@ -247,18 +262,25 @@
         var html = '<div class="ai-result-verdict">' + esc(d.verdict) + '</div>'
             + '<div class="ai-result-rec">' + esc(d.recommendation || '') + '</div>';
 
+        // Overall Fit — the single blended percentage (keyword + AI judge)
+        // that everything else on this card (verdict, tier badge, recommendation)
+        // is derived from. This is the exact number the Top 3 Matching Roles
+        // cards converge to for this same JD once they've been AI-verified —
+        // same ai_match_cache entry, so the two can never show different figures.
+        if (d.fit_percentage != null) {
+            html += '<div class="ai-metrics" style="border-bottom:none;padding-bottom:0;margin-bottom:8px;">'
+                + '<div class="ai-metric"><span class="ai-metric-val" style="font-size:1.6rem;">' + esc(d.fit_percentage) + '%</span>'
+                + '<span class="ai-metric-label">Overall Fit</span></div>'
+                + '</div>';
+        }
+
         // Labelled metrics — each number now says what it measures.
-        if (d.keyword_match_percentage != null || d.llm_fit_percentage != null || d.confidence_label) {
+        if (d.keyword_match_percentage != null || d.confidence_label) {
             html += '<div class="ai-metrics">';
             if (d.keyword_match_percentage != null) {
                 html += '<div class="ai-metric"><span class="ai-metric-val">' + esc(d.keyword_match_percentage) + '%</span>'
                     + '<span class="ai-metric-label">Keyword overlap</span>'
                     + '<span class="ai-metric-hint">Share of JD skill / requirement items found verbatim in the resume.</span></div>';
-            }
-            if (d.llm_fit_percentage != null) {
-                html += '<div class="ai-metric"><span class="ai-metric-val">' + esc(d.llm_fit_percentage) + '%</span>'
-                    + '<span class="ai-metric-label">AI judge</span>'
-                    + '<span class="ai-metric-hint">The AI model&#39;s holistic fit estimate.</span></div>';
             }
             if (d.confidence_label) {
                 // Confidence has its own High/Medium/Low semantics — reuse the
@@ -271,6 +293,27 @@
                     + '<span class="ai-metric-label">Confidence</span>'
                     + '<span class="ai-metric-hint">' + esc(confReason) + '</span></div>';
             }
+            html += '</div>';
+        }
+
+        // Category breakdown — the 9 weighted categories that were summed
+        // (see CATEGORY_LABELS/weights below) to produce the Overall Fit
+        // percentage above. Absent for the keyword-only fallback (LLM was
+        // unreachable), since there's no category judgment to show then.
+        if (d.category_scores) {
+            var weights = d.category_weights || {};
+            html += '<div class="category-breakdown">';
+            CATEGORY_ORDER.forEach(function (cat) {
+                var score = d.category_scores[cat];
+                if (score == null) return;
+                var weightPct = Math.round((weights[cat] || 0) * 100);
+                html += '<div class="category-row">'
+                    + '<span class="category-row-label">' + esc(CATEGORY_LABELS[cat] || cat)
+                    + '<span class="category-row-weight">(' + weightPct + '% weight)</span></span>'
+                    + '<span class="category-row-bar"><span class="category-row-bar-fill" style="width:' + score + '%;"></span></span>'
+                    + '<span class="category-row-val">' + score + '%</span>'
+                    + '</div>';
+            });
             html += '</div>';
         }
 
@@ -292,29 +335,42 @@
         body.innerHTML = html;
     }
 
-    var controller = new AbortController();
-    var timedOut = false;
-    var timer = setTimeout(function () { timedOut = true; controller.abort(); }, TIMEOUT_MS);
+    // The server already kicked off (or found already running) a background
+    // computation for this pair when this page was requested — see
+    // trigger_background_ai_assessment() in compare_result(), app.py. This
+    // just polls a cheap, read-only status endpoint until it's ready,
+    // rather than holding one HTTP request open for as long as the real LLM
+    // judgment takes (up to a few minutes on local hardware).
+    var startedAt = Date.now();
 
-    fetch(url, {signal: controller.signal})
-        .then(function (r) { return r.json().then(function (data) { return {ok: r.ok, data: data}; }); })
-        .then(function (res) {
-            clearTimeout(timer);
-            if (!res.ok || res.data.error) {
-                body.innerHTML = '<p class="ai-note">' + esc(res.data && res.data.error ? res.data.error : 'AI assessment unavailable right now.') + '</p>';
-                fallbackToKeyword('AI assessment unavailable &mdash; showing keyword-based checklist.');
-                return;
-            }
-            render(res.data);
-        })
-        .catch(function () {
-            clearTimeout(timer);
-            var msg = timedOut
-                ? 'AI assessment timed out &mdash; showing keyword-based checklist.'
-                : 'AI assessment unavailable right now.';
-            body.innerHTML = '<p class="ai-note warn">' + msg + '</p>';
-            fallbackToKeyword(msg);
-        });
+    function pollOnce() {
+        fetch(statusUrl, {credentials: 'same-origin'})
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                if (data && data.ready) {
+                    render(data);
+                    return;
+                }
+                if (Date.now() - startedAt >= MAX_WAIT_MS) {
+                    body.innerHTML = '<p class="ai-note warn">AI assessment unavailable right now.</p>';
+                    fallbackToKeyword('AI assessment unavailable &mdash; showing keyword-based checklist.');
+                    return;
+                }
+                var elapsed = Math.round((Date.now() - startedAt) / 1000);
+                body.innerHTML = '<div class="is-loading"><span class="spinner-dot" aria-hidden="true"></span>'
+                    + 'AI analysis in progress&hellip; (' + elapsed + 's)</div>';
+                setTimeout(pollOnce, POLL_INTERVAL_MS);
+            })
+            .catch(function () {
+                if (Date.now() - startedAt >= MAX_WAIT_MS) {
+                    body.innerHTML = '<p class="ai-note warn">AI assessment unavailable right now.</p>';
+                    fallbackToKeyword('AI assessment unavailable &mdash; showing keyword-based checklist.');
+                    return;
+                }
+                setTimeout(pollOnce, POLL_INTERVAL_MS);
+            });
+    }
+    pollOnce();
 })();
 </script>
 {% endblock %}

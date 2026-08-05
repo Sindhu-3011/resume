@@ -1,0 +1,150 @@
+{% extends "base.html" %}
+{% block title %}Audit Trail | Resume Profile{% endblock %}
+{% block content %}
+
+{% macro qs(overrides) -%}
+{%- set merged = {'q': search, 'module': module_filter, 'action': action_filter, 'user': user_filter,
+                   'date_from': date_from, 'date_to': date_to, 'sort': sort, 'dir': direction, 'page': page} -%}
+{%- for k, v in overrides.items() %}{% set _ = merged.update({k: v}) %}{% endfor -%}
+{%- set parts = [] -%}
+{%- for k, v in merged.items() %}{% if v %}{% set _ = parts.append(k ~ '=' ~ v|urlencode) %}{% endif %}{% endfor -%}
+{{ '?' ~ parts|join('&') if parts else '' }}
+{%- endmacro %}
+
+<section class="hero card">
+    <div>
+        <p class="eyebrow">System Activity</p>
+        <h1>Audit Trail</h1>
+        <p class="muted">Every logged-in user action across every module &mdash; logins, saves, deletes, exports, and more.</p>
+    </div>
+    <a class="button" style="background:#10b981;" href="{{ url_for('audit_trail_export_csv') }}{{ qs({}) }}">
+        &#128190; Export CSV
+    </a>
+</section>
+
+<!-- Search & filters -->
+<form method="get" class="card" style="padding:18px 20px; display:flex; flex-wrap:wrap; gap:12px; align-items:flex-end;">
+    <div style="flex:1; min-width:200px;">
+        <label style="display:block; font-size:0.78rem; font-weight:600; color:var(--tx-muted); margin-bottom:4px;">Search</label>
+        <input type="text" name="q" value="{{ search }}" placeholder="User, record, module, action&hellip;"
+               class="form-select" style="width:100%; box-sizing:border-box;">
+    </div>
+    <div style="min-width:150px;">
+        <label style="display:block; font-size:0.78rem; font-weight:600; color:var(--tx-muted); margin-bottom:4px;">User</label>
+        <select name="user" class="form-select" style="width:100%;">
+            <option value="">All users</option>
+            {% for u in users %}
+            <option value="{{ u }}" {% if u == user_filter %}selected{% endif %}>{{ u }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div style="min-width:160px;">
+        <label style="display:block; font-size:0.78rem; font-weight:600; color:var(--tx-muted); margin-bottom:4px;">Module</label>
+        <select name="module" class="form-select" style="width:100%;">
+            <option value="">All modules</option>
+            {% for m in modules %}
+            <option value="{{ m }}" {% if m == module_filter %}selected{% endif %}>{{ m }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div style="min-width:150px;">
+        <label style="display:block; font-size:0.78rem; font-weight:600; color:var(--tx-muted); margin-bottom:4px;">Action</label>
+        <select name="action" class="form-select" style="width:100%;">
+            <option value="">All actions</option>
+            {% for a in actions %}
+            <option value="{{ a }}" {% if a == action_filter %}selected{% endif %}>{{ a }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div style="min-width:150px;">
+        <label style="display:block; font-size:0.78rem; font-weight:600; color:var(--tx-muted); margin-bottom:4px;">From</label>
+        <input type="date" name="date_from" value="{{ date_from }}" class="form-select" style="width:100%;">
+    </div>
+    <div style="min-width:150px;">
+        <label style="display:block; font-size:0.78rem; font-weight:600; color:var(--tx-muted); margin-bottom:4px;">To</label>
+        <input type="date" name="date_to" value="{{ date_to }}" class="form-select" style="width:100%;">
+    </div>
+    <input type="hidden" name="sort" value="{{ sort }}">
+    <input type="hidden" name="dir" value="{{ direction }}">
+    <div style="display:flex; gap:8px;">
+        <button type="submit" class="button">Apply</button>
+        <a class="button secondary" href="{{ url_for('audit_trail') }}">Reset</a>
+    </div>
+</form>
+
+<p class="muted" style="margin:14px 2px 10px; font-size:0.85rem;">
+    {{ total }} event{{ 's' if total != 1 }} found
+    {% if search or module_filter or action_filter or user_filter or date_from or date_to %}&mdash; filtered{% endif %}
+</p>
+
+{% macro sort_link(col, label) -%}
+{% set next_dir = 'asc' if (sort == col and direction == 'desc') else 'desc' %}
+<a href="{{ qs({'sort': col, 'dir': next_dir, 'page': 1}) }}" style="color:inherit; text-decoration:none;">
+    {{ label }}{% if sort == col %} {{ '&#9650;'|safe if direction == 'asc' else '&#9660;'|safe }}{% endif %}
+</a>
+{%- endmacro %}
+
+{% if rows %}
+<div class="card" style="padding:0; overflow:hidden;">
+    <div style="overflow-x:auto;">
+    <table class="jdm-table">
+        <thead>
+            <tr>
+                <th>{{ sort_link('created_at', 'Date &amp; Time') }}</th>
+                <th>User ID</th>
+                <th>{{ sort_link('username', 'Username') }}</th>
+                <th>Role</th>
+                <th>{{ sort_link('module', 'Module') }}</th>
+                <th>{{ sort_link('action', 'Action') }}</th>
+                <th>Record / Entity</th>
+                <th>{{ sort_link('status', 'Status') }}</th>
+                <th>IP Address</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for r in rows %}
+            <tr>
+                <td class="text-muted" style="white-space:nowrap;">
+                    {{ r.created_at.strftime('%Y-%m-%d %H:%M:%S') if r.created_at else '—' }}
+                </td>
+                <td>{{ r.user_id or '—' }}</td>
+                <td>{{ r.username or '—' }}</td>
+                <td>
+                    {% if r.role %}<span class="jdm-cat-badge {% if r.role == 'admin' %}jdm-cat-it{% endif %}">{{ r.role }}</span>{% else %}—{% endif %}
+                </td>
+                <td>{{ r.module }}</td>
+                <td>{{ r.action }}</td>
+                <td title="{{ r.record_id or '' }}">{{ r.record_label or (r.record_id and ('#' ~ r.record_id)) or '—' }}</td>
+                <td>
+                    <span class="jdm-cat-badge {{ 'jdm-status-open' if r.status == 'Success' else 'jdm-status-closed' }}">
+                        {{ r.status }}
+                    </span>
+                </td>
+                <td class="text-muted">{{ r.ip_address or '—' }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    </div>
+</div>
+
+<!-- Pagination -->
+<div style="display:flex; justify-content:center; align-items:center; gap:14px; margin-top:18px;">
+    {% if page > 1 %}
+    <a class="button secondary" href="{{ qs({'page': page - 1}) }}">&larr; Previous</a>
+    {% endif %}
+    <span class="muted" style="font-size:0.85rem;">Page {{ page }} of {{ total_pages }}</span>
+    {% if page < total_pages %}
+    <a class="button secondary" href="{{ qs({'page': page + 1}) }}">Next &rarr;</a>
+    {% endif %}
+</div>
+
+{% else %}
+<div class="card" style="text-align:center; padding:48px 24px;">
+    <p style="font-size:3rem; margin-bottom:12px;">&#128269;</p>
+    <h3>No matching events</h3>
+    <p class="muted">Try widening your search or clearing filters.</p>
+</div>
+{% endif %}
+
+{% endblock %}

@@ -102,7 +102,7 @@
     <div style="overflow-x:auto;">
     <table class="jdm-table">
         <thead>
-            <tr><th>Requirement</th><th>Client / Division</th><th>Profiles Shared</th></tr>
+            <tr><th>Requirement</th><th>Client / Division</th><th>Profiles Shared</th><th>Onsite/Offshore</th><th>Interviewed</th><th>Offered</th></tr>
         </thead>
         <tbody>
         {% for r in top_requirements %}
@@ -110,6 +110,9 @@
                 <td><a class="jdm-link" href="{{ url_for('requirement_detail', req_id=r.id) }}">{{ r.requirement_name }}</a></td>
                 <td>{{ r.client or '—' }}{% if r.division %} / {{ r.division }}{% endif %}</td>
                 <td>{{ r.profiles_shared }}</td>
+                <td>{{ r.onsite_offshore or '—' }}</td>
+                <td>{{ r.interviewed }}</td>
+                <td>{{ r.offered }}</td>
             </tr>
         {% endfor %}
         </tbody>
@@ -164,11 +167,41 @@
         <p id="scheduleMsg" class="small" style="display:none;margin-top:8px;"></p>
     </div>
 
+    <div id="editInterviewFormWrap" class="card" style="display:none;background:var(--surface-raised);margin-bottom:16px;box-shadow:none;border:1px dashed var(--border-s);">
+        <div class="field-grid">
+            <div>
+                <label>Candidate</label>
+                <input id="editIvCandidate" disabled>
+            </div>
+            <div>
+                <label for="editIvInterviewer">Interviewer</label>
+                <input id="editIvInterviewer" placeholder="e.g. David Lee">
+            </div>
+            <div>
+                <label for="editIvDate">Date</label>
+                <input id="editIvDate" type="date">
+            </div>
+            <div>
+                <label for="editIvStatus">Status</label>
+                <select id="editIvStatus" class="form-select">
+                    {% for ivs in interview_schedule_statuses %}
+                    <option value="{{ ivs }}">{{ ivs }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+        </div>
+        <div class="actions" style="margin-top:14px;">
+            <button class="button" type="button" id="saveEditInterviewBtn">Save</button>
+            <button class="button secondary" type="button" id="cancelEditInterviewBtn">Cancel</button>
+        </div>
+        <p id="editInterviewMsg" class="small" style="display:none;margin-top:8px;"></p>
+    </div>
+
     {% if recent_interviews %}
     <div style="overflow-x:auto;">
     <table class="jdm-table">
         <thead>
-            <tr><th>Candidate</th><th>Position</th><th>Interviewer</th><th>Date</th><th>Status</th></tr>
+            <tr><th>Candidate</th><th>Position</th><th>Interviewer</th><th>Date</th><th>Status</th><th>Actions</th></tr>
         </thead>
         <tbody>
         {% for iv in recent_interviews %}
@@ -178,6 +211,14 @@
                 <td>{{ iv.interviewer or '—' }}</td>
                 <td>{{ iv.interview_date.strftime('%Y-%m-%d') if iv.interview_date else '—' }}</td>
                 <td><span class="role-badge">{{ iv.status }}</span></td>
+                <td>
+                    <button type="button" class="button secondary edit-iv-btn" style="padding:4px 12px;font-size:0.8rem;"
+                            data-id="{{ iv.id }}"
+                            data-candidate="{{ iv.full_name }}"
+                            data-interviewer="{{ iv.interviewer or '' }}"
+                            data-date="{{ iv.interview_date.strftime('%Y-%m-%d') if iv.interview_date else '' }}"
+                            data-status="{{ iv.status }}">Edit</button>
+                </td>
             </tr>
         {% endfor %}
         </tbody>
@@ -314,7 +355,10 @@
     var wrap = document.getElementById('scheduleFormWrap');
     var msg = document.getElementById('scheduleMsg');
     if (showBtn) {
-        showBtn.addEventListener('click', function () { wrap.style.display = 'block'; });
+        showBtn.addEventListener('click', function () {
+            if (editWrap) editWrap.style.display = 'none';
+            wrap.style.display = 'block';
+        });
         document.getElementById('cancelScheduleBtn').addEventListener('click', function () { wrap.style.display = 'none'; });
         document.getElementById('saveScheduleBtn').addEventListener('click', function () {
             var resumeId = document.getElementById('schedCandidate').value;
@@ -343,6 +387,62 @@
                 msg.textContent = 'Network error. Please try again.';
                 msg.style.color = '#dc2626';
                 msg.style.display = 'block';
+            });
+        });
+    }
+
+    // Edit Interview — pre-fills from the row's own data-* attributes (no
+    // extra fetch needed), candidate is shown read-only and is never sent
+    // back to the server: the edit endpoint only ever updates interviewer/
+    // date/status on the existing interview_schedule row.
+    var editWrap  = document.getElementById('editInterviewFormWrap');
+    var editMsg   = document.getElementById('editInterviewMsg');
+    var editIdInput = null;
+    document.querySelectorAll('.edit-iv-btn').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            if (wrap) wrap.style.display = 'none';
+            editIdInput = btn.getAttribute('data-id');
+            document.getElementById('editIvCandidate').value = btn.getAttribute('data-candidate') || '';
+            document.getElementById('editIvInterviewer').value = btn.getAttribute('data-interviewer') || '';
+            document.getElementById('editIvDate').value = btn.getAttribute('data-date') || '';
+            document.getElementById('editIvStatus').value = btn.getAttribute('data-status') || 'Scheduled';
+            editMsg.style.display = 'none';
+            editWrap.style.display = 'block';
+            editWrap.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        });
+    });
+    var cancelEditBtn = document.getElementById('cancelEditInterviewBtn');
+    if (cancelEditBtn) {
+        cancelEditBtn.addEventListener('click', function () { editWrap.style.display = 'none'; });
+    }
+    var saveEditBtn = document.getElementById('saveEditInterviewBtn');
+    if (saveEditBtn) {
+        saveEditBtn.addEventListener('click', function () {
+            var interviewer = document.getElementById('editIvInterviewer').value.trim();
+            var date = document.getElementById('editIvDate').value;
+            var status = document.getElementById('editIvStatus').value;
+            if (!interviewer || !date) {
+                editMsg.textContent = 'Please enter an interviewer and date.';
+                editMsg.style.color = '#dc2626';
+                editMsg.style.display = 'block';
+                return;
+            }
+            fetch('/api/interview/' + editIdInput + '/update', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ interviewer: interviewer, interview_date: date, status: status })
+            }).then(function (r) { return r.json(); }).then(function (d) {
+                if (d.ok) {
+                    location.reload();
+                } else {
+                    editMsg.textContent = d.error || 'Could not update interview.';
+                    editMsg.style.color = '#dc2626';
+                    editMsg.style.display = 'block';
+                }
+            }).catch(function () {
+                editMsg.textContent = 'Network error. Please try again.';
+                editMsg.style.color = '#dc2626';
+                editMsg.style.display = 'block';
             });
         });
     }

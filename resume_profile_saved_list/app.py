@@ -1,6 +1,6 @@
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, send_from_directory, abort, send_file, session
 import psycopg2
-from io import BytesIO
+from io import BytesIO, StringIO
 from reportlab.lib.pagesizes import letter, A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
@@ -16,6 +16,8 @@ from psycopg2.extras import RealDictCursor
 from pathlib import Path
 import re
 import math
+import hashlib
+import uuid
 from collections import Counter
 import zipfile
 import json
@@ -24,6 +26,8 @@ import os
 import urllib.request
 import urllib.error
 from contextlib import contextmanager
+from datetime import datetime, timezone
+import threading
 from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
 from PyPDF2 import PdfReader
@@ -70,6 +74,12 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "resume-profile-secret-key")
+
+# Auto-logout on inactivity — how long a session may sit idle (no request)
+# before _require_login() below invalidates it. Configurable via env var;
+# the two presets called out in the spec are 15 (default) and 30 minutes.
+SESSION_TIMEOUT_MINUTES = int(os.environ.get("SESSION_TIMEOUT_MINUTES", "15"))
+SESSION_WARNING_SECONDS = 60  # show the "continue session?" dialog this long before expiry
 
 @app.after_request
 def set_cache_control(response):
@@ -1200,13 +1210,96 @@ def _pdfplumber_two_col_text(path):
         return None
 
 
+def _chunk_lines_by_gap(lines):
+    """lines: list of (y0, word_list) sorted by y0 ascending, one entry per
+    rendered line within a single column. Splits into row groups wherever
+    the vertical gap to the next line is notably larger than the typical
+    (median) gap in this column — the signature of a real row/paragraph
+    boundary (one project block ending, the next beginning) as opposed to
+    ordinary line-wrap spacing within the same block. Returns a list of
+    (y_lo, y_hi, word_list) tuples, one per row chunk, in top-to-bottom
+    order.
+    """
+    if not lines:
+        return []
+    if len(lines) == 1:
+        y0, words = lines[0]
+        return [(y0, y0, list(words))]
+
+    gaps = [lines[i + 1][0] - lines[i][0] for i in range(len(lines) - 1)]
+    positive_gaps = sorted(g for g in gaps if g > 0) or [12]
+    median_gap = positive_gaps[len(positive_gaps) // 2]
+    threshold = max(median_gap * 1.6, median_gap + 6)
+
+    chunk_words = list(lines[0][1])
+    chunk_lo = chunk_hi = lines[0][0]
+    chunks = []
+    for i in range(1, len(lines)):
+        y0, words = lines[i]
+        if y0 - chunk_hi > threshold:
+            chunks.append((chunk_lo, chunk_hi, chunk_words))
+            chunk_words, chunk_lo = [], y0
+        chunk_words = chunk_words + list(words)
+        chunk_hi = y0
+    chunks.append((chunk_lo, chunk_hi, chunk_words))
+    return chunks
+
+
+_LEFT_ROW_START_RE = re.compile(r"^(client|company|employer|account|customer)\s*:", re.I)
+
+
+def _split_left_lines_by_row_marker(lines):
+    """Split left-column lines into row chunks anchored on an explicit
+    row-opener label ("Client:", "Company:", etc.) instead of vertical gap
+    size. In a consulting-style "Client / Project / Description" table, the
+    gap between "Client:" and "Project N:" (still the SAME row) is often
+    identical to the gap between one row's last description line and the
+    next row's "Client:" line — both are just one paragraph-height apart —
+    so _chunk_lines_by_gap alone can't tell "still this row" from "new row"
+    apart (confirmed live: it collapsed 5 distinct projects into a single
+    chunk on a real resume for exactly this reason). An explicit repeating
+    label has no such ambiguity. Returns None if fewer than 2 such markers
+    are found, so callers can fall back to gap-based chunking for tables
+    that don't use this convention.
+    """
+    marker_idxs = [
+        i for i, (_, words) in enumerate(lines)
+        if _LEFT_ROW_START_RE.match(_words_to_text(words).strip())
+    ]
+    if len(marker_idxs) < 2:
+        return None
+
+    chunks = []
+    for k, start in enumerate(marker_idxs):
+        end = marker_idxs[k + 1] if k + 1 < len(marker_idxs) else len(lines)
+        row_lines = lines[start:end]
+        y_lo, y_hi = row_lines[0][0], row_lines[-1][0]
+        words = [w for _, ws in row_lines for w in ws]
+        chunks.append((y_lo, y_hi, words))
+
+    # Anything before the first marker (e.g. a "Relevant Project Experience:"
+    # heading, or the "Project Details" column header) becomes its own
+    # leading chunk rather than being dropped.
+    if marker_idxs[0] > 0:
+        pre_lines = lines[:marker_idxs[0]]
+        y_lo, y_hi = pre_lines[0][0], pre_lines[-1][0]
+        pre_words = [w for _, ws in pre_lines for w in ws]
+        chunks.insert(0, (y_lo, y_hi, pre_words))
+
+    return chunks
+
+
 def _pymupdf_page_text(page):
     """Extract readable text from a page, handling 2-column layouts correctly.
 
     If the page has a clear 2-column structure (detected via block positions),
-    the left and right columns are processed independently and concatenated —
-    preventing content from the two columns from being mixed on the same line.
-    Falls back to single-stream extraction for 1-column pages.
+    the left and right columns are processed independently, ROW BY ROW, so
+    each row's right-column content (e.g. "Role and Responsibilities") is
+    emitted immediately after that SAME row's left-column content (e.g. the
+    matching "Project Details" entry) — not as two giant blobs (whole left
+    column, then whole right column) which reads as if every project's
+    responsibilities were missing until the very end. Falls back to
+    single-stream extraction for 1-column pages.
     """
     raw_words = page.get_text("words")
     if not raw_words:
@@ -1216,9 +1309,87 @@ def _pymupdf_page_text(page):
     # for interleaved layouts where wide left-column lines span the page centre.
     split_x = _detect_two_col_split(page) or _detect_col_gutter_words(page)
     if split_x:
-        left_words  = [w for w in raw_words if w[0] <  split_x]
-        right_words = [w for w in raw_words if w[0] >= split_x]
-        return (_words_to_text(left_words) + "\n" + _words_to_text(right_words)).strip()
+        # Classify by PyMuPDF's own (block, line) grouping — the line units
+        # the PDF's content stream actually rendered — not by each word's own
+        # x-position. Per-word classification broke real 2-column
+        # project/responsibilities tables: a left-column paragraph line that
+        # happens to wrap close to the column's natural right margin has its
+        # LAST word occasionally drift past split_x, so that one word alone
+        # got shaved off into the right-column bucket, scrambling the
+        # sentence (confirmed live: "...providing greater visibility and
+        # control" lost "control" this way, repeated across every project
+        # description on the page). Grouping by (block, line) keeps an
+        # entire rendered line together and classifies it once, by its own
+        # leftmost word — while two column headers that legitimately sit at
+        # the identical y (e.g. "Project Details" / "Role and
+        # Responsibilities") are already separate (block, line) pairs, so
+        # they still split apart correctly.
+        line_groups = {}
+        for w in raw_words:
+            line_groups.setdefault((w[5], w[6]), []).append(w)
+
+        left_lines, right_lines = [], []  # each entry: (y0, word_list)
+        for line_words in line_groups.values():
+            y0 = min(w[1] for w in line_words)
+            x0 = min(w[0] for w in line_words)
+            (left_lines if x0 < split_x else right_lines).append((y0, line_words))
+
+        left_lines.sort(key=lambda t: t[0])
+        right_lines.sort(key=lambda t: t[0])
+
+        # Row-by-row interleaving only kicks in for a confirmed repeating
+        # table (an explicit "Client:"-style marker repeated ≥2 times) —
+        # NOT for every 2-column page. A generic 2-column layout (e.g. main
+        # content + a Skills/Contact sidebar that runs independently down
+        # the whole page) isn't a row-paired table at all, and gap-based
+        # chunking + y-overlap pairing would wrongly interleave sidebar
+        # paragraphs into the middle of unrelated main-column content.
+        # Falling back to the plain "whole left column, then whole right
+        # column" concatenation is what already correctly handles that case
+        # (confirmed against a real sidebar-style resume).
+        left_chunks = _split_left_lines_by_row_marker(left_lines)
+        if not left_chunks:
+            left_words = [w for _, words in left_lines for w in words]
+            right_words = [w for _, words in right_lines for w in words]
+            return (_words_to_text(left_words) + "\n" + _words_to_text(right_words)).strip()
+
+        right_chunks = _chunk_lines_by_gap(right_lines)
+        if not right_chunks:
+            return _words_to_text([w for _, words in left_lines for w in words])
+
+        # Assign each right-column row to the left-column row it physically
+        # sits beside — by GREATEST y-range overlap (not just the first
+        # match), or, failing any overlap, the nearest left row whose range
+        # starts at or before it. Index-pairing left[i]/right[i] would
+        # misalign the instant either side has an extra chunk (e.g. a lone
+        # column-header line forms its own tiny chunk on one side but
+        # merges into the first row on the other, purely from gap-size
+        # rounding) — matching by actual vertical position is what makes
+        # this robust regardless of how many chunks either side ends up
+        # with. Picking the FIRST overlapping chunk (rather than the best)
+        # broke a page-break row: the right column's header merged with
+        # that row's own first bullet into one wide chunk that technically
+        # brushed the header's tiny left chunk too, and "first" wrongly
+        # picked the near-zero-width header overlap over the true row.
+        assigned = [[] for _ in left_chunks]
+        for r_lo, r_hi, r_words in right_chunks:
+            best_i, best_overlap = None, -1
+            for i, (l_lo, l_hi, _) in enumerate(left_chunks):
+                overlap = min(l_hi, r_hi) - max(l_lo, r_lo)
+                if overlap >= 0 and overlap > best_overlap:
+                    best_overlap = overlap
+                    best_i = i
+            if best_i is None:
+                preceding = [i for i, (l_lo, _, _) in enumerate(left_chunks) if l_lo <= r_lo]
+                best_i = preceding[-1] if preceding else 0
+            assigned[best_i].append(r_words)
+
+        out_parts = []
+        for i, (_, _, l_words) in enumerate(left_chunks):
+            out_parts.append(_words_to_text(l_words))
+            for r_words in assigned[i]:
+                out_parts.append(_words_to_text(r_words))
+        return "\n".join(p for p in out_parts if p).strip()
 
     return _words_to_text(raw_words)
 
@@ -3578,12 +3749,53 @@ def merge_resume_data(form_data, parsed_data, overwrite=False):
 
 # ── Ollama "Resume Intelligence" parser (text LLM) ─────────────────────────────
 
-_OLLAMA_BASE         = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-_TEXT_MODEL          = os.environ.get("OLLAMA_TEXT_MODEL", "llama3.2:latest")
-_OLLAMA_TEXT_TIMEOUT = int(os.environ.get("OLLAMA_TEXT_TIMEOUT", "60"))
-_OLLAMA_BUDGET_SECS  = int(os.environ.get("OLLAMA_BUDGET_SECS", "10"))    # total AI budget
+_OLLAMA_BASE = os.environ.get(
+    "OLLAMA_BASE_URL",
+    "http://localhost:11434"
+)
+
+_TEXT_MODEL = os.environ.get(
+    "OLLAMA_TEXT_MODEL",
+    "llama3.2:latest"
+)
+
+_OLLAMA_TEXT_TIMEOUT = int(
+    os.environ.get("OLLAMA_TEXT_TIMEOUT", "60")
+)
+
+_OLLAMA_BUDGET_SECS = int(
+    os.environ.get("OLLAMA_BUDGET_SECS", "10")
+)
+
+import requests
 
 
+def get_embedding(text):
+    """
+    Generate embedding vector using Ollama's
+    nomic-embed-text model.
+    """
+
+    if not text:
+        return []
+
+    response = requests.post(
+        f"{_OLLAMA_BASE}/api/embed",
+        json={
+            "model": "nomic-embed-text",
+            "input": text[:8000]
+        },
+        timeout=20
+    )
+
+    response.raise_for_status()
+
+    result = response.json()
+
+    if not result.get("embeddings"):
+        return []
+
+    return result["embeddings"][0]
 # ── Pure-Ollama extraction — NO regex field engine in this path ────────────────
 #
 # A 1B model cannot one-shot a whole resume (it drifts, mislabels, or returns empty
@@ -5935,49 +6147,44 @@ def edit_resume(resume_id=None):
                 uploaded.save(path)
                 resume_file = save_name
 
-                # parse_mode: "llm" = Resume Intelligence (AI), anything else = Quick Parse
-                parse_mode = request.form.get("parse_mode", "llm")
-                ai_downgraded = False
-                try:
-                    if ext in ("pdf", "docx") and parse_mode == "llm":
-                        logger.info(f"Using Resume Intelligence (AI) path for {path}")
-                        try:
-                            parsed_data, _ = parse_resume_with_llm_text(path)
-                        except Exception as e:
-                            # A crash here (not just an unreachable LLM) means the AI
-                            # pipeline itself broke — log at ERROR so it can't hide, and
-                            # tell the user the result is a reduced-quality parse rather
-                            # than flashing a misleading "success".
-                            ai_downgraded = True
-                            logger.error(
-                                "Resume Intelligence pipeline FAILED for %s (%s) — "
-                                "downgraded to Quick Parse. Fields may be incomplete.",
-                                path, e, exc_info=True,
-                            )
-                            if ext == "pdf":
-                                parsed_data = _parse_pdf_quick(path)
-                            else:
-                                parsed_data = parse_resume_text(extract_resume_text(path, ext))
-                    elif ext == "pdf":
-                        parsed_data = _parse_pdf_quick(path)
-                    else:
-                        extracted = extract_resume_text(path, ext)
-                        parsed_data = parse_resume_text(extracted)
-                    if ai_downgraded:
+                # The Resume Intelligence (AI) parse — OCR + LLM field
+                # extraction — already ran once against this exact file via
+                # the /api/parse-resume AJAX preview the moment the user
+                # picked it (see edit.html's file-input "change" handler),
+                # and its results are already sitting in form_data below,
+                # reviewed by the user before they clicked Save. Re-parsing
+                # here, synchronously inside the Save request, was pure
+                # duplicate work: first confirmed live (2026-08-03) running
+                # the full OCR+LLM pipeline a second time (~2.5 min/Save);
+                # after removing that, still re-running just the fast, non-
+                # AI parse unconditionally on every file-attached Save cost
+                # another ~3.5s (its own OCR contact-strip pass) even though
+                # merge_resume_data(..., overwrite=False) below throws away
+                # nearly all of that second parse's output whenever the
+                # preview already filled the form. So only parse again when
+                # the form actually looks unfilled (preview genuinely never
+                # ran — JS disabled, network error) — the one case a second
+                # parse is doing real, non-duplicate work.
+                _preview_already_ran = bool(
+                    form_data.get("full_name") and form_data.get("summary")
+                    and (form_data.get("skills") or form_data.get("experience"))
+                )
+                if _preview_already_ran:
+                    flash("Resume file saved.", "success")
+                else:
+                    try:
+                        if ext == "pdf":
+                            parsed_data = _parse_pdf_quick(path)
+                        else:
+                            extracted = extract_resume_text(path, ext)
+                            parsed_data = parse_resume_text(extracted)
+                        flash("Resume file saved.", "success")
+                    except Exception:
                         flash(
-                            "Resume uploaded, but AI extraction failed — a basic parse was used, "
-                            "so Skills/Experience/Projects/Education may be incomplete. "
-                            "Please review the fields before saving.",
+                            "File uploaded, but text could not be extracted. "
+                            "You can still edit the profile manually.",
                             "warning",
                         )
-                    else:
-                        flash("Resume uploaded and data extracted successfully.", "success")
-                except Exception:
-                    flash(
-                        "File uploaded, but text could not be extracted. "
-                        "You can still edit the profile manually.",
-                        "warning",
-                    )
 
             merged = merge_resume_data(form_data, parsed_data, overwrite=False)
             merged["resume_file"] = resume_file
@@ -5987,20 +6194,73 @@ def edit_resume(resume_id=None):
                     conn, merged.get("full_name") or f"profile-{resume_id}", resume_id
                 )
                 merged["id"] = resume_id
+
+                # Captured before the UPDATE purely so the log line below can
+                # show old -> new — not used for any matching decision.
+                _prev_row = conn.execute(
+                    "SELECT title FROM resume WHERE id = %s", (resume_id,)
+                ).fetchone()
+                _prev_title = _prev_row["title"] if _prev_row else None
+
                 conn.execute(
                     """
                     UPDATE resume SET
-                        full_name=%(full_name)s, title=%(title)s, email=%(email)s, phone=%(phone)s,
-                        linkedin=%(linkedin)s, location=%(location)s, summary=%(summary)s, skills=%(skills)s,
-                        experience=%(experience)s, education=%(education)s, certifications=%(certifications)s,
-                        projects=%(projects)s, slug=%(slug)s, resume_file=%(resume_file)s,
-                        exp_yrs=%(exp_yrs)s, department=%(department)s, updated_at=NOW()
+                    full_name=%(full_name)s,
+                    title=%(title)s,
+                    email=%(email)s,
+                    phone=%(phone)s,
+                    linkedin=%(linkedin)s,
+                    location=%(location)s,
+                    summary=%(summary)s,
+                    experience=%(experience)s,
+                    education=%(education)s,
+                    certifications=%(certifications)s,
+                    projects=%(projects)s,
+                    slug=%(slug)s,
+                    resume_file=%(resume_file)s,
+                    exp_yrs=%(exp_yrs)s,
+                    department=%(department)s,
+                    updated_at=NOW()
                     WHERE id=%(id)s
                     """,
                     merged,
                 )
+
                 sync_skills(conn, resume_id, merged.get("skills", ""))
-                return redirect(url_for("profile_detail", resume_id=resume_id))
+
+                try:
+                    jds_for_ranking = conn.execute(
+                        "SELECT * FROM job_description WHERE position_status = %s",
+                        (DEFAULT_POSITION_STATUS,),
+                    ).fetchall()
+                    # Role & Group ("title") drives _quick_estimate_jd_match's
+                    # role-match bonus, so re-running this here on every Save
+                    # re-evaluates candidate JD selection against whatever the
+                    # title is NOW — never a stale, pre-edit selection. Logged
+                    # explicitly so a Role/Group edit's effect on matching is
+                    # verifiable without a debugger: which title was in effect,
+                    # and exactly which JDs the re-run selected as top-3.
+                    if _prev_title != merged.get("title"):
+                        logger.info(
+                            f"Role/Group changed for resume={resume_id}: "
+                            f"'{_prev_title}' -> '{merged.get('title')}' — "
+                            f"re-running matching engine against {len(jds_for_ranking)} open JD(s)"
+                        )
+                    top_jd_ids = _top_n_jd_ids_by_estimate(merged, jds_for_ranking, n=3)
+                    logger.info(
+                        f"Matching engine re-run for resume={resume_id} (title='{merged.get('title')}') "
+                        f"-> new top-3 candidate JD ids={top_jd_ids}"
+                    )
+                    trigger_background_ai_assessment(resume_id, top_jd_ids)
+                except Exception:
+                    logger.exception("Failed to trigger background AI assessment")
+
+                log_audit("Resume Profiles", "Edit", record_id=resume_id, record_label=merged.get("full_name"))
+                flash("Profile updated successfully!", "success")
+
+                return redirect(
+                    url_for("profile_detail", resume_id=resume_id)
+                )
 
             # ── Mandatory field validation (new profiles only) ───────────
             if not merged.get("exp_yrs", "").strip():
@@ -6052,23 +6312,64 @@ def edit_resume(resume_id=None):
                 """,
                 merged,
             )
+
             new_id = cursor.fetchone()["id"]
+
             sync_skills(conn, new_id, merged.get("skills", ""))
-            flash("Profile saved successfully! Here are your top matching roles.", "success")
-            return redirect(url_for("profile_detail", resume_id=new_id))
+
+            try:
+                jds_for_ranking = conn.execute(
+                    "SELECT * FROM job_description WHERE position_status = %s",
+                    (DEFAULT_POSITION_STATUS,),
+                ).fetchall()
+                top_jd_ids = _top_n_jd_ids_by_estimate(merged, jds_for_ranking, n=3)
+                trigger_background_ai_assessment(new_id, top_jd_ids)
+            except Exception:
+                logger.exception("Failed to trigger background AI assessment")
+
+            log_audit("Resume Profiles", "Add", record_id=new_id, record_label=merged.get("full_name"))
+            flash(
+                "Profile saved successfully! Here are your top matching roles.",
+                "success"
+            )
+
+            return redirect(
+                url_for("profile_detail", resume_id=new_id)
+            )
 
         # GET
         if resume_id:
-            resume = conn.execute("SELECT * FROM resume WHERE id = %s", (resume_id,)).fetchone()
+            resume = conn.execute(
+                "SELECT * FROM resume WHERE id = %s",
+                (resume_id,)
+            ).fetchone()
+
             if not resume:
                 return "Resume not found", 404
+
             resume = dict(resume)
+
         else:
-            resume = {k: "" for k in [
-                "full_name", "title", "email", "phone", "linkedin", "location",
-                "summary", "skills", "experience", "education", "certifications",
-                "projects", "slug", "resume_file", "department",
-            ]}
+            resume = {
+                k: "" for k in [
+                    "full_name",
+                    "title",
+                    "email",
+                    "phone",
+                    "linkedin",
+                    "location",
+                    "summary",
+                    "skills",
+                    "experience",
+                    "education",
+                    "certifications",
+                    "projects",
+                    "slug",
+                    "resume_file",
+                    "department",
+                ]
+            }
+
             resume["id"] = None
 
     # The "Bulk Upload" tab only applies to the Add Profile (new) flow, not editing.
@@ -6094,6 +6395,111 @@ def profile_list():
     return render_template("profile_list.html", resumes=resumes)
 
 
+def _quick_estimate_jd_match(resume_dict, jd_dict):
+    """Fast, LLM-free estimate of resume/JD fit — keyword checklist (70%) +
+    whole-document holistic similarity (20%) + a role-title exact-match bonus
+    (10%). Used ONLY to pick which JDs are worth showing as the "top 3"
+    candidates without running the real AI judge against every open JD (which
+    could be dozens and would make the profile page take minutes to load).
+    This is never the number actually displayed for a JD that has already
+    been AI-assessed — see _rank_top_jd_matches, which prefers the cached
+    ai_match_cache result whenever one exists.
+    """
+    score = calculate_match_score(resume_dict, jd_dict)
+    holistic = _holistic_or_default(resume_dict, jd_dict)
+    estimate_pct = round(
+        (score['match_percentage'] * 0.70) +
+        (holistic['fit_percentage'] * 0.20) +
+        (
+            10 if _jd_role_matches(
+                resume_dict.get('title', ''),
+                jd_dict.get('role', '')
+            ) else 0
+        )
+    )
+    return estimate_pct, score
+
+
+def _rank_top_jd_matches(conn, resume_dict, jds):
+    """Single source of truth for "top matching roles" ranking/labelling,
+    used by both the profile page's Top 3 cards and the Export PDF.
+
+    Candidate selection always uses the fast, LLM-free estimate above —
+    running the real AI judge against every open JD just to pick 3 would make
+    this page take minutes. But the percentage/tier/strengths actually
+    DISPLAYED for whichever JDs land in the top 3 come from the exact same
+    ai_match_cache entry the AI Holistic Assessment on the compare page reads
+    (_read_cached_hybrid_match) whenever that pair has already been
+    AI-assessed — never a second, independently-computed number. A JD with no
+    cached AI assessment yet shows the estimate with `is_ai_judged: False`, so
+    the template can flag it as provisional instead of presenting it as
+    equivalent to an AI-verified score; the profile page's own script then
+    upgrades it in place via the same /api/compare/.../ai-assessment endpoint,
+    converging to the identical figure the compare page would show.
+
+    Returns matches sorted best-first; caller slices to however many it needs.
+    """
+    candidates = []
+    for jd in jds:
+        jd_dict = dict(jd)
+        estimate_pct, score = _quick_estimate_jd_match(resume_dict, jd_dict)
+        candidates.append((estimate_pct, jd_dict, score))
+    candidates.sort(key=lambda c: -c[0])
+
+    matches = []
+    uncached_jd_ids = []
+    for estimate_pct, jd_dict, score in candidates[:3]:
+        cached = _read_cached_hybrid_match(conn, resume_dict, jd_dict) if conn else None
+        if cached is not None:
+            final_score = cached['fit_percentage']
+            tier_label = cached['tier_label']
+            recommendation = cached['recommendation']
+            strengths = cached.get('strengths') or score.get('matched_skills', [])
+            is_ai_judged = True
+            logger.info(
+                f"Top-3 card resume={resume_dict.get('id')} jd={jd_dict['id']}: "
+                f"AI-judged pct={final_score} tier={tier_label}"
+            )
+        else:
+            final_score = estimate_pct
+            _, tier_label, recommendation = _tier_from_pct(final_score)
+            strengths = score.get('matched_skills', [])
+            is_ai_judged = False
+            uncached_jd_ids.append(jd_dict['id'])
+            logger.info(
+                f"Top-3 card resume={resume_dict.get('id')} jd={jd_dict['id']}: "
+                f"estimate pct={final_score} tier={tier_label} (not yet AI-assessed)"
+            )
+
+        matches.append({
+            **score,
+            'jd': jd_dict,
+            'jd_id': jd_dict['id'],
+            'jd_title': str(jd_dict.get('title') or 'Unknown'),
+            'jd_role': jd_dict.get('role', ''),
+            'jd_category': str(jd_dict.get('category') or ''),
+
+            'match_percentage': score['match_percentage'],
+            'final_score': final_score,
+
+            'tier_label': tier_label,
+            'verdict': tier_label,
+            'recommendation': recommendation,
+            'matched_skills': strengths,
+            'is_ai_judged': is_ai_judged,
+        })
+
+    if uncached_jd_ids:
+        # One call → one background thread → processes these sequentially,
+        # not one thread per JD — concurrent local-LLM calls contend for the
+        # same CPU and end up slower in aggregate than running them one at a
+        # time (same reasoning as the old sequential frontend loadNext()).
+        trigger_background_ai_assessment(resume_dict.get('id'), uncached_jd_ids)
+
+    matches.sort(key=lambda x: -x['final_score'])
+    return matches
+
+
 @app.route("/profile/<int:resume_id>")
 def profile_detail(resume_id):
     with db_conn() as conn:
@@ -6111,28 +6517,11 @@ def profile_detail(resume_id):
         ).fetchall()
         resume_dict = dict(resume)
 
-        matches = []
-        for jd in jds:
-            jd_dict = dict(jd)
-            score = calculate_match_score(resume_dict, jd_dict)
-            holistic = _holistic_or_default(resume_dict, jd_dict)
-            matches.append({
-                'jd_id': jd['id'],
-                'jd_title': jd['title'],
-                'jd_role': jd_dict.get('role', ''),
-                'match_percentage': score['match_percentage'],
-                'holistic_percentage': holistic['fit_percentage'],
-                'matched_count': score['matched_count'],
-                'total_jd_requirements': score['total_jd_requirements']
-            })
+        top_matches = _rank_top_jd_matches(conn, resume_dict, jds)
 
-        _resume_role = resume_dict.get('title', '')
-        matches.sort(key=lambda x: (not _jd_role_matches(_resume_role, x['jd_role']), -x['holistic_percentage']))
-        top_matches = matches[:3]
-
-    return render_template("profile.html", resume=resume, top_matches=top_matches,
-                           l1_comments=resume_dict.get("l1_comments") or "",
-                           l2_comments=resume_dict.get("l2_comments") or "")
+        return render_template("profile.html", resume=resume, top_matches=top_matches,
+                               l1_comments=resume_dict.get("l1_comments") or "",
+                               l2_comments=resume_dict.get("l2_comments") or "")
 
 
 @app.route("/profile/<int:resume_id>/export-top-matches")
@@ -6816,6 +7205,8 @@ def export_compare_pdf(resume_id, jd_id):
     buffer.seek(0)
     cname = resume_dict.get('full_name', 'candidate').replace(' ', '_')
     jname = jd_dict.get('title', 'role').replace(' ', '_')
+    log_audit("Export", "Export PDF", record_id=f"{resume_id}:{jd_id}",
+              record_label=f"{resume_dict.get('full_name')} vs {jd_dict.get('title')}")
     return send_file(
         buffer, mimetype='application/pdf', as_attachment=True,
         download_name=f'{cname}_vs_{jname}_report.pdf'
@@ -6840,23 +7231,8 @@ def export_rich_profile_pdf(resume_id):
             (DEFAULT_POSITION_STATUS,),
         ).fetchall()
 
-    resume_dict = dict(resume)
-    matches = []
-    for jd in jds:
-        jd_dict = dict(jd)
-        score = calculate_match_score(resume_dict, jd_dict)
-        holistic = _holistic_or_default(resume_dict, jd_dict)
-        score['jd'] = jd_dict
-        score['jd_title']    = str(jd_dict.get('title') or 'Unknown')
-        score['jd_category'] = str(jd_dict.get('category') or '')
-        score['verdict']         = holistic['verdict']
-        score['tier_label']      = holistic['tier_label']
-        score['recommendation']  = holistic['recommendation']
-        score['holistic_percentage'] = holistic['fit_percentage']
-        matches.append(score)
-    _resume_role = resume_dict.get('title', '')
-    matches.sort(key=lambda x: (not _jd_role_matches(_resume_role, x['jd'].get('role', '')), -x['holistic_percentage']))
-    top_matches = matches[:3]
+        resume_dict = dict(resume)
+        top_matches = _rank_top_jd_matches(conn, resume_dict, jds)
 
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4,
@@ -7259,6 +7635,7 @@ def export_rich_profile_pdf(resume_id):
     doc.build(story)
     buffer.seek(0)
     safe = (resume_dict.get('full_name') or 'candidate').replace(' ', '_')
+    log_audit("Export", "Export PDF", record_id=resume_id, record_label=resume_dict.get('full_name'))
     return send_file(buffer, mimetype='application/pdf',
                      as_attachment=True, download_name=f'{safe}_assessment_report.pdf')
 
@@ -7402,6 +7779,7 @@ def download_resume_pdf(resume_id):
     pdf_buffer = generate_resume_pdf(resume_dict)
 
     filename = f"{resume_dict.get('full_name', 'Resume').replace(' ', '_')}.pdf"
+    log_audit("Downloads", "Download", record_id=resume_id, record_label=resume_dict.get('full_name'))
     return send_file(
         pdf_buffer,
         mimetype='application/pdf',
@@ -7438,12 +7816,13 @@ def extract_resume_data(resume_id):
 @app.route("/profile/<int:resume_id>/delete", methods=["POST"])
 def delete_resume(resume_id):
     with db_conn() as conn:
-        row = conn.execute("SELECT resume_file FROM resume WHERE id = %s", (resume_id,)).fetchone()
+        row = conn.execute("SELECT resume_file, full_name FROM resume WHERE id = %s", (resume_id,)).fetchone()
         if not row:
             return "Profile not found", 404
         if row["resume_file"]:
             (UPLOAD_FOLDER / row["resume_file"]).unlink(missing_ok=True)
         conn.execute("DELETE FROM resume WHERE id = %s", (resume_id,))
+    log_audit("Resume Profiles", "Delete", record_id=resume_id, record_label=row["full_name"])
     flash("Profile deleted.", "success")
     return redirect(url_for("profile_list"))
 
@@ -7581,7 +7960,18 @@ def parse_resume_api():
     try:
         name = secure_filename(uploaded.filename)
         ext = name.rsplit(".", 1)[1].lower()
-        temp_path = UPLOAD_FOLDER / f"tmp-parse.{ext}"
+        # Unique per request — this used to be a fixed "tmp-parse.<ext>" path
+        # shared by every call to this endpoint. The dev server runs
+        # threaded (concurrent requests), so two people (or the same person,
+        # two tabs) previewing a resume around the same time could overwrite
+        # or delete each other's temp file mid-parse: one request reads back
+        # a different file than it just uploaded, or its file vanishes
+        # (unlink in the other request's `finally`) while still being read.
+        # This is the most likely explanation for "parsing worked, then
+        # intermittently didn't, for the same file" — a single-process,
+        # single-request test can never reproduce it, only concurrent real
+        # usage on the shared server can.
+        temp_path = UPLOAD_FOLDER / f"tmp-parse-{uuid.uuid4().hex}.{ext}"
         uploaded.save(str(temp_path))
         # parse_mode: "llm" = Resume Intelligence (AI), anything else = Quick Parse
         parse_mode  = request.form.get("parse_mode", "llm")
@@ -7801,7 +8191,7 @@ def dashboard():
         top_requirements = conn.execute(
             """
             SELECT id, requirement_code, requirement_name, client, division,
-                   num_requirement, status, profiles_shared
+                   num_requirement, status, profiles_shared, interviewed, offered, onsite_offshore
             FROM requirement
             WHERE status = 'Open'
             ORDER BY created_at DESC
@@ -7877,6 +8267,7 @@ def dashboard():
         recent_interviews=list(recent_interviews),
         top_requirements=list(top_requirements),
         all_candidates=list(all_candidates_min),
+        interview_schedule_statuses=INTERVIEW_SCHEDULE_STATUSES,
     )
 
 
@@ -8497,6 +8888,26 @@ def ensure_ai_match_cache_table(conn):
             PRIMARY KEY (resume_id, jd_id)
         )
     """)
+
+    conn.execute("""
+        ALTER TABLE ai_match_cache
+        ADD COLUMN IF NOT EXISTS extra JSONB
+        DEFAULT '{}'::jsonb
+    """)
+
+
+def ensure_role_match_cache_table(conn):
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS role_match_cache (
+            resume_id      INTEGER NOT NULL,
+            jd_id          INTEGER NOT NULL,
+            fit_percentage INTEGER NOT NULL,
+            similarity     NUMERIC(10,6),
+            updated_at     TIMESTAMP DEFAULT NOW(),
+
+            PRIMARY KEY (resume_id, jd_id)
+        )
+    """)
     # Defensive migration — this table already existed in some dev environments
     # before the "extra" column (strengths/concerns/suggested_roles) was added.
     conn.execute("ALTER TABLE ai_match_cache ADD COLUMN IF NOT EXISTS extra JSONB DEFAULT '{}'::jsonb")
@@ -9066,7 +9477,119 @@ def seed_jds(conn):
 
 
 # ── Matching Algorithm ────────────────────────────────────────────────────────
+def cosine_similarity(v1, v2):
 
+    if not v1 or not v2:
+        return 0
+
+    dot = sum(a * b for a, b in zip(v1, v2))
+
+    mag1 = math.sqrt(sum(a * a for a in v1))
+    mag2 = math.sqrt(sum(a * a for a in v2))
+
+    if mag1 == 0 or mag2 == 0:
+        return 0
+
+    return dot / (mag1 * mag2)
+
+
+def resume_match_text(resume):
+
+    return "\n".join([
+        str(resume.get("title", "")),
+        str(resume.get("summary", "")),
+        str(resume.get("skills", "")),
+        str(resume.get("experience", "")),
+        str(resume.get("projects", "")),
+        str(resume.get("certifications", ""))
+    ])
+
+
+def jd_match_text(jd):
+
+    return "\n".join([
+        str(jd.get("title", "")),
+        str(jd.get("skills", "")),
+        str(jd.get("requirements", "")),
+        str(jd.get("responsibilities", "")),
+        str(jd.get("keywords", ""))
+    ])
+
+
+def rebuild_role_match_cache(resume_id):
+    print("CACHE BUILD STARTED", resume_id)
+    with db_conn() as conn:
+        resume = conn.execute(
+            "SELECT * FROM resume WHERE id = %s", (resume_id,)
+        ).fetchone()
+        if not resume:
+            return
+        resume = dict(resume)    
+        resume_embedding = get_embedding(    
+            resume_match_text(resume)  
+      )
+        if not resume_embedding:      
+            return
+        jds = conn.execute(
+            """
+            SELECT *
+            FROM job_description         
+            WHERE position_status = 'Open'         
+            """
+        ).fetchall()
+        print("JD count:", len(jds))
+
+        for jd in jds:
+            jd_dict = dict(jd)
+            jd_embedding = get_embedding(              
+                jd_match_text(jd_dict)          
+                )
+
+            if not jd_embedding:
+                continue
+
+            similarity = cosine_similarity(
+                resume_embedding,          
+                jd_embedding  
+            )
+
+            fit_percentage = round(similarity * 100)
+
+            conn.execute(
+                """
+                INSERT INTO role_match_cache            
+                (
+                   resume_id,           
+                   jd_id,       
+                   fit_percentage,                
+                   similarity,              
+                   updated_at
+                )
+                VALUES
+                (              
+                %s,                
+                %s,           
+                %s,            
+                %s,                    
+                NOW()             
+                )
+
+                ON CONFLICT (resume_id, jd_id)
+
+                DO UPDATE SET                   
+                fit_percentage = EXCLUDED.fit_percentage,                    
+                similarity = EXCLUDED.similarity,               
+                updated_at = NOW()
+                """,
+                (                 
+                    resume_id,                  
+                    jd_dict["id"],                    
+                    fit_percentage,                    
+                    similarity
+                )            
+            )
+
+            
 def _normalize(text):
     return re.sub(r'\s+', ' ', (text or '').lower()).strip()
 
@@ -9252,18 +9775,11 @@ def _holistic_match(resume_dict, jd_dict):
     # doesn't surface the raw number.
     pct = max(0, min(100, round(similarity * 220)))
 
-    if pct >= 70:
-        verdict, tier_label, recommendation = (
-            "Strong overall fit", "Strong Fit", "🌟 Great fit for this role — advance to next round")
-    elif pct >= 45:
-        verdict, tier_label, recommendation = (
-            "Good overall fit", "Good Fit", "👍 Good fit for this role — worth interviewing")
-    elif pct >= 25:
-        verdict, tier_label, recommendation = (
-            "Partial overall fit", "Partial Fit", "🤔 Partial fit — worth a closer look")
-    else:
-        verdict, tier_label, recommendation = (
-            "Limited overall fit", "Weak Fit", "⏭ Not a strong fit for this role")
+    # Tier/label/recommendation come from _tier_from_pct() — the one place in
+    # the app that maps a percentage to a tier — so this never drifts out of
+    # sync with the AI hybrid assessment or the Top 3 Matching Roles cards
+    # (they used to each bucket the same percentage differently).
+    verdict, tier_label, recommendation = _tier_from_pct(pct)
 
     rationale = f"Compared the full job description against the full resume as whole documents; {verdict.lower()} based on shared domain content."
 
@@ -9320,9 +9836,17 @@ def _estimate_exp_years(experience_text):
     return total if total > 0 else None
 
 
-def calculate_match_score(resume_d, jd_d):
-    corpus = " ".join(str(resume_d.get(k) or '') for k in
-                      ['skills', 'experience', 'summary', 'projects', 'certifications', 'education', 'title'])
+def calculate_match_score(resume_d, jd_d, include_title=True):
+    """include_title=False is used by the AI hybrid judgment path
+    (_hybrid_match) so that editing pure organizational metadata (the
+    Role & Group field, which sets `title`) can never change the keyword
+    grounding facts fed to the LLM — only the fast pre-AI estimate
+    (_quick_estimate_jd_match) and its own candidate-selection role-bonus
+    still consider title, unchanged from before."""
+    corpus_fields = ['skills', 'experience', 'summary', 'projects', 'certifications', 'education']
+    if include_title:
+        corpus_fields.append('title')
+    corpus = " ".join(str(resume_d.get(k) or '') for k in corpus_fields)
     items = _parse_jd_items(jd_d.get('skills'), jd_d.get('requirements'), jd_d.get('keywords'))
     if not items:
         return {
@@ -9386,26 +9910,89 @@ def calculate_match_score(resume_d, jd_d):
 # (adjacent tools, transferable skills, seniority) and explain its verdict in
 # plain language, with its own confidence.
 
-_HYBRID_KEYWORD_WEIGHT = 0.35
-_HYBRID_LLM_WEIGHT = 0.65
+# ── Weighted category scoring model ───────────────────────────────────────────
+# The AI Holistic Assessment score is a deterministic weighted sum of 9 named
+# categories, each judged by the LLM using contextual/semantic understanding
+# (not literal keyword matching — that's what calculate_match_score() already
+# does, and its findings are fed into the prompt below as grounding facts for
+# the Skills/Tools/Experience categories specifically). The weighting itself
+# happens in Python, never left to the LLM to compute, so it's auditable and
+# never varies. Weights sum to 1.0 — see _CATEGORY_WEIGHTS below.
+_CATEGORY_WEIGHTS = {
+    "skills":           0.22,  # Required + preferred skills
+    "responsibilities": 0.13,  # Roles & responsibilities alignment
+    "experience":       0.15,  # Years of experience + relevance of that experience
+    "domain":           0.10,  # Domain / industry experience
+    "certifications":   0.08,
+    "education":        0.07,
+    "regulatory":       0.08,  # Regulatory / standards knowledge (ISO, FDA, GDPR, ...)
+    "tools":            0.10,  # Tools & technologies
+    "soft_skills":      0.07,
+}
+assert abs(sum(_CATEGORY_WEIGHTS.values()) - 1.0) < 1e-9, "category weights must sum to 100%"
+
+# The exact example values a prior prompt version put in front of the model
+# (see _llm_judge_match) — phi4-mini was found copying these back verbatim
+# regardless of resume/JD content, which is why every ai_match_cache row
+# converged on ~69%. Kept as a tripwire even after removing that example
+# from the prompt, in case a future prompt edit reintroduces the pattern.
+_KNOWN_POISONED_EXAMPLE_SCORES = {
+    "skills": 75, "responsibilities": 60, "experience": 80, "domain": 50,
+    "certifications": 40, "education": 90, "regulatory": 100, "tools": 65,
+    "soft_skills": 50,
+}
+
+_CATEGORY_LABELS = {
+    "skills": "Skills", "responsibilities": "Responsibilities", "experience": "Experience",
+    "domain": "Domain Experience", "certifications": "Certifications", "education": "Education",
+    "regulatory": "Regulatory/Standards", "tools": "Tools & Technologies", "soft_skills": "Soft Skills",
+}
+
 _CONFIDENCE_AGREEMENT_WEIGHT = 0.45
 _CONFIDENCE_SUFFICIENCY_WEIGHT = 0.20
 _CONFIDENCE_SELF_WEIGHT = 0.35
-_HYBRID_ALGO_VERSION = "hybrid-v1"
+# Bumped whenever the scoring formula/prompt shape changes — every cached
+# ai_match_cache row is keyed to this version (see _read_cached_hybrid_match),
+# so a version bump makes every existing cache entry a miss and forces a
+# fresh, correctly-computed re-assessment instead of serving an old model's
+# number under the new UI.
+_HYBRID_ALGO_VERSION = "hybrid-v4-title-excluded"
+
+
+def _resume_match_fingerprint(resume_dict):
+    """Hash of only the resume fields that actually feed AI/keyword matching
+    (see calculate_match_score's include_title=False and _llm_judge_match,
+    which both deliberately exclude Title/Role & Group from the AI judgment).
+    _read_cached_hybrid_match compares this instead of the raw
+    resume.updated_at timestamp, so editing purely organizational metadata
+    (Role & Group, location, contact info) can never invalidate an
+    otherwise-identical cached AI assessment — confirmed live 2026-08-04 that
+    a metadata-only edit was forcing a full, wasteful recompute that (before
+    Title was excluded above) even produced a visibly different percentage.
+    """
+    fields = ("summary", "skills", "experience", "projects", "certifications", "education", "exp_yrs")
+    raw = "\x1f".join(str(resume_dict.get(k) or "") for k in fields)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def _tier_from_pct(pct):
-    """Same verdict/tier/recommendation buckets as _holistic_match(), shared
-    so the hybrid blended score buckets identically to the pure-heuristic
-    fallback the user already saw before this feature existed.
+    """Single source of truth for percentage → (verdict, tier_label,
+    recommendation). Every scorer in the app — the keyword+LLM hybrid
+    assessment, the whole-document holistic fallback, and the Top 3 Matching
+    Roles ranking — buckets through this one function, so the same
+    percentage always reads the same tier everywhere. These used to be three
+    separate copies of this if/elif chain at different cutoffs (70/45/25 in
+    two places, 80/60/40 in the third), so the exact same score could show
+    "Good Fit" in one component and "Partial Fit" in another for the same
+    resume/JD pair — the score-inconsistency bug this fixes.
     """
-    if pct >= 70:
+    if pct >= 80:
         return ("Strong overall fit", "Strong Fit",
                 "🌟 Great fit for this role — advance to next round")
-    elif pct >= 45:
+    elif pct >= 60:
         return ("Good overall fit", "Good Fit",
                 "👍 Good fit for this role — worth interviewing")
-    elif pct >= 25:
+    elif pct >= 40:
         return ("Partial overall fit", "Partial Fit",
                 "🤔 Partial fit — worth a closer look")
     else:
@@ -9418,6 +10005,18 @@ def _clamp_pct(value, default=50):
         return max(0, min(100, int(round(float(value)))))
     except (TypeError, ValueError):
         return default
+
+
+def _unwrap_category_score(value):
+    """Defensive unwrap for a small-model quirk seen in practice: a category
+    score occasionally comes back wrapped as {"description text": 60}
+    instead of plain 60, when the model echoes the category's descriptive
+    hint back as a nested key. If given a dict, pull out its first value;
+    otherwise pass the value through unchanged for _clamp_pct to handle.
+    """
+    if isinstance(value, dict) and value:
+        return next(iter(value.values()))
+    return value
 
 
 def _coerce_str_list(value, limit):
@@ -9435,8 +10034,16 @@ def _coerce_str_list(value, limit):
 
 def _llm_judge_match(resume_dict, jd_dict, keyword_result):
     """Asks the local Ollama model to judge JD/resume fit as a human recruiter
-    would, grounded in the keyword scan's own matched/missing findings so it
-    reasons about the gaps rather than re-deriving everything from scratch.
+    would — but instead of one opaque "fit_percentage", it scores each of the
+    9 named categories in _CATEGORY_WEIGHTS independently (0-100), using
+    contextual/semantic judgment rather than literal keyword matching (that's
+    what calculate_match_score() already does; its matched/missing findings
+    are fed in below as grounding facts for the model's skills/tools/
+    experience judgment, not as something it re-derives from scratch). The
+    weighted sum that turns these into one final percentage happens entirely
+    in Python (_hybrid_match), never left to the LLM, so the weighting is
+    auditable and never drifts.
+
     Returns None (never raises) if the model is unreachable, times out, or
     returns something we can't make sense of — callers fall back to the
     pure-heuristic score in that case, same as every other Ollama caller here.
@@ -9446,53 +10053,125 @@ def _llm_judge_match(resume_dict, jd_dict, keyword_result):
         ("Requirements", "requirements"), ("Responsibilities", "responsibilities"),
         ("Keywords", "keywords"),
     ])
+    # Title deliberately excluded — it's the Role & Group field, pure
+    # organizational metadata the UI lets a user change independent of the
+    # actual resume content. Including it here made editing only Role/Group
+    # change the AI-judged percentage for an unrelated JD (confirmed live
+    # 2026-08-04: same skills/experience, only Title edited, same JD's score
+    # moved from 58% to 50%) — the deterministic LLM call was correctly
+    # reflecting a real prompt-input change, but from the user's perspective
+    # metadata-only edits shouldn't move a score at all. calculate_match_score
+    # (below, include_title=False) is likewise kept title-free so the
+    # grounding facts handed to the LLM can't leak title influence either.
     resume_text = "\n".join(f"{label}: {str(resume_dict.get(key) or '')[:1500]}" for label, key in [
-        ("Title", "title"), ("Summary", "summary"), ("Skills", "skills"),
+        ("Summary", "summary"), ("Skills", "skills"),
         ("Experience", "experience"), ("Projects", "projects"),
         ("Certifications", "certifications"), ("Education", "education"),
     ])
     matched = keyword_result.get("matched_skills") or []
     missing = keyword_result.get("missing_skills") or []
+    jd_yrs = keyword_result.get("jd_years_required")
+    res_yrs = keyword_result.get("resume_years_estimated")
+    exp_fact = (
+        f"JD requires {jd_yrs}+ year(s); resume shows ~{res_yrs} year(s)." if jd_yrs and res_yrs is not None
+        else f"JD requires {jd_yrs}+ year(s); resume experience timeline unclear." if jd_yrs
+        else "No specific years-of-experience requirement stated in the JD."
+    )
 
+    # The category MEANINGS are given as a plain bulleted list, kept fully
+    # separate from the JSON template below. The template uses bare "<int>"
+    # placeholders (no concrete numbers, no descriptive text inline with a
+    # key) rather than either of the two formats tried previously:
+    #   - abstract "<0-100 int, description>" hints inline with the key —
+    #     phi4-mini would echo the description text back as a nested object,
+    #     e.g. {"skills": {"required+preferred skills coverage": 60}}.
+    #   - a concrete, fully-filled-in EXAMPLE with plain numbers — confirmed
+    #     live (2026-08-03) that phi4-mini copies those exact numbers back
+    #     verbatim regardless of resume/JD content: a strong Python-backend
+    #     match and a completely unrelated graphic-designer resume against
+    #     the same JD both returned the identical example scores, which is
+    #     why every single assessment in ai_match_cache converged on ~69%.
+    # A bare "<int>" placeholder gives the model the JSON shape without
+    # anything it can plausibly parrot, and was verified live to produce
+    # properly differentiated scores across strong/weak/mid-match resumes
+    # (including empty and garbage-text edge cases, which still fail closed
+    # to plain integers rather than nested objects).
     prompt = (
         "You are a technical recruiter judging how well a candidate's resume fits a job description. "
-        "A keyword scan already ran and found the results below — use it as a starting point, "
-        "then look past exact wording for adjacent tools, transferable skills, and seniority signals "
-        "the keyword scan would miss.\n\n"
-        f"KEYWORD SCAN: {len(matched)}/{len(matched) + len(missing)} JD items matched "
-        f"({keyword_result.get('match_percentage', 0)}%).\n"
+        "Score these 9 categories independently, each 0-100, using your own contextual/semantic "
+        "judgment based ONLY on the specific JOB DESCRIPTION and RESUME given below — credit adjacent "
+        "tools, transferable skills, and equivalent experience the exact wording wouldn't literally "
+        "match, not just verbatim overlap:\n"
+        "- skills: required + preferred skills coverage\n"
+        "- responsibilities: how well past roles map to this JD's responsibilities\n"
+        "- experience: years AND relevance of that experience\n"
+        "- domain: domain/industry experience overlap\n"
+        "- certifications: relevant certifications held vs wanted\n"
+        "- education: education requirement fit\n"
+        "- regulatory: regulatory/standards knowledge (e.g. ISO/FDA/GDPR); use 100 if none is required\n"
+        "- tools: tools & technologies overlap\n"
+        "- soft_skills: communication/leadership/collaboration signals; use 50 if no signal either way\n\n"
+        f"KEYWORD SCAN (grounding facts, not the final answer): {len(matched)}/{len(matched) + len(missing)} "
+        f"JD skill/requirement items matched verbatim ({keyword_result.get('match_percentage', 0)}%).\n"
         f"Matched: {', '.join(matched[:20]) or 'none'}\n"
-        f"Missing: {', '.join(missing[:20]) or 'none'}\n\n"
+        f"Missing: {', '.join(missing[:20]) or 'none'}\n"
+        f"EXPERIENCE FACT: {exp_fact}\n\n"
         f"JOB DESCRIPTION:\n{jd_text}\n\n"
         f"RESUME:\n{resume_text}\n\n"
-        "Return ONLY JSON with this exact shape:\n"
-        '{"fit_percentage": <0-100 int>, "verdict": "<Strong Match|Good Match|Partial Match|Low Match>", '
+        "Respond with ONLY a single JSON object, no other text before or after it, in EXACTLY this "
+        "shape — every category_scores value must be a plain integer from 0 to 100 that YOU compute "
+        "specifically for the resume and JD above, never an object, a string, or a placeholder:\n"
+        '{"category_scores": {"skills": <int>, "responsibilities": <int>, "experience": <int>, '
+        '"domain": <int>, "certifications": <int>, "education": <int>, "regulatory": <int>, '
+        '"tools": <int>, "soft_skills": <int>}, '
+        '"verdict": "<Strong Match|Good Match|Partial Match|Low Match>", '
         '"rationale": "<2-4 sentences grounded in specific resume/JD content explaining the verdict>", '
         '"strengths": ["<short phrase>", ...up to 6], '
         '"concerns": "<1-2 sentences on the biggest gaps, or empty string if none>", '
         '"suggested_roles": ["<role name>", ...up to 3, or empty list], '
-        '"confidence": <0-100 int, how confident you are in this judgment given the information available>, '
+        '"confidence": <int 0-100, how confident you are in this judgment given the information available>, '
         '"confidence_reason": "<one short sentence>"}'
     )
 
     try:
-        # 700 output tokens was far more headroom than this JSON schema ever
-        # needs (a short rationale + a handful of short phrases realistically
-        # tops out well under 400) — on CPU-only Ollama, generation time scales
-        # with num_predict, and this is called 3x sequentially per profile
-        # view, so trimming the cap cuts real wall-clock time with no change
-        # to what's asked of the model.
-        raw = _ollama_chat(prompt, as_json=True, num_predict=400, num_ctx=8192)
+        # On CPU-only Ollama, generation time scales with num_predict — 500
+        # output tokens covers 9 category scores plus a short rationale and a
+        # handful of short phrases with headroom, without the runaway cost of
+        # an unbounded cap. This now runs at most once per resume/JD pair ever
+        # (cached + advisory-locked, see _get_or_compute_hybrid_match), not
+        # repeatedly per page view, so this cap is about output quality, not
+        # working around being called repeatedly.
+        raw = _ollama_chat(prompt, as_json=True, num_predict=500, num_ctx=8192)
     except Exception as e:
         logger.warning(f"LLM judge call failed: {e}", exc_info=True)
         return None
 
-    if not isinstance(raw, dict) or "fit_percentage" not in raw:
+    if not isinstance(raw, dict) or not isinstance(raw.get("category_scores"), dict):
         logger.warning(f"LLM judge returned unusable response: {str(raw)[:200]}")
         return None
 
+    raw_categories = raw["category_scores"]
+    category_scores = {
+        cat: _clamp_pct(_unwrap_category_score(raw_categories.get(cat)), default=None)
+        for cat in _CATEGORY_WEIGHTS
+    }
+    missing_categories = [cat for cat, val in category_scores.items() if val is None]
+    if missing_categories:
+        logger.warning(f"LLM judge omitted categories {missing_categories}, response: {str(raw)[:200]}")
+        return None
+
+    if category_scores == _KNOWN_POISONED_EXAMPLE_SCORES:
+        # Defense-in-depth against the exact regression fixed on 2026-08-03:
+        # the model parroting a literal prompt example back verbatim instead
+        # of judging the actual resume/JD. Odds of a genuine, independently
+        # -computed judgment landing on this exact 9-value combination are
+        # negligible, so treat it as a copy and fall back to the heuristic
+        # rather than caching a fabricated score.
+        logger.warning(f"LLM judge returned the known-poisoned example verbatim — treating as invalid, response: {str(raw)[:200]}")
+        return None
+
     return {
-        "fit_percentage": _clamp_pct(raw.get("fit_percentage")),
+        "category_scores": category_scores,
         "verdict": str(raw.get("verdict") or "").strip()[:100],
         "rationale": str(raw.get("rationale") or "").strip()[:600],
         "strengths": _coerce_str_list(raw.get("strengths"), 6),
@@ -9509,23 +10188,42 @@ def _hybrid_match(resume_dict, jd_dict):
     _holistic_or_default() (with a Low confidence badge) if the LLM judge is
     unavailable, so a down/slow Ollama server degrades the UX rather than
     breaking it.
+
+    The returned dict always carries `is_ai_judged`: True only when the real
+    LLM judge actually ran, False for the heuristic fallback. Callers that
+    cache this result (see _store_hybrid_match) must only persist it when
+    is_ai_judged is True — caching a fallback would otherwise permanently
+    freeze that resume/JD pair at a low-confidence keyword-only estimate even
+    after Ollama comes back, since a cache hit is never re-checked against a
+    live LLM again.
     """
-    keyword_result = calculate_match_score(resume_dict, jd_dict)
+    # include_title=False: this keyword scan feeds the LLM's grounding facts
+    # (matched/missing lists), so it must exclude Title too — otherwise a
+    # Role/Group-only edit could still shift the AI's judgment indirectly
+    # through those grounding facts even with Title removed from resume_text
+    # above.
+    keyword_result = calculate_match_score(resume_dict, jd_dict, include_title=False)
     llm_result = _llm_judge_match(resume_dict, jd_dict, keyword_result)
 
     if llm_result is None:
         fallback = _holistic_or_default(resume_dict, jd_dict)
         fallback["keyword_match_percentage"] = keyword_result.get("match_percentage", 0)
-        fallback["llm_fit_percentage"] = None
+        fallback["category_scores"] = None
         fallback["confidence"] = 25
         fallback["confidence_label"] = "Low"
         fallback["confidence_reason"] = "AI judge unavailable — showing keyword + heuristic estimate only."
         fallback["algo_version"] = _HYBRID_ALGO_VERSION
+        fallback["is_ai_judged"] = False
         return fallback
 
     keyword_pct = keyword_result.get("match_percentage", 0)
-    llm_pct = llm_result["fit_percentage"]
-    final_pct = round(keyword_pct * _HYBRID_KEYWORD_WEIGHT + llm_pct * _HYBRID_LLM_WEIGHT)
+    category_scores = llm_result["category_scores"]
+    # The ONLY place the final percentage is computed — a deterministic
+    # weighted sum of the 9 category scores, weights defined once in
+    # _CATEGORY_WEIGHTS. The LLM never computes or reports this number
+    # itself, so it's fully auditable and reproducible from the stored
+    # category_scores alone.
+    final_pct = round(sum(category_scores[cat] * weight for cat, weight in _CATEGORY_WEIGHTS.items()))
     verdict, tier_label, recommendation = _tier_from_pct(final_pct)
 
     total_items = keyword_result.get("total_jd_requirements", 0)
@@ -9538,7 +10236,11 @@ def _hybrid_match(resume_dict, jd_dict):
     else:
         data_sufficiency = 30
 
-    agreement = 100 - abs(keyword_pct - llm_pct)
+    # Agreement between the literal keyword scan and the semantic weighted
+    # score — a big gap between "what's written verbatim" and "what the
+    # category judgment concluded" is itself a signal the assessment
+    # deserves a closer human look, not just a raw percentage.
+    agreement = 100 - abs(keyword_pct - final_pct)
     confidence_pct = round(
         agreement * _CONFIDENCE_AGREEMENT_WEIGHT
         + data_sufficiency * _CONFIDENCE_SUFFICIENCY_WEIGHT
@@ -9556,15 +10258,241 @@ def _hybrid_match(resume_dict, jd_dict):
         "concerns": llm_result["concerns"],
         "suggested_roles": llm_result["suggested_roles"],
         "keyword_match_percentage": keyword_pct,
-        "llm_fit_percentage": llm_pct,
+        "category_scores": category_scores,
         "confidence": confidence_pct,
         "confidence_label": confidence_label,
         "confidence_reason": llm_result["confidence_reason"] or (
-            "Keyword scan and AI judge agree closely." if agreement >= 80
-            else "Keyword scan and AI judge differ somewhat."
+            "Keyword scan and category judgment agree closely." if agreement >= 80
+            else "Keyword scan and category judgment differ somewhat."
         ),
         "algo_version": _HYBRID_ALGO_VERSION,
+        "is_ai_judged": True,
     }
+
+
+def _read_cached_hybrid_match(conn, resume, jd):
+    """Read-only lookup into ai_match_cache. Returns the cached hybrid
+    assessment dict if a genuine AI-judged result exists and is still fresh
+    (neither side edited since it was computed, same algo version) — else
+    None. Never computes or blocks on Ollama; callers that need a result even
+    when nothing is cached should use _get_or_compute_hybrid_match() instead.
+
+    This is the single place that decides whether a cached row counts —
+    every reader (the compare page, the Top 3 Matching Roles cards) goes
+    through it so they can never disagree about whether a pair has already
+    been AI-assessed.
+    """
+    ensure_ai_match_cache_table(conn)
+    cached = conn.execute(
+        "SELECT * FROM ai_match_cache WHERE resume_id = %s AND jd_id = %s",
+        (resume["id"], jd["id"]),
+    ).fetchone()
+    if not cached:
+        return None
+
+    # resume.updated_at is TIMESTAMPTZ (tz-aware) but job_description.updated_at
+    # is a naive TIMESTAMP — normalize both sides to naive before comparing so
+    # this doesn't depend on which of the two inconsistent column types a given
+    # value happened to come from.
+    _naive = lambda dt: dt.replace(tzinfo=None) if dt and dt.tzinfo else dt
+    extra = cached["extra"] or {}
+    if not (
+        # Content fingerprint, not the raw resume.updated_at timestamp — a
+        # Save that only touches Role & Group (or location/contact info)
+        # still bumps updated_at but must NOT invalidate an otherwise
+        # identical cached AI assessment (see _resume_match_fingerprint).
+        extra.get("resume_match_fingerprint") == _resume_match_fingerprint(resume)
+        and _naive(cached["jd_updated_at"]) == _naive(jd["updated_at"])
+        and extra.get("algo_version") == _HYBRID_ALGO_VERSION
+        # Cache rows written before is_ai_judged existed (or a fallback that
+        # slipped through pre-fix) don't carry `is_ai_judged: true` — treat
+        # them as a miss so they self-heal to a real AI judgment on next view
+        # instead of serving a stale keyword-only estimate forever.
+        and extra.get("is_ai_judged")
+    ):
+        return None
+
+    return {
+        "fit_percentage": cached["fit_percentage"],
+        "verdict": cached["verdict"],
+        "tier_label": extra.get("tier_label", cached["verdict"]),
+        "recommendation": extra.get("recommendation", ""),
+        "rationale": cached["rationale"],
+        "strengths": extra.get("strengths", []),
+        "concerns": extra.get("concerns", ""),
+        "suggested_roles": extra.get("suggested_roles", []),
+        "keyword_match_percentage": extra.get("keyword_match_percentage"),
+        "category_scores": extra.get("category_scores"),
+        "category_weights": _CATEGORY_WEIGHTS,
+        "confidence": extra.get("confidence"),
+        "confidence_label": extra.get("confidence_label", ""),
+        "confidence_reason": extra.get("confidence_reason", ""),
+        "algo_version": _HYBRID_ALGO_VERSION,
+        "is_ai_judged": True,
+    }
+
+
+def _store_hybrid_match(conn, resume, jd, assessment):
+    """Persist a genuinely AI-judged hybrid assessment so every other view of
+    this resume/JD pair reuses it instead of recomputing. Only ever called
+    with assessment['is_ai_judged'] True — a fallback (LLM unavailable or
+    timed out) is intentionally never written here, see _hybrid_match.
+    """
+    extra_json = json.dumps({
+        "tier_label": assessment.get("tier_label", assessment["verdict"]),
+        "recommendation": assessment.get("recommendation", ""),
+        "strengths": assessment.get("strengths", []),
+        "concerns": assessment.get("concerns", ""),
+        "suggested_roles": assessment.get("suggested_roles", []),
+        "keyword_match_percentage": assessment.get("keyword_match_percentage"),
+        "category_scores": assessment.get("category_scores"),
+        "confidence": assessment.get("confidence"),
+        "confidence_label": assessment.get("confidence_label", ""),
+        "confidence_reason": assessment.get("confidence_reason", ""),
+        "algo_version": assessment.get("algo_version", _HYBRID_ALGO_VERSION),
+        "is_ai_judged": True,
+        "resume_match_fingerprint": _resume_match_fingerprint(resume),
+    })
+    conn.execute(
+        """
+        INSERT INTO ai_match_cache
+            (resume_id, jd_id, fit_percentage, verdict, rationale, extra,
+             resume_updated_at, jd_updated_at, computed_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+        ON CONFLICT (resume_id, jd_id) DO UPDATE SET
+            fit_percentage = EXCLUDED.fit_percentage,
+            verdict = EXCLUDED.verdict,
+            rationale = EXCLUDED.rationale,
+            extra = EXCLUDED.extra,
+            resume_updated_at = EXCLUDED.resume_updated_at,
+            jd_updated_at = EXCLUDED.jd_updated_at,
+            computed_at = NOW()
+        """,
+        (resume["id"], jd["id"], assessment["fit_percentage"], assessment["verdict"],
+         assessment["rationale"], extra_json, resume["updated_at"], jd["updated_at"]),
+    )
+
+
+def _get_or_compute_hybrid_match(conn, resume, jd):
+    """Single entry point for "the AI Holistic Assessment" of one resume/JD
+    pair. Every caller — the compare page's async fetch, the Top 3 Matching
+    Roles cards' background upgrade — goes through this so they can never
+    independently compute or display a different number for the same pair:
+    reuse the cached genuine AI judgment when one exists and nothing has
+    changed since; otherwise run the real LLM judge now and cache the
+    result, unless the LLM was unreachable (see _hybrid_match /
+    _store_hybrid_match).
+
+    Serialized per (resume_id, jd_id) with a Postgres advisory lock — not an
+    in-process Python lock — because this app can end up with more than one
+    server process bound to the same port (e.g. a stale process left running
+    from a previous launch alongside a freshly-restarted one; Windows will
+    happily let both bind). Two such processes racing to compute the same
+    uncached pair would each call the LLM independently and whichever
+    finished last would silently overwrite the other's cache row — which is
+    exactly what made the displayed percentage flip between refreshes. A
+    Postgres advisory lock is enforced by the database itself, so it
+    serializes correctly across processes, not just threads within one.
+    pg_advisory_lock is session-scoped: it releases automatically if the
+    connection dies before the `finally` runs, so a crashed request can
+    never leave the pair permanently locked.
+    """
+    cached = _read_cached_hybrid_match(conn, resume, jd)
+    if cached is not None:
+        logger.info(f"AI holistic assessment cache hit → resume={resume['id']} jd={jd['id']} pct={cached['fit_percentage']}")
+        return cached
+
+    resume_id, jd_id = resume["id"], jd["id"]
+    conn.execute("SELECT pg_advisory_lock(%s, %s)", (resume_id, jd_id))
+    try:
+        # Re-check: another process/thread may have just finished computing
+        # this exact pair while we were waiting for the lock.
+        cached = _read_cached_hybrid_match(conn, resume, jd)
+        if cached is not None:
+            logger.info(f"AI holistic assessment cache hit after lock wait → resume={resume_id} jd={jd_id} pct={cached['fit_percentage']}")
+            return cached
+
+        logger.info(f"AI holistic assessment cache miss → resume={resume_id} jd={jd_id}, computing")
+        assessment = _hybrid_match(dict(resume), dict(jd))
+        if assessment.get("is_ai_judged"):
+            _store_hybrid_match(conn, resume, jd, assessment)
+            logger.info(f"AI holistic assessment computed → resume={resume_id} jd={jd_id} pct={assessment['fit_percentage']}")
+        else:
+            logger.warning(f"AI judge unavailable, not caching fallback → resume={resume_id} jd={jd_id}")
+        return assessment
+    finally:
+        conn.execute("SELECT pg_advisory_unlock(%s, %s)", (resume_id, jd_id))
+
+
+# ── Background AI analysis ────────────────────────────────────────────────────
+# Every place that used to make the user's own HTTP request block on a real
+# LLM call (up to a couple of minutes on local hardware) now instead kicks off
+# a detached background thread and returns immediately — the frontend polls
+# a cheap, read-only status endpoint (see compare_ai_status()) until the
+# result lands in ai_match_cache, instead of holding one HTTP request open
+# and giving up with "unavailable" the moment a client-side timeout fires
+# while the computation is still healthy and still running server-side.
+_ai_assessment_in_flight = set()
+_ai_assessment_in_flight_lock = threading.Lock()
+
+
+def _background_ai_assessment_worker(resume_id, jd_ids):
+    for jd_id in jd_ids:
+        try:
+            with db_conn() as conn:
+                resume = conn.execute("SELECT * FROM resume WHERE id = %s", (resume_id,)).fetchone()
+                jd = conn.execute("SELECT * FROM job_description WHERE id = %s", (jd_id,)).fetchone()
+                if not resume or not jd:
+                    continue
+                _get_or_compute_hybrid_match(conn, resume, jd)
+        except Exception:
+            logger.exception(f"Background AI assessment failed → resume={resume_id} jd={jd_id}")
+        finally:
+            with _ai_assessment_in_flight_lock:
+                _ai_assessment_in_flight.discard((resume_id, jd_id))
+
+
+def trigger_background_ai_assessment(resume_id, jd_ids):
+    """Fire-and-forget: start computing the real AI Holistic Assessment for
+    the given (resume_id, jd_id) pairs in a background thread, so analysis
+    is already under way — or done — by the time anyone's browser asks for
+    it, instead of only starting when a page view's fetch request arrives.
+
+    Safe to call repeatedly for the same pair: an in-process guard skips
+    spawning a duplicate thread for a pair that's already being computed
+    (avoids piling up redundant background threads each idly blocked on the
+    same Postgres advisory lock), and _get_or_compute_hybrid_match's
+    advisory lock protects correctness even across separate server
+    processes regardless.
+    """
+    to_launch = []
+    with _ai_assessment_in_flight_lock:
+        for jd_id in jd_ids:
+            key = (resume_id, jd_id)
+            if key not in _ai_assessment_in_flight:
+                _ai_assessment_in_flight.add(key)
+                to_launch.append(jd_id)
+    if not to_launch:
+        return
+    logger.info(f"Triggering background AI assessment → resume={resume_id} jds={to_launch}")
+    threading.Thread(
+        target=_background_ai_assessment_worker, args=(resume_id, to_launch), daemon=True
+    ).start()
+
+
+def _top_n_jd_ids_by_estimate(resume_dict, jds, n=3):
+    """Fast, LLM-free ranking (see _quick_estimate_jd_match) used only to
+    decide which JDs are worth kicking off a background AI assessment for
+    right after Save — analysing every Open JD in the background would
+    waste CPU on roles nowhere near a realistic top-3.
+    """
+    scored = []
+    for jd in jds:
+        jd_dict = dict(jd)
+        estimate_pct, _ = _quick_estimate_jd_match(resume_dict, jd_dict)
+        scored.append((estimate_pct, jd_dict["id"]))
+    scored.sort(key=lambda t: -t[0])
+    return [jd_id for _, jd_id in scored[:n]]
 
 
 # ── JD Routes ─────────────────────────────────────────────────────────────────
@@ -9617,16 +10545,19 @@ def jd_add():
                     pass
         with db_conn() as conn:
             ensure_jd_table(conn)
-            conn.execute(
+            cursor = conn.execute(
                 """
                 INSERT INTO job_description
                     (title, role, category, responsibilities, requirements, skills, keywords, jd_file, position_status)
                 VALUES
                     (%(title)s, %(role)s, %(category)s, %(responsibilities)s,
                      %(requirements)s, %(skills)s, %(keywords)s, %(jd_file)s, %(position_status)s)
+                RETURNING id
                 """,
                 data,
             )
+            new_jd_id = cursor.fetchone()["id"]
+        log_audit("JD Management", "Add", record_id=new_jd_id, record_label=data["title"])
         flash(f"Job Description '{data['title']}' added.", "success")
         return redirect(url_for("jd_management"))
     return render_template("jd_form.html", jd=None, all_roles=ALL_JD_ROLES,
@@ -9749,6 +10680,7 @@ def download_jd_pdf(jd_id):
     buffer.seek(0)
 
     filename = f"{jd_dict.get('title', 'JD').replace(' ', '_')}.pdf"
+    log_audit("Downloads", "Download", record_id=jd_id, record_label=jd_dict.get('title'))
     return send_file(
         buffer,
         mimetype='application/pdf',
@@ -9808,6 +10740,7 @@ def jd_edit(jd_id):
                 """,
                 data,
             )
+            log_audit("JD Management", "Edit", record_id=jd_id, record_label=data["title"])
             flash("Job Description updated.", "success")
             return redirect(url_for("jd_detail", jd_id=jd_id))
         jd = conn.execute(
@@ -9824,11 +10757,12 @@ def jd_delete(jd_id):
     with db_conn() as conn:
         ensure_jd_table(conn)
         row = conn.execute(
-            "SELECT jd_file FROM job_description WHERE id = %s", (jd_id,)
+            "SELECT jd_file, title FROM job_description WHERE id = %s", (jd_id,)
         ).fetchone()
         if row and row["jd_file"]:
             (JD_UPLOAD_FOLDER / (row["jd_file"] or "")).unlink(missing_ok=True)
         conn.execute("DELETE FROM job_description WHERE id = %s", (jd_id,))
+    log_audit("JD Management", "Delete", record_id=jd_id, record_label=row["title"] if row else None)
     flash("Job Description deleted.", "success")
     return redirect(url_for("jd_management"))
 
@@ -9870,6 +10804,9 @@ def compare_result(resume_id, jd_id):
             "SELECT id, title, category FROM job_description ORDER BY category, title"
         ).fetchall()
     result = calculate_match_score(dict(resume), dict(jd))
+    log_audit("Compare Resume", "Compare", record_id=f"{resume_id}:{jd_id}",
+              record_label=f"{resume['full_name']} vs {jd['title']}")
+    trigger_background_ai_assessment(resume_id, [jd_id])
     return render_template(
         "compare_result.html",
         resume=dict(resume),
@@ -9882,12 +10819,10 @@ def compare_result(resume_id, jd_id):
 @app.route("/api/compare/<int:resume_id>/<int:jd_id>/ai-assessment")
 def compare_ai_assessment(resume_id, jd_id):
     """Fetched asynchronously by compare_result.html / profile.html after the
-    page loads. Runs the hybrid keyword + LLM-judge assessment (_hybrid_match())
-    and caches the result per (resume_id, jd_id) — the LLM call can take a
-    while on local hardware, so it's kept off the initial page render. The
-    cache is invalidated if either side was edited since it was computed (its
-    updated_at moved past what's stored) or if it was computed under a
-    previous scoring algorithm (algo_version mismatch).
+    page loads. Delegates entirely to _get_or_compute_hybrid_match() — the
+    one function that reads/writes ai_match_cache — so this endpoint and the
+    Top 3 Matching Roles cards can never end up showing two different
+    percentages for the same resume/JD pair.
     """
     logger.info(f"AI assessment requested → resume={resume_id} jd={jd_id}")
     with db_conn() as conn:
@@ -9896,74 +10831,31 @@ def compare_ai_assessment(resume_id, jd_id):
         if not resume or not jd:
             return jsonify({"error": "Resume or JD not found"}), 404
 
-        ensure_ai_match_cache_table(conn)
-        cached = conn.execute(
-            "SELECT * FROM ai_match_cache WHERE resume_id = %s AND jd_id = %s",
-            (resume_id, jd_id),
-        ).fetchone()
-        # resume.updated_at is TIMESTAMPTZ (tz-aware) but job_description.updated_at
-        # is a naive TIMESTAMP — normalize both sides to naive before comparing so
-        # this doesn't depend on which of the two inconsistent column types a given
-        # value happened to come from.
-        _naive = lambda dt: dt.replace(tzinfo=None) if dt and dt.tzinfo else dt
-        if (cached and _naive(cached["resume_updated_at"]) == _naive(resume["updated_at"])
-                and _naive(cached["jd_updated_at"]) == _naive(jd["updated_at"])
-                and (cached["extra"] or {}).get("algo_version") == _HYBRID_ALGO_VERSION):
-            logger.info(f"AI assessment cache hit → resume={resume_id} jd={jd_id}")
-            extra = cached["extra"] or {}
-            return jsonify({
-                "fit_percentage": cached["fit_percentage"],
-                "verdict": cached["verdict"],
-                "tier_label": extra.get("tier_label", cached["verdict"]),
-                "recommendation": extra.get("recommendation", ""),
-                "rationale": cached["rationale"],
-                "strengths": extra.get("strengths", []),
-                "concerns": extra.get("concerns", ""),
-                "suggested_roles": extra.get("suggested_roles", []),
-                "keyword_match_percentage": extra.get("keyword_match_percentage"),
-                "llm_fit_percentage": extra.get("llm_fit_percentage"),
-                "confidence": extra.get("confidence"),
-                "confidence_label": extra.get("confidence_label", ""),
-                "confidence_reason": extra.get("confidence_reason", ""),
-            })
-
-        logger.info(f"AI assessment cache miss → resume={resume_id} jd={jd_id}, computing")
-        assessment = _hybrid_match(dict(resume), dict(jd))
-        if assessment is None:
-            return jsonify({"error": "AI assessment unavailable right now"}), 503
-
-        extra_json = json.dumps({
-            "tier_label": assessment.get("tier_label", assessment["verdict"]),
-            "recommendation": assessment.get("recommendation", ""),
-            "strengths": assessment.get("strengths", []),
-            "concerns": assessment.get("concerns", ""),
-            "suggested_roles": assessment.get("suggested_roles", []),
-            "keyword_match_percentage": assessment.get("keyword_match_percentage"),
-            "llm_fit_percentage": assessment.get("llm_fit_percentage"),
-            "confidence": assessment.get("confidence"),
-            "confidence_label": assessment.get("confidence_label", ""),
-            "confidence_reason": assessment.get("confidence_reason", ""),
-            "algo_version": assessment.get("algo_version", _HYBRID_ALGO_VERSION),
-        })
-        conn.execute(
-            """
-            INSERT INTO ai_match_cache
-                (resume_id, jd_id, fit_percentage, verdict, rationale, extra,
-                 resume_updated_at, jd_updated_at, computed_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
-            ON CONFLICT (resume_id, jd_id) DO UPDATE SET
-                fit_percentage = EXCLUDED.fit_percentage,
-                verdict = EXCLUDED.verdict,
-                rationale = EXCLUDED.rationale,
-                extra = EXCLUDED.extra,
-                resume_updated_at = EXCLUDED.resume_updated_at,
-                jd_updated_at = EXCLUDED.jd_updated_at,
-                computed_at = NOW()
-            """,
-            (resume_id, jd_id, assessment["fit_percentage"], assessment["verdict"],
-             assessment["rationale"], extra_json, resume["updated_at"], jd["updated_at"]),
-        )
+        assessment = _get_or_compute_hybrid_match(conn, resume, jd)
     return jsonify(assessment)
+
+
+@app.route("/api/compare/<int:resume_id>/<int:jd_id>/ai-status")
+def compare_ai_status(resume_id, jd_id):
+    """Fast, read-only cache check — never computes and never blocks on the
+    advisory lock (contrast with compare_ai_assessment above). This is what
+    the frontend polls every few seconds while a background AI assessment
+    is running (see trigger_background_ai_assessment), so no browser
+    request ever sits open for the full one-to-several minutes a real LLM
+    judgment can take on local hardware.
+    """
+    with db_conn() as conn:
+        # Full row, not just id/updated_at — _read_cached_hybrid_match now
+        # compares a content fingerprint over summary/skills/experience/etc.
+        # (see _resume_match_fingerprint), which needs those columns present.
+        resume = conn.execute("SELECT * FROM resume WHERE id = %s", (resume_id,)).fetchone()
+        jd = conn.execute("SELECT id, updated_at FROM job_description WHERE id = %s", (jd_id,)).fetchone()
+        if not resume or not jd:
+            return jsonify({"ready": False, "error": "Resume or JD not found"}), 404
+        cached = _read_cached_hybrid_match(conn, resume, jd)
+    if cached is None:
+        return jsonify({"ready": False})
+    return jsonify({"ready": True, **cached})
 
 
 # ── NEW FEATURE: Top-matching resumes for a JD (reverse of Compare Resumes) ──
@@ -10154,9 +11046,18 @@ _ensure_exp_yrs_col()
 def _ensure_department_col():
     try:
         with db_conn() as conn:
-            conn.execute("ALTER TABLE resume ADD COLUMN IF NOT EXISTS department TEXT DEFAULT ''")
+            conn.execute(
+                "ALTER TABLE resume ADD COLUMN IF NOT EXISTS department TEXT DEFAULT ''"
+            )
     except Exception:
         pass
+
+
+try:
+    with db_conn() as conn:
+        ensure_role_match_cache_table(conn)
+except Exception as e:
+    logger.error(f"Role cache table creation failed: {e}")
 
 
 def _migrate_jd_category_it_roles():
@@ -10209,6 +11110,7 @@ def ensure_requirement_table(conn):
             profiles_shared   INTEGER DEFAULT 0,
             interviewed       INTEGER DEFAULT 0,
             offered           INTEGER DEFAULT 0,
+            onsite_offshore   TEXT DEFAULT '',
             created_at        TIMESTAMPTZ DEFAULT NOW(),
             updated_at        TIMESTAMPTZ DEFAULT NOW()
         )
@@ -10216,7 +11118,21 @@ def ensure_requirement_table(conn):
     )
 
 
+ONSITE_OFFSHORE_OPTIONS = ["Onsite", "Offshore", "Hybrid"]
+
+
+def _ensure_onsite_offshore_col():
+    try:
+        with db_conn() as conn:
+            conn.execute(
+                "ALTER TABLE requirement ADD COLUMN IF NOT EXISTS onsite_offshore TEXT DEFAULT ''"
+            )
+    except Exception:
+        pass
+
+
 _migrate_requirement_status_filled_to_fulfilled()
+_ensure_onsite_offshore_col()
 
 
 def ensure_interview_schedule_table(conn):
@@ -10251,7 +11167,7 @@ def requirement_management():
 def requirement_add():
     if request.method == "POST":
         data = {k: request.form.get(k, "").strip() for k in
-                ["requirement_code", "requirement_name", "client", "division", "status"]}
+                ["requirement_code", "requirement_name", "client", "division", "status", "onsite_offshore"]}
         for k in ["num_requirement", "profiles_shared", "interviewed", "offered"]:
             try:
                 data[k] = int(request.form.get(k, "0") or "0")
@@ -10259,21 +11175,25 @@ def requirement_add():
                 data[k] = 0
         with db_conn() as conn:
             ensure_requirement_table(conn)
-            conn.execute(
+            cursor = conn.execute(
                 """
                 INSERT INTO requirement
                     (requirement_code, requirement_name, client, division, num_requirement,
-                     status, profiles_shared, interviewed, offered)
+                     status, profiles_shared, interviewed, offered, onsite_offshore)
                 VALUES
                     (%(requirement_code)s, %(requirement_name)s, %(client)s, %(division)s,
-                     %(num_requirement)s, %(status)s, %(profiles_shared)s, %(interviewed)s, %(offered)s)
+                     %(num_requirement)s, %(status)s, %(profiles_shared)s, %(interviewed)s, %(offered)s,
+                     %(onsite_offshore)s)
+                RETURNING id
                 """,
                 data,
             )
+            new_req_id = cursor.fetchone()["id"]
+        log_audit("Requirements", "Add", record_id=new_req_id, record_label=data["requirement_name"])
         flash(f"Requirement '{data['requirement_name']}' added.", "success")
         return redirect(url_for("requirement_management"))
     return render_template("requirement_form.html", requirement=None,
-                            statuses=REQUIREMENT_STATUSES)
+                            statuses=REQUIREMENT_STATUSES, onsite_offshore_options=ONSITE_OFFSHORE_OPTIONS)
 
 
 @app.route("/requirement/<int:req_id>")
@@ -10294,7 +11214,7 @@ def requirement_edit(req_id):
         ensure_requirement_table(conn)
         if request.method == "POST":
             data = {k: request.form.get(k, "").strip() for k in
-                    ["requirement_code", "requirement_name", "client", "division", "status"]}
+                    ["requirement_code", "requirement_name", "client", "division", "status", "onsite_offshore"]}
             for k in ["num_requirement", "profiles_shared", "interviewed", "offered"]:
                 try:
                     data[k] = int(request.form.get(k, "0") or "0")
@@ -10307,11 +11227,13 @@ def requirement_edit(req_id):
                     requirement_code=%(requirement_code)s, requirement_name=%(requirement_name)s,
                     client=%(client)s, division=%(division)s, num_requirement=%(num_requirement)s,
                     status=%(status)s, profiles_shared=%(profiles_shared)s,
-                    interviewed=%(interviewed)s, offered=%(offered)s, updated_at=NOW()
+                    interviewed=%(interviewed)s, offered=%(offered)s, onsite_offshore=%(onsite_offshore)s,
+                    updated_at=NOW()
                 WHERE id=%(id)s
                 """,
                 data,
             )
+            log_audit("Requirements", "Edit", record_id=req_id, record_label=data["requirement_name"])
             flash("Requirement updated.", "success")
             return redirect(url_for("requirement_detail", req_id=req_id))
         requirement = conn.execute(
@@ -10320,14 +11242,16 @@ def requirement_edit(req_id):
         if not requirement:
             return "Requirement not found", 404
     return render_template("requirement_form.html", requirement=dict(requirement),
-                            statuses=REQUIREMENT_STATUSES)
+                            statuses=REQUIREMENT_STATUSES, onsite_offshore_options=ONSITE_OFFSHORE_OPTIONS)
 
 
 @app.route("/requirement/<int:req_id>/delete", methods=["POST"])
 def requirement_delete(req_id):
     with db_conn() as conn:
         ensure_requirement_table(conn)
+        row = conn.execute("SELECT requirement_name FROM requirement WHERE id = %s", (req_id,)).fetchone()
         conn.execute("DELETE FROM requirement WHERE id = %s", (req_id,))
+    log_audit("Requirements", "Delete", record_id=req_id, record_label=row["requirement_name"] if row else None)
     flash("Requirement deleted.", "success")
     return redirect(url_for("requirement_management"))
 
@@ -10344,17 +11268,77 @@ def schedule_interview():
     with db_conn() as conn:
         ensure_interview_schedule_table(conn)
         resume_row = conn.execute(
-            "SELECT title FROM resume WHERE id = %s", (resume_id,)
+            "SELECT title, full_name FROM resume WHERE id = %s", (resume_id,)
         ).fetchone()
         if not resume_row:
             return jsonify({"ok": False, "error": "Candidate not found"}), 404
-        conn.execute(
+        new_interview_id = conn.execute(
             """
             INSERT INTO interview_schedule (resume_id, position, interviewer, interview_date, status)
             VALUES (%s, %s, %s, %s, %s)
+            RETURNING id
             """,
             (resume_id, resume_row["title"] or "", interviewer, interview_date, status),
+        ).fetchone()["id"]
+    log_audit(
+        "Interviews", "Schedule", record_id=new_interview_id,
+        record_label=f"{resume_row['full_name']} with {interviewer} ({status})",
+    )
+    return jsonify({"ok": True})
+
+
+# Interview EVENT status — the 4-value Scheduled/Completed/Pending/Cancelled
+# lifecycle of one scheduled interview, shown in the Recent Interviews table.
+# Distinct from INTERVIEW_STATUSES above, which tracks a candidate's much
+# longer overall pipeline stage (Profile Shared, Selected by Client, etc.)
+# shown in Candidate Details — the two have never been the same concept and
+# aren't meant to be merged.
+INTERVIEW_SCHEDULE_STATUSES = ["Scheduled", "Completed", "Pending", "Cancelled"]
+
+
+@app.route("/api/interview/<int:interview_id>/update", methods=["POST"])
+def update_interview_schedule(interview_id):
+    """Edit an existing scheduled interview's status/date/interviewer.
+
+    The candidate (resume_id) is intentionally never editable here — once an
+    interview is created it stays tied to the same candidate; rescheduling
+    against a different candidate means creating a new interview instead.
+    """
+    data = request.get_json(silent=True) or {}
+    interviewer = (data.get("interviewer") or "").strip()
+    interview_date = (data.get("interview_date") or "").strip() or None
+    status = (data.get("status") or "").strip()
+
+    if status not in INTERVIEW_SCHEDULE_STATUSES:
+        return jsonify({"ok": False, "error": "Invalid status"}), 400
+    if not interviewer or not interview_date:
+        return jsonify({"ok": False, "error": "interviewer and interview_date are required"}), 400
+
+    with db_conn() as conn:
+        ensure_interview_schedule_table(conn)
+        row = conn.execute(
+            """
+            SELECT i.id, r.full_name
+            FROM interview_schedule i
+            JOIN resume r ON r.id = i.resume_id
+            WHERE i.id = %s
+            """,
+            (interview_id,),
+        ).fetchone()
+        if not row:
+            return jsonify({"ok": False, "error": "Interview not found"}), 404
+        conn.execute(
+            """
+            UPDATE interview_schedule
+            SET interviewer = %s, interview_date = %s, status = %s
+            WHERE id = %s
+            """,
+            (interviewer, interview_date, status, interview_id),
         )
+    log_audit(
+        "Interviews", "Edit", record_id=interview_id,
+        record_label=f"{row['full_name']} with {interviewer} ({status})",
+    )
     return jsonify({"ok": True})
 
 
@@ -10425,6 +11409,263 @@ def update_candidate_interview_status():
     return jsonify({"ok": True})
 
 
+# ── Audit Trail ───────────────────────────────────────────────────────────────
+# Single reusable logging service (log_audit) backing one table (audit_log),
+# used by every module instead of each one rolling its own logging. Two
+# coverage layers:
+#   1. Explicit log_audit(...) calls at meaningful business actions (Login,
+#      Logout, Add/Edit/Delete, Compare, Export, Download) — these carry
+#      precise "record affected" context (e.g. which resume/JD) that no
+#      generic hook could infer from the URL alone.
+#   2. A generic @app.after_request hook (_audit_generic_view, registered
+#      further down) that logs a "View" action for every successful GET to
+#      an authenticated HTML page not already covered by an explicit call —
+#      so a brand-new route gets baseline audit coverage automatically, with
+#      no extra code, satisfying "any future module automatically".
+
+def ensure_audit_log_table(conn):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id            SERIAL PRIMARY KEY,
+            user_id       INTEGER,
+            username      VARCHAR(150),
+            role          VARCHAR(50),
+            created_at    TIMESTAMPTZ DEFAULT NOW(),
+            module        VARCHAR(100) NOT NULL,
+            action        VARCHAR(100) NOT NULL,
+            record_id     VARCHAR(100),
+            record_label  VARCHAR(300),
+            ip_address    VARCHAR(64),
+            user_agent    TEXT,
+            status        VARCHAR(20) DEFAULT 'Success',
+            details       TEXT
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log (created_at DESC)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_user_id ON audit_log (user_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_module ON audit_log (module)")
+
+
+def _client_ip():
+    # Trust X-Forwarded-For's first hop only if this ever sits behind a
+    # reverse proxy; falls back to the direct peer address for the common
+    # case (local/dev, no proxy) where request.remote_addr is authoritative.
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.remote_addr or ""
+
+
+def log_audit(module, action, record_id=None, record_label=None, status="Success", details=None):
+    """The one function every route calls to write an audit trail entry —
+    never raises (a logging failure must never break the user-facing
+    action it's describing), and always opens its own short-lived
+    connection so it works regardless of whether the caller has one open.
+    Pulls the acting user from the Flask session and request metadata
+    (IP/user-agent) automatically, so callers only ever need to supply the
+    business-specific bits: which module, what action, and which record.
+    """
+    try:
+        with db_conn() as conn:
+            ensure_audit_log_table(conn)
+            conn.execute(
+                """
+                INSERT INTO audit_log
+                    (user_id, username, role, module, action, record_id, record_label,
+                     ip_address, user_agent, status, details)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    session.get("user_id"), session.get("username"), session.get("role"),
+                    str(module)[:100], str(action)[:100],
+                    str(record_id)[:100] if record_id is not None else None,
+                    str(record_label)[:300] if record_label is not None else None,
+                    _client_ip()[:64], (request.headers.get("User-Agent") or "")[:500],
+                    str(status)[:20], (str(details)[:2000] if details else None),
+                ),
+            )
+    except Exception:
+        logger.exception(f"Audit log write failed → module={module} action={action}")
+
+
+# Endpoint-name prefix → friendly module label, used by the generic
+# after_request hook to auto-label "View" events for routes that don't have
+# an explicit log_audit() call of their own. Falls back to the endpoint's own
+# name (title-cased) for anything not listed — see _audit_generic_view.
+_AUDIT_MODULE_BY_ENDPOINT_PREFIX = [
+    ("dashboard", "Dashboard"), ("home", "Dashboard"),
+    ("user_", "User Management"),
+    ("profile_", "Resume Profiles"), ("edit_resume", "Resume Profiles"),
+    ("public_profile", "Resume Profiles"), ("upload_files", "Resume Profiles"),
+    ("groups", "Resume Profiles"),
+    ("jd_", "JD Management"),
+    ("requirement_", "Requirements"),
+    ("compare_", "Compare Resume"), ("bulk_compare", "Compare Resume"),
+    ("export_", "Export"), ("download_", "Downloads"),
+    ("candidate_", "Dashboard"), ("api_candidates", "Dashboard"),
+]
+
+# Endpoints the generic hook must never log a "View" for: auth (already
+# explicitly logged), the keepalive ping (fires every few minutes per user,
+# pure noise), and anything serving raw bytes rather than a page a person
+# consciously navigated to.
+_AUDIT_VIEW_EXEMPT_ENDPOINTS = {
+    "login", "logout", "static", "session_keepalive",
+    "uploaded_file", "raw_uploaded_file", "jd_uploaded_file",
+    "compare_result",  # explicitly logged as a "Compare" action instead, see compare_result()
+}
+
+
+def _audit_module_for_endpoint(endpoint):
+    for prefix, module in _AUDIT_MODULE_BY_ENDPOINT_PREFIX:
+        if endpoint.startswith(prefix):
+            return module
+    return endpoint.replace("_", " ").title()
+
+
+@app.after_request
+def _audit_generic_view(response):
+    """Baseline "View" coverage for every authenticated GET page-load that
+    isn't already explicitly logged (see the module docstring above) — this
+    is what makes a brand-new route show up in the audit trail automatically
+    with zero extra code, not just the routes someone remembered to
+    instrument. Explicit log_audit() calls for Add/Edit/Delete/etc already
+    cover their own request, so this only fires for GET to avoid double
+    logging the same POST twice.
+    """
+    try:
+        if (request.method == "GET" and response.status_code == 200
+                and request.endpoint and request.endpoint not in _AUDIT_VIEW_EXEMPT_ENDPOINTS
+                and session.get("user_id")
+                and response.mimetype == "text/html"):
+            record_id = next(iter(request.view_args.values()), None) if request.view_args else None
+            log_audit(_audit_module_for_endpoint(request.endpoint), "View", record_id=record_id)
+    except Exception:
+        logger.exception("Generic audit view-logging hook failed")
+    return response
+
+
+_AUDIT_SORT_COLUMNS = {"created_at", "username", "module", "action", "status"}
+_AUDIT_PER_PAGE = 25
+
+
+def _audit_trail_query(args):
+    """Shared filter/sort parsing + query building for the audit trail page
+    and its CSV export, so the two can never drift out of sync on what
+    "the currently filtered view" means.
+    """
+    search = (args.get("q") or "").strip()
+    module_filter = (args.get("module") or "").strip()
+    action_filter = (args.get("action") or "").strip()
+    user_filter = (args.get("user") or "").strip()
+    date_from = (args.get("date_from") or "").strip()
+    date_to = (args.get("date_to") or "").strip()
+    sort = args.get("sort", "created_at")
+    if sort not in _AUDIT_SORT_COLUMNS:
+        sort = "created_at"
+    direction = "asc" if args.get("dir") == "asc" else "desc"
+
+    conditions, params = [], []
+    if search:
+        like = f"%{search}%"
+        conditions.append(
+            "(username ILIKE %s OR record_label ILIKE %s OR module ILIKE %s "
+            "OR action ILIKE %s OR COALESCE(details, '') ILIKE %s)"
+        )
+        params += [like, like, like, like, like]
+    if module_filter:
+        conditions.append("module = %s")
+        params.append(module_filter)
+    if action_filter:
+        conditions.append("action = %s")
+        params.append(action_filter)
+    if user_filter:
+        conditions.append("username = %s")
+        params.append(user_filter)
+    if date_from:
+        conditions.append("created_at >= %s")
+        params.append(date_from)
+    if date_to:
+        conditions.append("created_at < (%s::date + INTERVAL '1 day')")
+        params.append(date_to)
+
+    where_sql = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    filters = {
+        "search": search, "module_filter": module_filter, "action_filter": action_filter,
+        "user_filter": user_filter, "date_from": date_from, "date_to": date_to,
+        "sort": sort, "direction": direction,
+    }
+    return where_sql, params, filters
+
+
+@app.route("/audit-trail")
+def audit_trail():
+    if not _require_admin():
+        abort(403)
+
+    page = max(1, int(request.args.get("page", 1) or 1))
+    where_sql, params, filters = _audit_trail_query(request.args)
+
+    with db_conn() as conn:
+        ensure_audit_log_table(conn)
+        total = conn.execute(f"SELECT COUNT(*) AS c FROM audit_log {where_sql}", params).fetchone()["c"]
+        rows = conn.execute(
+            f"""
+            SELECT * FROM audit_log {where_sql}
+            ORDER BY {filters['sort']} {filters['direction']}, id {filters['direction']}
+            LIMIT %s OFFSET %s
+            """,
+            params + [_AUDIT_PER_PAGE, (page - 1) * _AUDIT_PER_PAGE],
+        ).fetchall()
+        modules = [r["module"] for r in conn.execute(
+            "SELECT DISTINCT module FROM audit_log ORDER BY module").fetchall()]
+        actions = [r["action"] for r in conn.execute(
+            "SELECT DISTINCT action FROM audit_log ORDER BY action").fetchall()]
+        users = [r["username"] for r in conn.execute(
+            "SELECT DISTINCT username FROM audit_log WHERE username IS NOT NULL ORDER BY username").fetchall()]
+
+    total_pages = max(1, (total + _AUDIT_PER_PAGE - 1) // _AUDIT_PER_PAGE)
+    return render_template(
+        "audit_trail.html", rows=list(rows), total=total, page=page, total_pages=total_pages,
+        per_page=_AUDIT_PER_PAGE, modules=modules, actions=actions, users=users, **filters,
+    )
+
+
+@app.route("/audit-trail/export.csv")
+def audit_trail_export_csv():
+    if not _require_admin():
+        abort(403)
+    import csv as _csv
+
+    where_sql, params, filters = _audit_trail_query(request.args)
+    with db_conn() as conn:
+        ensure_audit_log_table(conn)
+        rows = conn.execute(
+            f"SELECT * FROM audit_log {where_sql} ORDER BY created_at DESC",
+            params,
+        ).fetchall()
+
+    buffer = StringIO()
+    writer = _csv.writer(buffer)
+    writer.writerow(["Date & Time", "User ID", "Username", "Role", "Module", "Action",
+                      "Record ID", "Record/Entity", "Status", "IP Address", "User Agent", "Details"])
+    for r in rows:
+        writer.writerow([
+            r["created_at"].strftime("%Y-%m-%d %H:%M:%S") if r["created_at"] else "",
+            r["user_id"] or "", r["username"] or "", r["role"] or "", r["module"], r["action"],
+            r["record_id"] or "", r["record_label"] or "", r["status"], r["ip_address"] or "",
+            r["user_agent"] or "", r["details"] or "",
+        ])
+    log_audit("Audit Trail", "Export", status="Success", details=f"{len(rows)} rows")
+    csv_bytes = buffer.getvalue().encode("utf-8-sig")  # BOM so Excel opens UTF-8 cleanly
+    return send_file(
+        BytesIO(csv_bytes), mimetype="text/csv", as_attachment=True,
+        download_name=f"audit_trail_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.csv",
+    )
+
+
 # ── User Management & Authentication (new feature — additive only) ──────────
 
 USER_ROLES = ["admin", "user"]
@@ -10464,6 +11705,11 @@ def _inject_auth_context():
         "current_username": session.get("username"),
         "current_full_name": session.get("full_name"),
         "current_role": session.get("role"),
+        # Consumed by base.html's inline bootstrap for static/session-timeout.js
+        # — kept in one place (this processor) so every page agrees on the
+        # configured duration without each template hardcoding it.
+        "session_timeout_ms": SESSION_TIMEOUT_MINUTES * 60 * 1000,
+        "session_warning_ms": SESSION_WARNING_SECONDS * 1000,
     }
 
 
@@ -10472,15 +11718,53 @@ _LOGIN_EXEMPT_ENDPOINTS = {"login", "static"}
 
 @app.before_request
 def _require_login():
+    """Single global auth gate for the whole app — also enforces the
+    inactivity timeout here so every module gets it automatically, with no
+    per-route code. `session['last_active']` is a sliding window: any
+    request from an authenticated user pushes it forward, and if more than
+    SESSION_TIMEOUT_MINUTES has elapsed since the last one, the session is
+    invalidated and the user is bounced to login with an explanatory
+    message — this is the server-side backstop that holds even if the
+    browser tab was frozen/closed and the client-side warning JS
+    (static/session-timeout.js) never got to run.
+    """
     if request.endpoint is None or request.endpoint in _LOGIN_EXEMPT_ENDPOINTS:
         return None
-    if session.get("user_id"):
-        return None
-    return redirect(url_for("login", next=request.path))
+    if not session.get("user_id"):
+        return redirect(url_for("login", next=request.path))
+
+    last_active_raw = session.get("last_active")
+    now = datetime.now(timezone.utc)
+    if last_active_raw:
+        try:
+            last_active = datetime.fromisoformat(last_active_raw)
+        except ValueError:
+            last_active = now
+        idle_seconds = (now - last_active).total_seconds()
+        if idle_seconds > SESSION_TIMEOUT_MINUTES * 60:
+            log_audit("Auth", "Session Timeout", status="Success",
+                      details=f"idle for {round(idle_seconds)}s (limit {SESSION_TIMEOUT_MINUTES}m)")
+            session.clear()
+            flash("Your session has expired due to inactivity. Please log in again.", "error")
+            return redirect(url_for("login", next=request.path))
+
+    session["last_active"] = now.isoformat()
+    return None
 
 
 def _require_admin():
     return session.get("role") == "admin"
+
+
+@app.route("/api/session/keepalive")
+def session_keepalive():
+    """Pinged by static/session-timeout.js when the user clicks "Continue
+    Session" on the inactivity warning dialog. No-op beyond a plain 200 —
+    _require_login() above already refreshed session['last_active'] for
+    this request before this view even runs, since it's just another
+    authenticated request.
+    """
+    return jsonify({"ok": True, "timeout_ms": SESSION_TIMEOUT_MINUTES * 60 * 1000})
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -10498,7 +11782,11 @@ def login():
             session["username"] = row["username"]
             session["full_name"] = row["full_name"]
             session["role"] = row["role"]
+            session["last_active"] = datetime.now(timezone.utc).isoformat()
+            log_audit("Auth", "Login", record_label=row["username"], status="Success")
             return redirect(request.form.get("next") or url_for("dashboard"))
+        log_audit("Auth", "Login", record_label=username, status="Failure",
+                  details="Invalid username or password")
         flash("Invalid username or password.", "error")
         return render_template("login.html", next=request.form.get("next", ""))
     with db_conn() as conn:
@@ -10508,7 +11796,14 @@ def login():
 
 @app.route("/logout")
 def logout():
+    username = session.get("username")
     session.clear()
+    if request.args.get("reason") == "inactivity":
+        log_audit("Auth", "Session Timeout", record_label=username, status="Success",
+                  details="client-side inactivity timer")
+        flash("Your session has expired due to inactivity. Please log in again.", "error")
+    else:
+        log_audit("Auth", "Logout", record_label=username, status="Success")
     return redirect(url_for("login"))
 
 
@@ -10546,13 +11841,16 @@ def user_add():
             if existing:
                 flash(f"Username '{username}' is already taken.", "error")
                 return render_template("user_form.html", user=None, roles=USER_ROLES)
-            conn.execute(
+            cursor = conn.execute(
                 """
                 INSERT INTO app_user (username, password_hash, full_name, email, role)
                 VALUES (%s, %s, %s, %s, %s)
+                RETURNING id
                 """,
                 (username, generate_password_hash(password), full_name, email, role),
             )
+            new_user_id = cursor.fetchone()["id"]
+        log_audit("User Management", "Add", record_id=new_user_id, record_label=username)
         flash(f"User '{username}' added.", "success")
         return redirect(url_for("user_management"))
     return render_template("user_form.html", user=None, roles=USER_ROLES)
@@ -10592,6 +11890,7 @@ def user_edit(user_id):
             if session.get("user_id") == user_id:
                 session["full_name"] = full_name
                 session["role"] = role
+            log_audit("User Management", "Edit", record_id=user_id, record_label=full_name)
             flash("User updated.", "success")
             return redirect(url_for("user_management"))
         user = conn.execute("SELECT * FROM app_user WHERE id = %s", (user_id,)).fetchone()
@@ -10608,10 +11907,32 @@ def user_delete(user_id):
         flash("You cannot delete your own account while logged in.", "error")
         return redirect(url_for("user_management"))
     with db_conn() as conn:
+        row = conn.execute("SELECT username FROM app_user WHERE id = %s", (user_id,)).fetchone()
         conn.execute("DELETE FROM app_user WHERE id = %s", (user_id,))
+    log_audit("User Management", "Delete", record_id=user_id, record_label=row["username"] if row else None)
     flash("User deleted.", "success")
     return redirect(url_for("user_management"))
 
 
+try:
+    with db_conn() as conn:
+        ensure_audit_log_table(conn)
+except Exception as e:
+    logger.error(f"Audit log table creation failed: {e}")
+
+
 if __name__ == "__main__":
-    app.run(debug=True, use_reloader=False, port=5001, host='0.0.0.0')
+    app.run(
+        debug=True,
+        use_reloader=False,
+        # Without this, Werkzeug's dev server handles one request at a time —
+        # a single slow AI-assessment call (real local-LLM inference, up to a
+        # minute) blocks every other request behind it, including unrelated
+        # page loads and static assets, which is what made the app look like
+        # it "keeps loading forever" under any concurrent use. Safe to enable
+        # here: every request opens its own DB connection (see db_conn()),
+        # so there's no shared connection for concurrent requests to race on.
+        threaded=True,
+        port=5001,
+        host="0.0.0.0"
+    )

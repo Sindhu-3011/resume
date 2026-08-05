@@ -6,6 +6,15 @@
     <title>{% block title %}Resume Profile{% endblock %}</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=15">
     <script src="{{ url_for('static', filename='verdict.js') }}?v=1" defer></script>
+    {% if current_username %}
+    <script>
+        window.SESSION_TIMEOUT_MS = {{ session_timeout_ms }};
+        window.SESSION_WARNING_MS = {{ session_warning_ms }};
+        window.SESSION_LOGOUT_URL = "{{ url_for('logout') }}";
+        window.SESSION_KEEPALIVE_URL = "{{ url_for('session_keepalive') }}";
+    </script>
+    <script src="{{ url_for('static', filename='session-timeout.js') }}?v=1" defer></script>
+    {% endif %}
 </head>
 <body>
 <div class="app-layout">
@@ -48,6 +57,13 @@
                 <span class="nav-icon">&#128100;</span>
                 <span class="nav-label">Users</span>
             </a>
+
+            <a href="{{ url_for('audit_trail') }}"
+               class="nav-item {{ 'active' if request.endpoint == 'audit_trail' else '' }}"
+               title="Audit Trail">
+                <span class="nav-icon">&#128220;</span>
+                <span class="nav-label">Audit Trail</span>
+            </a>
             {% endif %}
 
             <p class="nav-section-label">Profiles</p>
@@ -83,6 +99,7 @@
                     <a href="{{ url_for('requirement_management') }}">&#128188; Requirement Management</a>
                     {% if current_role == 'admin' %}
                     <a href="{{ url_for('user_management') }}">&#128100; User Management</a>
+                    <a href="{{ url_for('audit_trail') }}">&#128220; Audit Trail</a>
                     {% endif %}
                     <a href="{{ url_for('profile_list') }}">&#128203; View Profiles</a>
                     <a href="{{ url_for('edit_resume') }}">&#8679; Add Profile</a>

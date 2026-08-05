@@ -70,6 +70,16 @@
                value="{{ requirement.offered if requirement else 0 }}">
     </div>
 
+    <div>
+        <label for="onsite_offshore">Onsite/Offshore</label>
+        <select id="onsite_offshore" name="onsite_offshore" class="form-select">
+            <option value="">—</option>
+            {% for o in onsite_offshore_options %}
+            <option value="{{ o }}" {% if requirement and requirement.onsite_offshore == o %}selected{% endif %}>{{ o }}</option>
+            {% endfor %}
+        </select>
+    </div>
+
     <div class="full actions">
         <button class="button" type="submit">{% if requirement %}Save Changes{% else %}Add Requirement{% endif %}</button>
         <a class="button secondary" href="{{ url_for('requirement_management') }}">Cancel</a>

@@ -51,18 +51,27 @@
         <a class="button" style="background:#10b981;padding:8px 16px;font-size:0.83rem;border-radius:8px;" href="{{ url_for('export_rich_profile_pdf', resume_id=resume.id) }}">📄 Export PDF</a>
     </div>
     <p class="muted" style="margin:-10px 0 18px;font-size:0.78rem;">
-        <span id="matches-progress">AI holistic scores load one card at a time and can take up to a couple of minutes total on local hardware</span> — cached after the first load, so revisits are instant.
+        <span id="matches-progress">Fit shown instantly from skill/requirement matching. Cards not yet AI-verified are quietly upgraded to the same AI Holistic Assessment score shown on "View Full Comparison" — cached after the first check, so revisits are instant.</span>
     </p>
 
     <div id="matching-roles-grid" style="display:grid;grid-template-columns:repeat(3,1fr);gap:18px;">
+        {% set _tier_class_map = {'Strong Fit': 'verdict-strong', 'Good Fit': 'verdict-good', 'Partial Fit': 'verdict-partial'} %}
+        {% set _confidence_word_map = {'Strong Fit': 'Excellent', 'Good Fit': 'Good', 'Partial Fit': 'Partial'} %}
+        {% set _ring_r = 36 %}
+        {% set _ring_circumference = 2 * 3.14159265 * _ring_r %}
         {% for match in top_matches %}
-        <div id="match-card-{{ match.jd_id }}" data-jd-id="{{ match.jd_id }}" class="match-card verdict verdict-good">
+        {% set tier_class = _tier_class_map.get(match.tier_label, 'verdict-low') %}
+        {% set confidence_word = _confidence_word_map.get(match.tier_label, 'Low') %}
+        {% set ring_offset = _ring_circumference * (1 - (match.final_score / 100)) %}
+        <div id="match-card-{{ match.jd_id }}" data-jd-id="{{ match.jd_id }}" class="match-card verdict {{ tier_class }}">
 
-            <!-- Card header band — rank + fit tier label (recoloured once the AI verdict loads) -->
+            <!-- Card header band — colour + label driven by tier_label (single
+                 source: the .verdict-* custom properties in styles.css), so
+                 header/percentage/label always agree. -->
             <div id="band-{{ match.jd_id }}" class="match-card-band">
                 <div style="display:flex;align-items:center;gap:10px;">
                     <div class="match-card-rank">{{ loop.index }}</div>
-                    <span id="band-label-{{ match.jd_id }}" class="match-card-band-label" role="status" aria-live="polite">Analyzing&hellip;</span>
+                    <span id="band-label-{{ match.jd_id }}" class="match-card-band-label">{{ match.tier_label }}</span>
                 </div>
             </div>
 
@@ -72,14 +81,50 @@
                     <a href="{{ url_for('compare_result', resume_id=resume.id, jd_id=match.jd_id) }}">{{ match.jd_title }}</a>
                 </h3>
 
-                <!-- AI verdict — the only fit signal shown, no score/percentage -->
-                <div id="ai-verdict-{{ match.jd_id }}" class="match-card-verdict" role="status" aria-live="polite">
-                    <span class="ai-mini-spinner" aria-hidden="true" style="display:inline-block;width:11px;height:11px;border:2px solid rgba(109,40,217,0.25);border-top-color:#6d28d9;border-radius:50%;animation:aiminispin 0.8s linear infinite;vertical-align:middle;margin-right:6px;"></span>
-                    Analyzing fit&hellip;
-                </div>
+<div class="match-card-radial-row">
+    <div class="match-card-radial">
+        <svg width="88" height="88" viewBox="0 0 88 88">
+            <circle cx="44" cy="44" r="{{ _ring_r }}" fill="none" stroke="rgba(120,120,140,0.16)" stroke-width="8"></circle>
+            <circle id="ring-{{ match.jd_id }}" cx="44" cy="44" r="{{ _ring_r }}" fill="none" stroke="var(--v-main)" stroke-width="8"
+                    stroke-linecap="round" stroke-dasharray="{{ '%.2f'|format(_ring_circumference) }}"
+                    stroke-dashoffset="{{ '%.2f'|format(ring_offset) }}"
+                    transform="rotate(-90 44 44)" style="transition:stroke-dashoffset .6s ease, stroke .4s ease;"></circle>
+        </svg>
+        <div class="match-card-radial-label">
+            <span id="pct-{{ match.jd_id }}" class="match-card-radial-pct">{{ match.final_score }}%</span>
+        </div>
+    </div>
+    <div class="match-card-radial-meta">
+        <span id="confidence-badge-{{ match.jd_id }}" class="confidence-badge">{{ confidence_word }} Fit</span>
+        <div class="match-card-req-count">Matched {{ match.matched_count }}/{{ match.total_jd_requirements }} requirements</div>
+        <div id="ai-status-{{ match.jd_id }}" class="match-card-ai-status{% if match.is_ai_judged %} is-verified{% endif %}">
+            {% if match.is_ai_judged %}&#10003; AI-verified{% else %}Estimated — verifying with AI&hellip;{% endif %}
+        </div>
+    </div>
+</div>
 
-                <!-- Recommendation — the "can we proceed?" signal, no number needed -->
-                <div id="ai-recommendation-{{ match.jd_id }}" class="match-card-rec"></div>
+<div class="match-card-sg-grid">
+    <div class="match-card-sg-col">
+        <strong class="match-card-sg-heading match-card-sg-heading-good">&#10003; Top Strengths</strong>
+        <ul id="strengths-{{ match.jd_id }}" class="match-card-sg-list">
+            {% for skill in match.get('matched_skills', [])[:3] %}
+            <li>{{ skill }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+    <div class="match-card-sg-col">
+        <strong class="match-card-sg-heading match-card-sg-heading-warn">&#9888; Key Gaps</strong>
+        <ul class="match-card-sg-list match-card-sg-list-warn">
+            {% for skill in match.get('missing_skills', [])[:3] %}
+            <li>{{ skill }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+</div>
+
+<div id="rec-{{ match.jd_id }}" class="match-card-rec">
+    {{ match.get('recommendation', '') }}
+</div>
 
                 <!-- CTA button -->
                 <a href="{{ url_for('compare_result', resume_id=resume.id, jd_id=match.jd_id) }}" class="match-card-cta">
@@ -91,6 +136,167 @@
     </div>
 
 </section>
+<script>
+(function () {
+    // Cards whose displayed score is still the fast estimate (is_ai_judged
+    // false server-side) get upgraded here to the real AI Holistic
+    // Assessment. The server has already kicked off (or found already
+    // running) a background computation for each of these — see
+    // trigger_background_ai_assessment() in app.py, called both right after
+    // Save and from _rank_top_jd_matches() on every view — so this script
+    // only needs to POLL a cheap, read-only status endpoint until the
+    // result lands, never hold open a slow blocking request. Same
+    // ai_match_cache entry "View Full Comparison" reads, so once this
+    // resolves the two can never disagree.
+    var pending = [
+        {% for match in top_matches %}{% if not match.is_ai_judged %}{{ match.jd_id }},{% endif %}{% endfor %}
+    ];
+    if (!pending.length) return;
+
+    // Cards render server-side sorted by whatever score was available at
+    // that moment — final AI scores for already-judged pairs, the fast
+    // pre-AI estimate for the rest. As each pending card's real AI score
+    // lands via polling, its ranking relative to the others can change
+    // (an estimate is only a rough guess), but applyResult only ever
+    // updates a card's own content in place — it never reorders the DOM.
+    // The result: right after Save the visible order can be wrong until a
+    // full page reload re-fetches everything already-cached and sorted.
+    // resortCards() below re-sorts in place after every poll cycle so the
+    // live page converges to the exact same order a reload would show,
+    // without needing one.
+    var currentScores = {
+        {% for match in top_matches %}{{ match.jd_id }}: {{ match.final_score }},{% endfor %}
+    };
+
+    function resortCards() {
+        var grid = document.getElementById('matching-roles-grid');
+        if (!grid) return;
+        var cards = Array.prototype.slice.call(grid.children);
+        cards.sort(function (a, b) {
+            var scoreA = currentScores[a.getAttribute('data-jd-id')] || 0;
+            var scoreB = currentScores[b.getAttribute('data-jd-id')] || 0;
+            return scoreB - scoreA;
+        });
+        cards.forEach(function (card, i) {
+            grid.appendChild(card);
+            var rankEl = card.querySelector('.match-card-rank');
+            if (rankEl) rankEl.textContent = i + 1;
+        });
+    }
+
+    var resumeId = {{ resume.id }};
+    var POLL_INTERVAL_MS = 4000;
+    // Generous ceiling that exceeds the backend's own Ollama timeout (see
+    // OLLAMA_TEXT_TIMEOUT, default 300s) with headroom — a real LLM
+    // judgment on local hardware can take a couple of minutes, and giving
+    // up before the backend would have is what previously showed
+    // "unavailable" while the analysis was still healthy and still running.
+    var MAX_WAIT_MS = 360000;
+    var startedAt = Date.now();
+    var remaining = pending.slice();
+
+    var progressEl = document.getElementById('matches-progress');
+    var tierClassMap = {'Strong Fit': 'verdict-strong', 'Good Fit': 'verdict-good', 'Partial Fit': 'verdict-partial'};
+    var confidenceWordMap = {'Strong Fit': 'Excellent', 'Good Fit': 'Good', 'Partial Fit': 'Partial'};
+    var RING_CIRCUMFERENCE = 2 * Math.PI * 36;
+
+    function esc(s) {
+        return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+            return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+        });
+    }
+
+    function applyResult(jdId, d) {
+        var card = document.getElementById('match-card-' + jdId);
+        var tierClass = tierClassMap[d.tier_label] || 'verdict-low';
+        if (card) card.className = 'match-card verdict ' + tierClass;
+
+        var bandLabel = document.getElementById('band-label-' + jdId);
+        if (bandLabel) bandLabel.textContent = d.tier_label || '';
+
+        var pctEl = document.getElementById('pct-' + jdId);
+        if (pctEl) pctEl.textContent = d.fit_percentage + '%';
+
+        var ringEl = document.getElementById('ring-' + jdId);
+        if (ringEl) ringEl.style.strokeDashoffset = (RING_CIRCUMFERENCE * (1 - (d.fit_percentage / 100))).toFixed(2);
+
+        var badgeEl = document.getElementById('confidence-badge-' + jdId);
+        if (badgeEl) badgeEl.textContent = (confidenceWordMap[d.tier_label] || 'Low') + ' Fit';
+
+        var recEl = document.getElementById('rec-' + jdId);
+        if (recEl) recEl.textContent = d.recommendation || '';
+
+        var strengthsEl = document.getElementById('strengths-' + jdId);
+        if (strengthsEl && d.strengths && d.strengths.length) {
+            strengthsEl.innerHTML = d.strengths.slice(0, 3).map(function (s) {
+                return '<li>' + esc(s) + '</li>';
+            }).join('');
+        }
+
+        var statusEl = document.getElementById('ai-status-' + jdId);
+        if (statusEl) {
+            statusEl.className = 'match-card-ai-status is-verified';
+            statusEl.innerHTML = '&#10003; AI-verified';
+        }
+    }
+
+    function markUnavailable(jdId) {
+        var statusEl = document.getElementById('ai-status-' + jdId);
+        if (statusEl) statusEl.textContent = 'Estimate shown — AI analysis is taking longer than expected.';
+    }
+
+    function updateProgressText() {
+        if (!progressEl) return;
+        if (!remaining.length) {
+            progressEl.textContent = 'AI verification complete.';
+            return;
+        }
+        var elapsed = Math.round((Date.now() - startedAt) / 1000);
+        progressEl.textContent = 'AI analysis in progress for ' + remaining.length +
+            ' role' + (remaining.length === 1 ? '' : 's') + '… (' + elapsed + 's)';
+    }
+
+    function pollOnce() {
+        if (!remaining.length) return;
+        updateProgressText();
+        var elapsedMs = Date.now() - startedAt;
+
+        var checks = remaining.map(function (jdId) {
+            return fetch('/api/compare/' + resumeId + '/' + jdId + '/ai-status', {credentials: 'same-origin'})
+                .then(function (r) { return r.json(); })
+                .then(function (data) { return {jdId: jdId, data: data}; })
+                .catch(function () { return {jdId: jdId, data: null}; });
+        });
+
+        Promise.all(checks).then(function (results) {
+            var anyResolved = false;
+            results.forEach(function (res) {
+                if (res.data && res.data.ready) {
+                    applyResult(res.jdId, res.data);
+                    currentScores[res.jdId] = res.data.fit_percentage;
+                    anyResolved = true;
+                    remaining = remaining.filter(function (id) { return id !== res.jdId; });
+                }
+            });
+            if (anyResolved) resortCards();
+
+            updateProgressText();
+            if (!remaining.length) return;
+
+            if (elapsedMs >= MAX_WAIT_MS) {
+                remaining.forEach(markUnavailable);
+                remaining = [];
+                updateProgressText();
+                return;
+            }
+
+            setTimeout(pollOnce, POLL_INTERVAL_MS);
+        });
+    }
+
+    pollOnce();
+})();
+</script>
 {% else %}
 <section class="card">
     <div class="empty-state">
@@ -244,75 +450,5 @@ function saveComments() {
     </div>
     {% endif %}
 </section>
-
-{% if top_matches %}
-<script>
-(function () {
-    var jdIds = [{% for match in top_matches %}{{ match.jd_id }}{{ ',' if not loop.last }}{% endfor %}];
-    var resumeId = {{ resume.id }};
-    var total = jdIds.length;
-    var TIMEOUT_MS = 90000;
-    var progressEl = document.getElementById('matches-progress');
-
-    function esc(s) {
-        return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
-            return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
-        });
-    }
-
-    // Recolour this card via the shared .verdict-* classes (verdict.js /
-    // styles.css) — no colour map is duplicated here, and the card keeps its
-    // server-side rank position, so nothing reshuffles under the reader.
-    function applyVerdict(jdId, tierLabel, verdict) {
-        var card = document.getElementById('match-card-' + jdId);
-        var lblEl = document.getElementById('band-label-' + jdId);
-        var vClass = window.verdictClass ? window.verdictClass(verdict) : 'verdict verdict-good';
-        if (card) card.className = 'match-card ' + vClass;
-        if (lblEl) lblEl.textContent = tierLabel || 'Assessed';
-    }
-
-    function fetchWithTimeout(url) {
-        var controller = new AbortController();
-        var timedOut = false;
-        var timer = setTimeout(function () { timedOut = true; controller.abort(); }, TIMEOUT_MS);
-        return fetch(url, {signal: controller.signal})
-            .then(function (r) { return r.json().then(function (data) { return {ok: r.ok, data: data}; }); })
-            .then(
-                function (res) { clearTimeout(timer); return res; },
-                function () { clearTimeout(timer); throw {timedOut: timedOut}; }
-            );
-    }
-
-    // Sequential, not parallel — concurrent local-LLM calls contend for the
-    // same CPU and end up slower overall than running them one at a time.
-    function loadNext(i) {
-        if (i >= total) { if (progressEl) progressEl.textContent = 'AI holistic scores loaded'; return; }
-        if (progressEl) progressEl.textContent = 'Loading holistic score ' + (i + 1) + ' of ' + total + '…';
-        var jdId = jdIds[i];
-        var verdictEl = document.getElementById('ai-verdict-' + jdId);
-        var recEl = document.getElementById('ai-recommendation-' + jdId);
-        var lblEl = document.getElementById('band-label-' + jdId);
-        fetchWithTimeout('/api/compare/' + resumeId + '/' + jdId + '/ai-assessment')
-            .then(function (res) {
-                if (!res.ok || res.data.error) { throw {}; }
-                var d = res.data;
-                applyVerdict(jdId, d.tier_label, d.verdict);
-                var confSuffix = d.confidence_label
-                    ? ' <span style="color:#9ca3af;font-weight:400;">(Confidence: ' + esc(d.confidence_label) + ')</span>' : '';
-                if (verdictEl) verdictEl.innerHTML = '🤖 <strong class="verdict-text">' + esc(d.verdict || '') + '</strong>' + confSuffix;
-                if (recEl) recEl.textContent = d.recommendation || '';
-            })
-            .catch(function (err) {
-                if (lblEl) lblEl.textContent = 'Keyword estimate';
-                if (verdictEl) verdictEl.innerHTML = '<span style="color:#9ca3af;">'
-                    + ((err && err.timedOut) ? 'AI holistic score timed out — showing keyword estimate.'
-                                             : 'AI holistic score unavailable — showing keyword estimate.') + '</span>';
-            })
-            .then(function () { loadNext(i + 1); });
-    }
-    loadNext(0);
-})();
-</script>
-{% endif %}
 
 {% endblock %}

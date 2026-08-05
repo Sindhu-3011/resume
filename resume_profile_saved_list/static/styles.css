@@ -1002,6 +1002,7 @@ select.field-error { border-color: var(--clr-danger) !important; box-shadow: 0 0
     .resume-actions .button { flex: 1; }
     .profile-info-row { flex-direction: column; }
     .profile-avatar { width: 60px; height: 60px; font-size: 1.5rem; }
+    #matching-roles-grid { grid-template-columns: 1fr !important; }
     h1 { font-size: 1.4rem; }
     .dash-cards { grid-template-columns: repeat(2, 1fr); }
     .csel-grid { grid-template-columns: 1fr; }
@@ -1578,12 +1579,26 @@ body.login-page {
 .role-pill-row { display: flex; flex-wrap: wrap; gap: 6px; }
 .role-pill { background: var(--clr-primary-light); color: #3730a3; border-radius: 999px; padding: 4px 10px; font-size: 0.78rem; font-weight: 600; }
 
+/* Category-weighted score breakdown — the 9 categories summed (see
+   _CATEGORY_WEIGHTS in app.py) into the Overall Fit percentage. */
+.category-breakdown { margin: 4px 0 14px; padding: 10px 0 0; border-top: 1px solid var(--border); }
+.category-row { display: flex; align-items: center; gap: 10px; padding: 5px 0; font-size: 0.8rem; }
+.category-row-label { flex: 0 0 168px; color: var(--tx-2); font-weight: 600; }
+.category-row-weight { font-weight: 400; color: var(--tx-muted); font-size: 0.72rem; margin-left: 4px; }
+.category-row-bar { flex: 1; height: 6px; border-radius: 999px; background: var(--border); overflow: hidden; }
+.category-row-bar-fill { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--clr-primary), var(--clr-primary-dark, var(--clr-primary))); }
+.category-row-val { flex: 0 0 36px; text-align: right; font-weight: 700; color: var(--tx); }
+
 /* Match-result category badge — one class per real category value. */
 .jdm-cat-general { background: #f1f5f9; color: #475569; }
 
-/* Profile "Top matching roles" cards — colours driven by the .verdict-* class,
-   so the tier colour lives only in styles.css (was inline-styled + a JS colour
-   map). Defaults to the "good" indigo until the AI verdict resolves. */
+/* Profile "Top matching roles" cards — colours driven purely by the shared
+   .verdict-strong/-good/-partial/-low custom properties (see the "Shared
+   result primitives" block above), same source of truth as the compare-result
+   and JD top-matches pages. The server picks the tier class from the fit
+   percentage (see profile.html), so header band, score, and fit label always
+   agree — do not add a second, tier-specific override here, that's what
+   caused the header band to show a different colour than the score/label. */
 .match-card {
     background: var(--v-bg, #eef2ff); border-radius: 14px; overflow: hidden;
     box-shadow: 0 2px 10px rgba(0,0,0,0.07);
@@ -1602,10 +1617,10 @@ body.login-page {
 }
 .match-card-band-label { font-size: 0.72rem; font-weight: 800; color: rgba(255,255,255,0.9); text-transform: uppercase; letter-spacing: .07em; }
 .match-card-body { padding: 16px 18px; }
-.match-card-title { margin: 0 0 8px 0; font-size: 1rem; font-weight: 800; color: #1e293b; line-height: 1.4; }
+.match-card-title { margin: 0 0 14px 0; font-size: 1.02rem; font-weight: 800; color: #1e293b; line-height: 1.4; }
 .match-card-title a { color: inherit; text-decoration: none; }
 .match-card-verdict { margin-bottom: 6px; font-size: 0.8rem; color: var(--v-text, #6d28d9); line-height: 1.5; min-height: 1.2em; }
-.match-card-rec { margin-bottom: 14px; font-size: 0.82rem; font-weight: 700; min-height: 1.2em; color: var(--v-text); }
+.match-card-rec { margin: 12px 0 14px; font-size: 0.82rem; font-weight: 700; min-height: 1.2em; color: var(--v-text); line-height: 1.4; }
 .match-card-cta {
     display: block; width: 100%; margin-top: 14px; padding: 10px;
     background: linear-gradient(90deg, var(--v-main, #6366f1), var(--v-dark, #4f46e5));
@@ -1613,6 +1628,35 @@ body.login-page {
     font-weight: 700; font-size: 0.85rem; box-sizing: border-box; letter-spacing: .02em;
 }
 @keyframes aiminispin { to { transform: rotate(360deg); } }
+
+/* Top Matching Roles card — radial score ring + confidence badge + strengths/gaps grid. */
+.match-card-radial-row { display: flex; align-items: center; gap: 16px; margin-bottom: 16px; }
+.match-card-radial { position: relative; width: 88px; height: 88px; flex: none; }
+.match-card-radial svg { display: block; }
+.match-card-radial-label {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+}
+.match-card-radial-pct { font-size: 1.15rem; font-weight: 800; color: var(--v-text); }
+.match-card-radial-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.confidence-badge {
+    display: inline-block; align-self: flex-start; padding: 3px 11px; border-radius: 999px;
+    font-size: 0.72rem; font-weight: 800; letter-spacing: .02em;
+    background: color-mix(in srgb, var(--v-main) 16%, #fff); color: var(--v-text);
+}
+.match-card-req-count { font-size: 0.78rem; color: var(--tx-muted, #6b7280); }
+.match-card-ai-status { font-size: 0.72rem; color: #9ca3af; }
+.match-card-ai-status.is-verified { color: #059669; font-weight: 600; }
+.match-card-sg-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 4px; }
+.match-card-sg-col { min-width: 0; }
+.match-card-sg-heading {
+    display: block; font-size: 0.72rem; font-weight: 800; text-transform: uppercase;
+    letter-spacing: .03em; margin-bottom: 6px;
+}
+.match-card-sg-heading-good { color: #15803d; }
+.match-card-sg-heading-warn { color: #b45309; }
+.match-card-sg-list { list-style: none; margin: 0; padding: 0; font-size: 0.82rem; line-height: 1.6; color: var(--tx-2, #334155); }
+.match-card-sg-list li { padding-left: 0; }
+.match-card-sg-list-warn { color: #b91c1c; }
 
 /* Toast — reused by dashboard status saves; mirrors the profile "saved" pill. */
 .toast-msg {
