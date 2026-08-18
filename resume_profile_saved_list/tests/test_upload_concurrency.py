@@ -71,7 +71,7 @@ def test_parse_preview_never_reuses_the_same_temp_path():
     appmod.parse_resume_with_llm_text = fake_parse
     try:
         client = appmod.app.test_client()
-        client.post("/login", data={"username": "admin", "password": "Admin@123"})
+        client.post("/login", data={"username": "admin", "password": "Admin@123!"})
         for marker in ("Alpha", "Bravo", "Charlie"):
             # Same original filename every time ("resume.pdf") — the old
             # fixed-path code derived the temp name only from the

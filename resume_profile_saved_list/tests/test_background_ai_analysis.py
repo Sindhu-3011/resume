@@ -161,7 +161,7 @@ def test_save_does_not_call_wasteful_embedding_rebuild():
     new_id = None
     try:
         client = appmod.app.test_client()
-        client.post("/login", data={"username": "admin", "password": "Admin@123"})
+        client.post("/login", data={"username": "admin", "password": "Admin@123!"})
 
         add_data = {
             "full_name": "ZZZ Regression Test Disposable", "title": "Engineer", "email": "",
@@ -232,7 +232,7 @@ def test_save_with_attached_file_does_not_reparse_with_llm():
     new_id = None
     try:
         client = appmod.app.test_client()
-        client.post("/login", data={"username": "admin", "password": "Admin@123"})
+        client.post("/login", data={"username": "admin", "password": "Admin@123!"})
 
         add_data = {
             "full_name": "ZZZ Regression Test Disposable File", "title": "Engineer", "email": "",
@@ -300,7 +300,7 @@ def test_save_skips_reparse_entirely_when_preview_already_filled_the_form():
     new_id = None
     try:
         client = appmod.app.test_client()
-        client.post("/login", data={"username": "admin", "password": "Admin@123"})
+        client.post("/login", data={"username": "admin", "password": "Admin@123!"})
 
         full_data = {
             "full_name": "ZZZ Regression Test Prefilled Form", "title": "Engineer",
@@ -351,7 +351,7 @@ def test_background_trigger_populates_cache_without_blocking_request():
     _get_or_compute_hybrid_match at all.
     """
     client = appmod.app.test_client()
-    client.post("/login", data={"username": "admin", "password": "Admin@123"})
+    client.post("/login", data={"username": "admin", "password": "Admin@123!"})
     add_data = {
         "full_name": "ZZZ Regression Test Background Trigger", "title": "Engineer", "email": "",
         "phone": "", "location": "Test City", "exp_yrs": "5", "summary": "", "skills": "",
@@ -460,7 +460,7 @@ def test_ai_status_endpoint_never_blocks_and_never_computes():
 
     try:
         client = appmod.app.test_client()
-        client.post("/login", data={"username": "admin", "password": "Admin@123"})
+        client.post("/login", data={"username": "admin", "password": "Admin@123!"})
         with appmod.db_conn() as conn:
             rid = conn.execute("SELECT id FROM resume ORDER BY id DESC LIMIT 1").fetchone()["id"]
         r = client.get(f"/api/compare/{rid}/{FAKE_JD_ID + 1}/ai-status")
@@ -468,6 +468,85 @@ def test_ai_status_endpoint_never_blocks_and_never_computes():
         check("status endpoint never invoked the LLM judge itself", call_count["n"] == 0)
     finally:
         appmod._llm_judge_match = real_llm_judge
+
+
+def test_ai_status_endpoint_returns_correct_jd_mirroring_data():
+    """Regression test for a bug found live on 2026-08-06: compare_ai_status
+    only ever selected `id, updated_at` for the JD row, since that used to be
+    all _read_cached_hybrid_match needed (a raw timestamp comparison).
+    _jd_mirroring_risk needs the JD's actual skills/requirements/
+    responsibilities text, computed fresh on every read (see
+    _read_cached_hybrid_match) — with only id/updated_at present, every
+    single call through this endpoint silently saw an empty JD and always
+    reported jd_mirroring_label=None, even for a resume that blatantly
+    mirrors the JD's own text. Confirmed live: the Top 3 cards (which use a
+    full JD row via _rank_top_jd_matches) correctly showed "High JD-Text
+    Overlap", while this exact same pair's /ai-status response showed null.
+    """
+    with appmod.db_conn() as conn:
+        jd_row = conn.execute(
+            "SELECT id, requirements, responsibilities, skills, keywords, updated_at "
+            "FROM job_description WHERE position_status = %s LIMIT 1",
+            (appmod.DEFAULT_POSITION_STATUS,),
+        ).fetchone()
+    check("a real Open JD exists to test against", jd_row is not None)
+    if not jd_row:
+        return
+    jd_id = jd_row["id"]
+    # Build a resume that closely mirrors this JD's own text — the same
+    # near-verbatim-copy scenario the feature targets.
+    mirror_text = " ".join(str(jd_row.get(k) or "") for k in
+                            ("requirements", "responsibilities", "skills", "keywords"))[:1500]
+
+    client = appmod.app.test_client()
+    client.post("/login", data={"username": "admin", "password": "Admin@123!"})
+    add_data = {
+        "full_name": "ZZZ Regression Test JD Mirroring", "title": "Engineer", "email": "",
+        "phone": "", "location": "Test City", "exp_yrs": "5", "summary": mirror_text, "skills": "",
+        "experience": "", "education": "", "certifications": "", "projects": "", "department": "",
+    }
+    resume_id = None
+    real_llm_judge = appmod._llm_judge_match
+    real_trigger = appmod.trigger_background_ai_assessment
+    appmod.trigger_background_ai_assessment = lambda *a, **k: None
+    try:
+        r_add = client.post("/edit", data=add_data)
+        m = __import__("re").search(r"/profile/(\d+)", r_add.headers.get("Location", ""))
+        resume_id = int(m.group(1)) if m else None
+        check("disposable mirrored-content resume created", resume_id is not None)
+        if not resume_id:
+            return
+
+        # Force a cached AI-judged row for this pair so the endpoint has
+        # something to serve — mocked LLM output, fast and deterministic.
+        appmod._llm_judge_match = lambda resume_d, jd_d, keyword_result: {
+            "category_scores": {cat: 70 for cat in appmod._CATEGORY_WEIGHTS},
+            "verdict": "Good Match", "rationale": "x", "strengths": [], "concerns": "",
+            "suggested_roles": [], "confidence": 80, "confidence_reason": "",
+        }
+        with appmod.db_conn() as conn:
+            resume_row = conn.execute("SELECT * FROM resume WHERE id = %s", (resume_id,)).fetchone()
+            jd_full = conn.execute("SELECT * FROM job_description WHERE id = %s", (jd_id,)).fetchone()
+            assessment = appmod._hybrid_match(dict(resume_row), dict(jd_full))
+            appmod._store_hybrid_match(conn, resume_row, jd_full, assessment)
+            conn.commit()
+
+        r = client.get(f"/api/compare/{resume_id}/{jd_id}/ai-status")
+        data = r.get_json()
+        check("ai-status endpoint reports ready", data.get("ready") is True)
+        check("ai-status endpoint's jd_mirroring_label reflects the actual overlap, not null",
+              data.get("jd_mirroring_label") is not None)
+        check("ai-status endpoint's jd_mirroring_pct is a real number, not 0-by-empty-JD",
+              (data.get("jd_mirroring_pct") or 0) > 0)
+    finally:
+        appmod._llm_judge_match = real_llm_judge
+        appmod.trigger_background_ai_assessment = real_trigger
+        if resume_id:
+            with appmod.db_conn() as conn:
+                conn.execute("DELETE FROM ai_match_cache WHERE resume_id = %s AND jd_id = %s",
+                             (resume_id, jd_id))
+                conn.execute("DELETE FROM resume WHERE id = %s", (resume_id,))
+                conn.commit()
 
 
 def main():
@@ -480,6 +559,7 @@ def main():
         test_save_skips_reparse_entirely_when_preview_already_filled_the_form,
         test_background_trigger_populates_cache_without_blocking_request,
         test_ai_status_endpoint_never_blocks_and_never_computes,
+        test_ai_status_endpoint_returns_correct_jd_mirroring_data,
     ]
     for t in tests:
         print(f"\n-- {t.__name__} --")

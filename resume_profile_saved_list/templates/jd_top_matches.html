@@ -60,8 +60,10 @@
             </div>
 
             <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                {% if can_write('compare_resume') %}
                 <a class="button secondary" style="padding:6px 14px; font-size:0.85rem;"
                    href="{{ url_for('compare_result', resume_id=resume.id, jd_id=jd.id) }}">Full Comparison</a>
+                {% endif %}
                 <a class="button secondary" style="padding:6px 14px; font-size:0.85rem;"
                    href="{{ url_for('profile_detail', resume_id=resume.id) }}">View Profile</a>
             </div>

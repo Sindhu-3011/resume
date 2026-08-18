@@ -4,8 +4,9 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{% block title %}Resume Profile{% endblock %}</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=15">
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=16">
     <script src="{{ url_for('static', filename='verdict.js') }}?v=1" defer></script>
+    <script src="{{ url_for('static', filename='confirm-dialog.js') }}?v=1" defer></script>
     {% if current_username %}
     <script>
         window.SESSION_TIMEOUT_MS = {{ session_timeout_ms }};
@@ -38,7 +39,7 @@
             <p class="nav-section-label">Manage</p>
 
             <a href="{{ url_for('jd_management') }}"
-               class="nav-item {{ 'active' if request.endpoint in ('jd_management','jd_add','jd_detail','jd_edit') else '' }}">
+               class="nav-item {{ 'active' if request.endpoint in ('jd_management','jd_add','jd_detail','jd_edit','jd_interview_questions') else '' }}">
                 <span class="nav-icon">&#128221;</span>
                 <span class="nav-label">JD Management</span>
             </a>
@@ -57,7 +58,9 @@
                 <span class="nav-icon">&#128100;</span>
                 <span class="nav-label">Users</span>
             </a>
+            {% endif %}
 
+            {% if can_view('view_audit_trail') %}
             <a href="{{ url_for('audit_trail') }}"
                class="nav-item {{ 'active' if request.endpoint == 'audit_trail' else '' }}"
                title="Audit Trail">
@@ -74,11 +77,13 @@
                 <span class="nav-label">View Profiles</span>
             </a>
 
+            {% if can_view('view_add_profile') %}
             <a href="{{ url_for('edit_resume') }}"
                class="nav-item {{ 'active' if (request.endpoint == 'edit_resume' and not request.view_args.get('resume_id')) or request.endpoint == 'upload_files' else '' }}">
                 <span class="nav-icon">&#10010;</span>
                 <span class="nav-label">Add Profile</span>
             </a>
+            {% endif %}
         </nav>
 
         <div class="sidebar-footer">
@@ -99,10 +104,14 @@
                     <a href="{{ url_for('requirement_management') }}">&#128188; Requirement Management</a>
                     {% if current_role == 'admin' %}
                     <a href="{{ url_for('user_management') }}">&#128100; User Management</a>
+                    {% endif %}
+                    {% if can_view('view_audit_trail') %}
                     <a href="{{ url_for('audit_trail') }}">&#128220; Audit Trail</a>
                     {% endif %}
                     <a href="{{ url_for('profile_list') }}">&#128203; View Profiles</a>
+                    {% if can_view('view_add_profile') %}
                     <a href="{{ url_for('edit_resume') }}">&#8679; Add Profile</a>
+                    {% endif %}
                     {% if current_username %}
                     <a href="{{ url_for('logout') }}">&#8630; Logout</a>
                     {% endif %}
@@ -112,7 +121,7 @@
                     <span class="navbar-account-avatar">{{ (current_full_name or current_username)[0]|upper }}</span>
                     <span class="navbar-account-text">
                         <span class="navbar-account-name" title="{{ current_full_name or current_username }}">{{ current_full_name or current_username }}</span>
-                        <span class="navbar-account-role">{{ current_role|capitalize }}</span>
+                        <span class="navbar-account-role">{{ role_labels.get(current_role, current_role) }}</span>
                     </span>
                     <a class="navbar-logout" href="{{ url_for('logout') }}" title="Logout" aria-label="Logout">&#9211;</a>
                 </div>

@@ -1,0 +1,219 @@
+{% extends "base.html" %}
+{% block title %}Interview Questions | {{ jd.title }}{% endblock %}
+{% block content %}
+
+<section class="hero card">
+    <div>
+        <p class="eyebrow">Interview Questions & Answers</p>
+        <h1>{{ jd.title }}</h1>
+        <p class="muted">Questions specific to this JD — edit, delete, or add your own before the interview.</p>
+    </div>
+    <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:flex-start;">
+        <a class="button secondary" href="{{ url_for('jd_detail', jd_id=jd.id) }}">← Back to JD</a>
+    </div>
+</section>
+
+<p id="generateStatus" class="muted" style="display:none; margin:-8px 0 16px;"></p>
+
+{% if not has_questions %}
+<div class="card" style="text-align:center; padding:48px 24px;" id="emptyState">
+    <p style="font-size:3rem; margin-bottom:12px;">&#127908;</p>
+    <h3>Preparing interview questions…</h3>
+    <p class="muted" style="margin-bottom:0;">This JD doesn't have its questions yet — they're being built now (Technical, Scenario Based, Functional, Behavioral) and will appear here automatically. This runs once per JD and only takes a few minutes.</p>
+</div>
+{% else %}
+<div class="jdm-tabs" id="iqTabs">
+    {% for cat in categories %}
+    <button class="jdm-tab {{ 'active' if loop.first else '' }}" data-cat="{{ cat }}">
+        {{ cat }} <span class="jdm-tab-badge">{{ questions_by_category.get(cat, []) | length }}</span>
+    </button>
+    {% endfor %}
+</div>
+
+{% for cat in categories %}
+<div class="iq-panel" data-panel="{{ cat }}" style="{{ '' if loop.first else 'display:none;' }}">
+    {% for diff in difficulties %}
+    {% set diff_qs = questions_by_category.get(cat, []) | selectattr('difficulty', 'equalto', diff) | list %}
+    <div class="iq-diff-group" style="margin-bottom:20px;">
+        <h3 style="font-size:1rem; margin-bottom:10px; padding-bottom:6px; border-bottom:1px solid var(--border);">
+            {{ cat }} &rarr; {{ diff }} <span class="jdm-tab-badge" style="background:var(--bg); color:var(--tx-muted);">{{ diff_qs | length }}</span>
+        </h3>
+        {% for q in diff_qs %}
+        <div class="card iq-card" data-id="{{ q.id }}" data-category="{{ q.category }}"
+             data-question="{{ q.question }}" data-expected-answer="{{ q.expected_answer }}"
+             data-key-points="{{ q.key_points }}" data-difficulty="{{ q.difficulty }}"
+             style="margin-bottom:12px;">
+            <p style="font-weight:700;">{{ loop.index }}. {{ q.question }}</p>
+            <div style="margin-top:12px;">
+                <p class="muted" style="font-weight:700; margin-bottom:4px;">Answer</p>
+                <p style="margin-bottom:10px;">{{ q.expected_answer }}</p>
+                {% if q.key_points %}
+                <p class="muted" style="font-weight:700; margin-bottom:4px;">Key Points</p>
+                <ul style="margin:0 0 0 18px;">
+                    {% for kp in q.key_points.splitlines() %}
+                        {% if kp.strip() %}<li>{{ kp.strip() }}</li>{% endif %}
+                    {% endfor %}
+                </ul>
+                {% endif %}
+            </div>
+            {% if can_write('write_jd') %}
+            <div style="display:flex; gap:8px; margin-top:12px;">
+                <button type="button" class="button secondary iq-edit-btn">Edit</button>
+                <button type="button" class="button danger iq-delete-btn">Delete</button>
+            </div>
+            {% endif %}
+        </div>
+        {% else %}
+        <p class="muted" style="padding:4px 0 16px;">No {{ diff }} {{ cat }} questions yet.</p>
+        {% endfor %}
+    </div>
+    {% endfor %}
+</div>
+{% endfor %}
+{% endif %}
+
+{% if can_write('write_jd') %}
+<div class="card" style="margin-top:16px;">
+    <div class="section-header" style="margin-bottom:14px;">
+        <h2 id="iqFormHeading">Add a Question</h2>
+    </div>
+    <form id="iqForm" class="form-grid">
+        <label>Category
+            <select name="category" id="iqCategory">
+                {% for cat in categories %}<option value="{{ cat }}">{{ cat }}</option>{% endfor %}
+            </select>
+        </label>
+        <label>Difficulty
+            <select name="difficulty" id="iqDifficulty">
+                {% for d in difficulties %}<option value="{{ d }}">{{ d }}</option>{% endfor %}
+            </select>
+        </label>
+        <label style="grid-column:1/-1;">Question
+            <textarea name="question" id="iqQuestion" rows="2" required></textarea>
+        </label>
+        <label style="grid-column:1/-1;">Expected Answer
+            <textarea name="expected_answer" id="iqExpectedAnswer" rows="3"></textarea>
+        </label>
+        <label style="grid-column:1/-1;">Key Points (one per line)
+            <textarea name="key_points" id="iqKeyPoints" rows="3"></textarea>
+        </label>
+        <div style="grid-column:1/-1; display:flex; gap:10px;">
+            <button type="submit" class="button" id="iqSaveBtn">Add Question</button>
+            <button type="button" class="button secondary" id="iqCancelBtn" style="display:none;">Cancel Edit</button>
+        </div>
+    </form>
+</div>
+{% endif %}
+
+<script>
+(function () {
+    var JD_ID = {{ jd.id }};
+    var tabs = document.querySelectorAll('#iqTabs .jdm-tab');
+    var panels = document.querySelectorAll('.iq-panel');
+
+    tabs.forEach(function (tab) {
+        tab.addEventListener('click', function () {
+            tabs.forEach(function (t) { t.classList.remove('active'); });
+            tab.classList.add('active');
+            panels.forEach(function (p) {
+                p.style.display = (p.dataset.panel === tab.dataset.cat) ? '' : 'none';
+            });
+        });
+    });
+
+    // Add/Edit/Delete controls only exist in the DOM for users with
+    // write_jd — everything below is a no-op (not an error) for anyone else.
+    var form = document.getElementById('iqForm');
+    if (form) {
+        var editingId = null;
+
+        var resetForm = function () {
+            editingId = null;
+            form.reset();
+            document.getElementById('iqFormHeading').textContent = 'Add a Question';
+            document.getElementById('iqSaveBtn').textContent = 'Add Question';
+            document.getElementById('iqCancelBtn').style.display = 'none';
+        };
+
+        document.getElementById('iqCancelBtn').addEventListener('click', resetForm);
+
+        document.querySelectorAll('.iq-edit-btn').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                var card = btn.closest('.iq-card');
+                editingId = card.dataset.id;
+                document.getElementById('iqCategory').value = card.dataset.category;
+                document.getElementById('iqDifficulty').value = card.dataset.difficulty;
+                document.getElementById('iqQuestion').value = card.dataset.question;
+                document.getElementById('iqExpectedAnswer').value = card.dataset.expectedAnswer;
+                document.getElementById('iqKeyPoints').value = card.dataset.keyPoints;
+                document.getElementById('iqFormHeading').textContent = 'Edit Question';
+                document.getElementById('iqSaveBtn').textContent = 'Save Changes';
+                document.getElementById('iqCancelBtn').style.display = '';
+                form.scrollIntoView({behavior: 'smooth'});
+            });
+        });
+
+        document.querySelectorAll('.iq-delete-btn').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                if (!confirm('Delete this question?')) return;
+                var card = btn.closest('.iq-card');
+                fetch('/api/interview-question/' + card.dataset.id + '/delete', {method: 'POST'})
+                    .then(function (r) { return r.json(); })
+                    .then(function (d) {
+                        if (d.ok) { location.reload(); } else { alert(d.error || 'Failed to delete question.'); }
+                    })
+                    .catch(function () { alert('Failed to delete question.'); });
+            });
+        });
+
+        form.addEventListener('submit', function (e) {
+            e.preventDefault();
+            var payload = {
+                category: document.getElementById('iqCategory').value,
+                difficulty: document.getElementById('iqDifficulty').value,
+                question: document.getElementById('iqQuestion').value,
+                expected_answer: document.getElementById('iqExpectedAnswer').value,
+                key_points: document.getElementById('iqKeyPoints').value,
+            };
+            var url = editingId
+                ? '/api/interview-question/' + editingId + '/update'
+                : '/jd/' + JD_ID + '/interview-questions/add';
+            fetch(url, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(payload),
+            })
+                .then(function (r) { return r.json(); })
+                .then(function (d) {
+                    if (d.ok) { location.reload(); } else { alert(d.error || 'Failed to save question.'); }
+                })
+                .catch(function () { alert('Failed to save question.'); });
+        });
+    }
+
+    // Auto-generate exactly once: only fires when this JD has zero questions
+    // saved yet. Once any questions exist for a JD (generated or manually
+    // added), this never runs again for that JD — nothing here ever
+    // deletes or replaces an existing set. There is no manual
+    // generate/regenerate control for normal use.
+    var hasQuestions = {{ 'true' if has_questions else 'false' }};
+    if (!hasQuestions) {
+        var generateStatus = document.getElementById('generateStatus');
+        generateStatus.style.display = '';
+        generateStatus.textContent = 'Building this JD\'s first set of interview questions — this can take a few minutes on local hardware, please wait.';
+        fetch('/jd/' + JD_ID + '/interview-questions/generate', {method: 'POST'})
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+                if (d.success) {
+                    location.reload();
+                } else {
+                    generateStatus.textContent = d.message || 'Unable to generate interview questions. Please try again.';
+                }
+            })
+            .catch(function () {
+                generateStatus.textContent = 'Unable to generate interview questions. Please try again.';
+            });
+    }
+})();
+</script>
+{% endblock %}

@@ -1,15 +1,22 @@
 {% extends "base.html" %}
-{% block title %}{% if jd %}Edit JD{% else %}Add JD{% endif %} | Resume Profile{% endblock %}
+{% block title %}{% if duplicate_warning %}Add JD{% elif jd %}Edit JD{% else %}Add JD{% endif %} | Resume Profile{% endblock %}
 {% block content %}
 
 <section class="hero card">
     <div>
-        <p class="eyebrow">{% if jd %}Edit{% else %}New{% endif %} Job Description</p>
-        <h1>{% if jd %}Edit: {{ jd.title }}{% else %}Add Job Description{% endif %}</h1>
+        <p class="eyebrow">{% if duplicate_warning %}New{% elif jd %}Edit{% else %}New{% endif %} Job Description</p>
+        <h1>{% if duplicate_warning %}Add Job Description{% elif jd %}Edit: {{ jd.title }}{% else %}Add Job Description{% endif %}</h1>
         <p class="muted">Fill in the details below. Skills (one per line) and Keywords are used for resume matching.</p>
     </div>
     <a class="button secondary" href="{{ url_for('jd_management') }}">← Back to JD List</a>
 </section>
+
+{% if duplicate_warning %}
+<div class="card" style="border-left:4px solid #d97706; background:#fffbeb; margin-bottom:16px;">
+    <p style="font-weight:700; margin-bottom:4px;">&#9888; Possible duplicate JD</p>
+    <p class="muted" style="margin:0;">A JD with the same title already exists in this category (see the message above). Review the details below, then either adjust them and submit again, or click "Add Anyway" to create it regardless.</p>
+</div>
+{% endif %}
 
 <form class="card form-grid" method="post" enctype="multipart/form-data">
 
@@ -20,9 +27,9 @@
     </div>
 
     <div>
-        <label for="role">Role (links to Groups)</label>
-        <select id="role" name="role" class="form-select">
-            <option value="">— Select a role —</option>
+        <label for="role">Role (links to Groups) <span style="color:#c0182c;">*</span></label>
+        <select id="role" name="role" class="form-select" required>
+            <option value="" disabled {% if not jd or not jd.role %}selected{% endif %}>— Select a role —</option>
             {% for group, roles in all_roles.items() %}
             <optgroup label="{{ group }}">
                 {% for r in roles %}
@@ -34,8 +41,8 @@
     </div>
 
     <div>
-        <label for="category">Category</label>
-        <select id="category" name="category" class="form-select">
+        <label for="category">Category <span style="color:#c0182c;">*</span></label>
+        <select id="category" name="category" class="form-select" required>
             <option value="Validation Roles" {% if not jd or jd.category == 'Validation Roles' %}selected{% endif %}>Validation Roles</option>
             <option value="IT Roles" {% if jd and jd.category == 'IT Roles' %}selected{% endif %}>IT Roles</option>
             <option value="General" {% if jd and jd.category == 'General' %}selected{% endif %}>General</option>
@@ -43,8 +50,8 @@
     </div>
 
     <div>
-        <label for="position_status">Position Status</label>
-        <select id="position_status" name="position_status" class="form-select">
+        <label for="position_status">Position Status <span style="color:#c0182c;">*</span></label>
+        <select id="position_status" name="position_status" class="form-select" required>
             {% for s in statuses %}
             <option value="{{ s }}" {% if jd and jd.position_status == s %}selected{% elif not jd and s == default_status %}selected{% endif %}>{{ s }}</option>
             {% endfor %}
@@ -52,26 +59,26 @@
     </div>
 
     <div class="full">
-        <label for="responsibilities">Responsibilities</label>
-        <textarea id="responsibilities" name="responsibilities" rows="7"
+        <label for="responsibilities">Responsibilities <span style="color:#c0182c;">*</span></label>
+        <textarea id="responsibilities" name="responsibilities" rows="7" required
                   placeholder="Paste or type the responsibilities from the JD (one per line)...">{{ jd.responsibilities if jd else '' }}</textarea>
     </div>
 
     <div class="full">
-        <label for="requirements">Requirements / Qualifications</label>
-        <textarea id="requirements" name="requirements" rows="6"
+        <label for="requirements">Requirements / Qualifications <span style="color:#c0182c;">*</span></label>
+        <textarea id="requirements" name="requirements" rows="6" required
                   placeholder="Minimum qualifications, experience requirements, education, etc.">{{ jd.requirements if jd else '' }}</textarea>
     </div>
 
     <div class="full">
-        <label for="skills">Required Skills <span class="muted" style="font-weight:400;">(one skill per line — used for matching)</span></label>
-        <textarea id="skills" name="skills" rows="8"
+        <label for="skills">Required Skills <span style="color:#c0182c;">*</span> <span class="muted" style="font-weight:400;">(one skill per line — used for matching)</span></label>
+        <textarea id="skills" name="skills" rows="8" required
                   placeholder="e.g.&#10;CSV&#10;GAMP 5&#10;21 CFR Part 11&#10;GxP&#10;HP ALM&#10;Agile">{{ jd.skills if jd else '' }}</textarea>
     </div>
 
     <div class="full">
-        <label for="keywords">Keywords <span class="muted" style="font-weight:400;">(comma-separated, used to boost matching)</span></label>
-        <input id="keywords" name="keywords"
+        <label for="keywords">Keywords <span style="color:#c0182c;">*</span> <span class="muted" style="font-weight:400;">(comma-separated, used to boost matching)</span></label>
+        <input id="keywords" name="keywords" required
                placeholder="e.g. CSV, validation, pharmaceutical, GxP, compliance"
                value="{{ jd.keywords if jd else '' }}">
     </div>
@@ -87,7 +94,10 @@
     </div>
 
     <div class="full actions">
-        <button class="button" type="submit">{% if jd %}Save Changes{% else %}Add Job Description{% endif %}</button>
+        <button class="button" type="submit">{% if duplicate_warning %}Re-check{% elif jd %}Save Changes{% else %}Add Job Description{% endif %}</button>
+        {% if duplicate_warning %}
+        <button class="button secondary" type="submit" name="confirm_duplicate" value="1">Add Anyway</button>
+        {% endif %}
         <a class="button secondary" href="{{ url_for('jd_management') }}">Cancel</a>
     </div>
 

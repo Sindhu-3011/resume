@@ -17,9 +17,11 @@
         <h1>Audit Trail</h1>
         <p class="muted">Every logged-in user action across every module &mdash; logins, saves, deletes, exports, and more.</p>
     </div>
+    {% if can_write('export_audit_trail') %}
     <a class="button" style="background:#10b981;" href="{{ url_for('audit_trail_export_csv') }}{{ qs({}) }}">
         &#128190; Export CSV
     </a>
+    {% endif %}
 </section>
 
 <!-- Search & filters -->

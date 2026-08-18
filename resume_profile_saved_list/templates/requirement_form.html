@@ -13,11 +13,13 @@
 
 <form class="card form-grid" method="post">
 
+    {% if requirement %}
     <div>
-        <label for="requirement_code">Requirement ID <span style="color:#c0182c;">*</span></label>
-        <input id="requirement_code" name="requirement_code" required placeholder="e.g. REQ-1001"
-               value="{{ requirement.requirement_code if requirement else '' }}">
+        <label for="requirement_code">Requirement ID</label>
+        <input id="requirement_code" value="{{ requirement.requirement_code }}" disabled>
+        <p class="muted" style="font-size:0.78rem; margin-top:4px;">System-generated when the requirement was created — cannot be changed.</p>
     </div>
+    {% endif %}
 
     <div>
         <label for="requirement_name">Requirement Name <span style="color:#c0182c;">*</span></label>
@@ -78,6 +80,40 @@
             <option value="{{ o }}" {% if requirement and requirement.onsite_offshore == o %}selected{% endif %}>{{ o }}</option>
             {% endfor %}
         </select>
+    </div>
+
+    <div>
+        <label for="assigned_recruiter_id">Assigned Recruiter</label>
+        <select id="assigned_recruiter_id" name="assigned_recruiter_id" class="form-select">
+            <option value="">— Unassigned —</option>
+            {% for r in recruiter_options %}
+            <option value="{{ r.id }}" {% if requirement and requirement.assigned_recruiter_id == r.id %}selected{% endif %}>
+                {{ r.full_name or r.username }}
+            </option>
+            {% endfor %}
+        </select>
+    </div>
+
+    <div>
+        <label for="priority">Priority</label>
+        <select id="priority" name="priority" class="form-select">
+            {% for p in priority_levels %}
+            <option value="{{ p }}" {% if requirement and requirement.priority == p %}selected{% elif not requirement and p == 'Medium' %}selected{% endif %}>{{ p }}</option>
+            {% endfor %}
+        </select>
+    </div>
+
+    <div>
+        <label for="jd_id">Linked Job Description</label>
+        <select id="jd_id" name="jd_id" class="form-select">
+            <option value="">— None —</option>
+            {% for jd in jd_options %}
+            <option value="{{ jd.id }}" {% if requirement and requirement.jd_id == jd.id %}selected{% endif %}>
+                {{ jd.title }}{% if jd.workflow_status != 'Published' %} ({{ jd.workflow_status }}){% endif %}
+            </option>
+            {% endfor %}
+        </select>
+        <p class="muted" style="font-size:0.8rem; margin-top:4px;">Only Published JDs can be linked to a new requirement.</p>
     </div>
 
     <div class="full actions">

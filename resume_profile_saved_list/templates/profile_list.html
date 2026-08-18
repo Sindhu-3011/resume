@@ -7,7 +7,9 @@
         <h1>Saved Resumes</h1>
         <p class="muted">All saved resumes are listed below. Click <strong>View Profile</strong> to open full details.</p>
     </div>
+    {% if can_view('view_add_profile') %}
     <a class="button" href="{{ url_for('edit_resume') }}">+ Upload New Resume</a>
+    {% endif %}
 </section>
 
 <section class="card">
@@ -27,13 +29,17 @@
                 </div>
                 <div class="resume-actions">
                     <a class="button" href="{{ url_for('profile_detail', resume_id=resume.id) }}">View Profile</a>
+                    {% if can_write('write_profile') %}
                     <a class="button secondary" href="{{ url_for('edit_resume', resume_id=resume.id) }}">Edit</a>
+                    {% endif %}
                     {% if resume.resume_file %}
                         <a class="button secondary" href="{{ url_for('uploaded_file', filename=resume.resume_file) }}" target="_blank" rel="noopener">Download</a>
                     {% endif %}
+                    {% if can_write('delete_profile') %}
                     <form method="post" action="{{ url_for('delete_resume', resume_id=resume.id) }}" style="display:inline" onsubmit="return confirm('Delete this profile? This cannot be undone.')">
                         <button type="submit" class="button danger">Delete</button>
                     </form>
+                    {% endif %}
                 </div>
             </article>
             {% endfor %}

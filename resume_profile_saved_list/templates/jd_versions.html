@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}Version History: {{ jd.title }} | JD Management{% endblock %}
+{% block content %}
+
+<section class="hero card">
+    <div>
+        <p class="eyebrow">Version History</p>
+        <h1>{{ jd.title }}</h1>
+        <p class="muted">Every edit made to this JD after it was Published is preserved here — nothing is ever overwritten or deleted.</p>
+    </div>
+    <a class="button secondary" href="{{ url_for('jd_detail', jd_id=jd.id) }}">&larr; Back to JD</a>
+</section>
+
+{% if versions %}
+<div class="card" style="padding:0; overflow:hidden;">
+    <table class="jdm-table">
+        <thead>
+            <tr>
+                <th>Version</th>
+                <th>Edited By</th>
+                <th>Timestamp</th>
+                <th>Changed Fields</th>
+                <th>Compare</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for v in versions %}
+            <tr>
+                <td class="jdm-td-num">{{ v.version_number }}</td>
+                <td>{{ v.editor_name or '—' }}</td>
+                <td class="text-muted">{{ v.edited_at.strftime('%Y-%m-%d %H:%M') if v.edited_at else '—' }}</td>
+                <td>{{ v.changed_fields | join(', ') if v.changed_fields else '—' }}</td>
+                <td class="jdm-actions">
+                    <a class="button secondary jdm-btn" href="{{ url_for('jd_version_compare', jd_id=jd.id, a=v.id, b='current') }}">Compare to Current</a>
+                    {% if can_write('approve_jd') %}
+                    <form method="post" action="{{ url_for('jd_version_rollback', jd_id=jd.id, version_id=v.id) }}" style="display:inline"
+                          onsubmit="return confirm('Roll back this JD to version {{ v.version_number }}? The current state will itself be preserved as a new version.')">
+                        <button type="submit" class="button danger jdm-btn">Rollback</button>
+                    </form>
+                    {% endif %}
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% else %}
+<div class="card" style="text-align:center; padding:48px 24px;">
+    <p style="font-size:3rem; margin-bottom:12px;">&#128337;</p>
+    <h3>No version history yet</h3>
+    <p class="muted">A version is recorded the first time this JD is edited after being Published.</p>
+</div>
+{% endif %}
+
+{% endblock %}

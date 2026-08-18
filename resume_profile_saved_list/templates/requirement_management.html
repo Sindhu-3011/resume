@@ -8,8 +8,17 @@
         <h1>Requirement Management</h1>
         <p class="muted">Track open client requirements: profiles shared, interviewed, and offered.</p>
     </div>
+    {% if can_write('write_requirement') %}
     <a class="button" href="{{ url_for('requirement_add') }}">+ Add New Requirement</a>
+    {% endif %}
 </section>
+
+<form method="get" class="card" style="display:flex; gap:10px; align-items:center; margin-bottom:16px;">
+    <input type="text" name="q" value="{{ search_query }}" placeholder="Search by Requirement ID, name, or client…"
+           style="flex:1;">
+    <button class="button secondary" type="submit">Search</button>
+    {% if search_query %}<a class="button secondary" href="{{ url_for('requirement_management') }}">Clear</a>{% endif %}
+</form>
 
 {% if requirements %}
 <div class="card" style="padding:0; overflow:hidden;">
@@ -24,13 +33,14 @@
                 <th>Division/Group</th>
                 <th># of Requirement</th>
                 <th>Position Status</th>
-                <th># of Profiles Shared</th>
-                <th>Interviewed</th>
-                <th>Offered</th>
+                <th>Recruiter</th>
+                <th>Priority</th>
+                <th>Linked JD</th>
                 <th>Actions</th>
             </tr>
         </thead>
         <tbody>
+        {% set priority_badge = {'Low': 'jdm-status-open', 'Medium': 'jdm-status-fulfilled', 'High': 'jdm-status-hold', 'Critical': 'jdm-status-closed'} %}
         {% for r in requirements %}
             <tr>
                 <td class="jdm-td-num">{{ loop.index }}</td>
@@ -44,22 +54,39 @@
                         {{ r.status }}
                     </span>
                 </td>
-                <td>{{ r.profiles_shared }}</td>
-                <td>{{ r.interviewed }}</td>
-                <td>{{ r.offered }}</td>
+                <td>{{ r.recruiter_name or '—' }}</td>
+                <td>
+                    <span class="jdm-cat-badge {{ priority_badge.get(r.priority, '') }}">{{ r.priority or 'Medium' }}</span>
+                </td>
+                <td>
+                    {% if r.jd_id %}
+                    <a href="{{ url_for('jd_detail', jd_id=r.jd_id) }}">{{ r.jd_title or ('JD #' ~ r.jd_id) }}</a>
+                    {% else %}—{% endif %}
+                </td>
                 <td class="jdm-actions">
                     <a class="button secondary jdm-btn" href="{{ url_for('requirement_detail', req_id=r.id) }}">View</a>
+                    {% if can_write('write_requirement') %}
                     <a class="button secondary jdm-btn" href="{{ url_for('requirement_edit', req_id=r.id) }}">Edit</a>
+                    {% endif %}
+                    {% if can_write('delete_requirement') %}
                     <form method="post" action="{{ url_for('requirement_delete', req_id=r.id) }}" style="display:inline"
                           onsubmit="return confirm('Delete this requirement? This cannot be undone.')">
                         <button type="submit" class="button danger jdm-btn">Delete</button>
                     </form>
+                    {% endif %}
                 </td>
             </tr>
         {% endfor %}
         </tbody>
     </table>
     </div>
+</div>
+{% elif search_query %}
+<div class="card" style="text-align:center; padding:48px 24px;">
+    <p style="font-size:3rem; margin-bottom:12px;">&#128269;</p>
+    <h3>No Requirements match your search</h3>
+    <p class="muted" style="margin-bottom:20px;">Try a different Requirement ID, name, or client.</p>
+    <a class="button secondary" href="{{ url_for('requirement_management') }}">Clear Search</a>
 </div>
 {% else %}
 <div class="card" style="text-align:center; padding:48px 24px;">

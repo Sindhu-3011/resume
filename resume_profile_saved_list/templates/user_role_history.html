@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Role History: {{ user.username }} | Resume Profile{% endblock %}
+{% block content %}
+
+<section class="hero card">
+    <div>
+        <p class="eyebrow">Role &amp; Permission History</p>
+        <h1>{{ user.full_name or user.username }}</h1>
+        <p class="muted">Every role assignment recorded for this account, starting from when it was created.</p>
+    </div>
+    <a class="button secondary" href="{{ url_for('user_management') }}">&larr; Back to Users</a>
+</section>
+
+{% if history %}
+<div class="card" style="padding:0; overflow:hidden;">
+    <table class="jdm-table">
+        <thead>
+            <tr>
+                <th>Old Role</th>
+                <th>New Role</th>
+                <th>Changed By</th>
+                <th>Changed At</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for h in history %}
+            <tr>
+                <td>{% if h.old_role %}{{ role_labels.get(h.old_role, h.old_role) }}{% else %}<span class="muted">— (account created)</span>{% endif %}</td>
+                <td><strong>{{ role_labels.get(h.new_role, h.new_role) }}</strong></td>
+                <td>{{ h.changed_by_name or '—' }}</td>
+                <td class="text-muted">{{ h.changed_at.strftime('%Y-%m-%d %H:%M') if h.changed_at else '—' }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% else %}
+<div class="card" style="text-align:center; padding:48px 24px;">
+    <p style="font-size:3rem; margin-bottom:12px;">&#128203;</p>
+    <h3>No role history recorded yet</h3>
+    <p class="muted">This account predates role-history tracking, so no entries exist for it.</p>
+</div>
+{% endif %}
+
+{% endblock %}

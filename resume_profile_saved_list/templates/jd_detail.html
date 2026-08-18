@@ -10,6 +10,8 @@
             <span class="jdm-cat-badge {% if jd.category == 'Validation Roles' %}jdm-cat-val{% else %}jdm-cat-it{% endif %}">{{ jd.category }}</span>
             {% set _status = jd.position_status or 'Open' %}
             <span class="jdm-cat-badge {{ {'Open': 'jdm-status-open', 'Fulfilled': 'jdm-status-fulfilled', 'On Hold': 'jdm-status-hold', 'Closed': 'jdm-status-closed'}.get(_status, '') }}">{{ _status }}</span>
+            {% set wf_badge = {'Draft': 'jdm-cat-general', 'Pending Approval': 'jdm-status-hold', 'Approved': 'jdm-status-fulfilled', 'Changes Requested': 'jdm-status-hold', 'Rejected': 'jdm-status-closed', 'Published': 'jdm-status-open'} %}
+            <span class="jdm-cat-badge {{ wf_badge.get(jd.workflow_status, '') }}">{{ jd.workflow_status }}</span>
             {% if jd.role %}<span class="role-badge">{{ jd.role }}</span>{% endif %}
             {% if jd.jd_file %}
             <a class="button secondary" style="padding:4px 12px; font-size:0.85rem;"
@@ -21,14 +23,67 @@
     </div>
     <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:flex-start;">
         <a class="button secondary" href="{{ url_for('jd_management') }}">← All JDs</a>
+        {% if can_write('write_jd') %}
         <a class="button secondary" href="{{ url_for('jd_edit', jd_id=jd.id) }}">Edit</a>
+        {% endif %}
+        {% if jd.workflow_status not in ['Draft', 'Rejected'] %}
         <a class="button" style="background:#10b981;" href="{{ url_for('download_jd_pdf', jd_id=jd.id) }}">📄 Download PDF</a>
-<form method="post" action="{{ url_for('jd_delete', jd_id=jd.id) }}" style="display:inline"
-              onsubmit="return confirm('Delete this JD?')">
+        {% endif %}
+        {% if can_write('delete_jd') %}
+        <form method="post" action="{{ url_for('jd_delete', jd_id=jd.id) }}" style="display:inline"
+              class="app-confirm-form" data-confirm-message="{{ delete_confirm_message }}"
+              data-confirm-title="Delete Job Description" data-confirm-ok-label="Delete">
             <button type="submit" class="button danger">Delete</button>
         </form>
+        {% endif %}
     </div>
 </section>
+
+<!-- Approval workflow -->
+<div class="card">
+    <div class="section-header" style="margin-bottom:14px;">
+        <div class="section-icon icon-experience">&#9989;</div>
+        <h2>Approval</h2>
+    </div>
+    <p class="muted" style="font-size:0.9rem;">
+        Status: <strong>{{ jd.workflow_status }}</strong>
+        {% if jd.submitted_at %} &nbsp;·&nbsp; Submitted {{ jd.submitted_at.strftime('%Y-%m-%d %H:%M') }}{% if creator_name %} by {{ creator_name }}{% endif %}{% endif %}
+        {% if jd.decided_at %} &nbsp;·&nbsp; Decided {{ jd.decided_at.strftime('%Y-%m-%d %H:%M') }}{% if decider_name %} by {{ decider_name }}{% endif %}{% endif %}
+    </p>
+    {% if jd.decision_comment %}
+    <p class="muted" style="font-size:0.9rem; margin-top:6px;"><em>"{{ jd.decision_comment }}"</em></p>
+    {% endif %}
+
+    {% if jd.workflow_status in ['Draft', 'Changes Requested'] and can_write('write_jd') %}
+    <form method="post" action="{{ url_for('jd_submit_for_approval', jd_id=jd.id) }}" style="margin-top:14px;">
+        <button type="submit" class="button">Submit for Approval</button>
+    </form>
+    {% endif %}
+
+    {% if jd.workflow_status == 'Pending Approval' and can_write('approve_jd') %}
+        {% if jd.created_by and jd.created_by == current_user_id %}
+        <p class="muted" style="margin-top:14px;">You submitted this JD — another Hiring Manager or Admin must review it. You cannot approve, reject, or request changes on your own submission.</p>
+        {% else %}
+        <form method="post" style="margin-top:14px;">
+            <div>
+                <label for="comment">Comment</label>
+                <textarea id="comment" name="comment" rows="2" style="width:100%;" placeholder="Optional for Approve, required for Reject / Request Changes"></textarea>
+            </div>
+            <div style="display:flex; gap:10px; margin-top:10px; flex-wrap:wrap;">
+                <button type="submit" formaction="{{ url_for('jd_approve', jd_id=jd.id) }}" class="button" style="background:#10b981;">Approve</button>
+                <button type="submit" formaction="{{ url_for('jd_request_changes', jd_id=jd.id) }}" class="button secondary">Request Changes</button>
+                <button type="submit" formaction="{{ url_for('jd_reject', jd_id=jd.id) }}" class="button danger">Reject</button>
+            </div>
+        </form>
+        {% endif %}
+    {% endif %}
+
+    {% if jd.workflow_status == 'Approved' and can_write('approve_jd') %}
+    <form method="post" action="{{ url_for('jd_publish', jd_id=jd.id) }}" style="margin-top:14px;">
+        <button type="submit" class="button" style="background:#2563eb;">Publish</button>
+    </form>
+    {% endif %}
+</div>
 
 <div class="dash-two-col">
 
@@ -97,6 +152,50 @@
             <a class="button" style="background:#7c3aed; width:100%; text-align:center;" href="{{ url_for('jd_top_matches', jd_id=jd.id) }}">Find Top 3 Matches</a>
         </div>
 
+        <!-- Interview Questions & Answers for this JD -->
+        <div class="card">
+            <div class="section-header" style="margin-bottom:14px;">
+                <div class="section-icon icon-experience">&#127908;</div>
+                <h2>Interview Questions</h2>
+            </div>
+            <p class="muted" style="font-size:0.9rem; margin-bottom:14px;">AI-generated technical, functional, scenario, and behavioral questions specific to this JD.</p>
+            <a class="button" style="background:#2563eb; width:100%; text-align:center;" href="{{ url_for('jd_interview_questions', jd_id=jd.id) }}">Interview Questions</a>
+        </div>
+
+        <!-- Version History -->
+        <div class="card">
+            <div class="section-header" style="margin-bottom:14px;">
+                <div class="section-icon icon-summary">&#128337;</div>
+                <h2>Version History</h2>
+            </div>
+            <p class="muted" style="font-size:0.9rem; margin-bottom:14px;">Every edit made to this JD after it was Published is preserved here for review and rollback.</p>
+            <a class="button secondary" style="width:100%; text-align:center;" href="{{ url_for('jd_versions', jd_id=jd.id) }}">View Version History</a>
+        </div>
+
+        <!-- Linked Requirements -->
+        <div class="card">
+            <div class="section-header" style="margin-bottom:14px;">
+                <div class="section-icon icon-experience">&#128279;</div>
+                <h2>Linked Requirements</h2>
+            </div>
+            {% if linked_requirements %}
+            <div class="jd-compare-list">
+                {% for r in linked_requirements %}
+                <a class="jd-compare-row" href="{{ url_for('requirement_detail', req_id=r.id) }}">
+                    <span style="flex:1; min-width:0;">
+                        <strong style="display:block; font-size:0.9rem;">{{ r.requirement_code }} — {{ r.requirement_name }}</strong>
+                        <span class="text-muted" style="font-size:0.8rem;">{{ r.status }}</span>
+                    </span>
+                    <span class="jdm-compare-arrow">&#8594;</span>
+                </a>
+                {% endfor %}
+            </div>
+            {% else %}
+            <p class="muted" style="text-align:center; padding:16px 0;">No requirements linked to this JD yet. Link one from the Requirement form.</p>
+            {% endif %}
+        </div>
+
+        {% if can_write('compare_resume') %}
         <!-- Compare against a resume -->
         <div class="card">
             <div class="section-header" style="margin-bottom:14px;">
@@ -121,6 +220,7 @@
             <p class="muted" style="text-align:center; padding:16px 0;">No profiles in the system yet.</p>
             {% endif %}
         </div>
+        {% endif %}
 
     </div>
 </div>

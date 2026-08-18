@@ -38,9 +38,14 @@
         <label for="role">Role</label>
         <select id="role" name="role" class="form-select">
             {% for r in roles %}
-            <option value="{{ r }}" {% if user and user.role == r %}selected{% elif not user and r == 'user' %}selected{% endif %}>{{ r|capitalize }}</option>
+            <option value="{{ r }}" {% if user and user.role == r %}selected{% elif not user and r == 'viewer_auditor' %}selected{% endif %}>{{ role_labels.get(r, r) }}</option>
             {% endfor %}
         </select>
+        {% if user and user.role not in roles %}
+        <p class="muted" style="font-size:0.82rem; margin-top:6px;">
+            Current stored role "{{ user.role }}" isn't one of the current roles — pick one above and save to assign it.
+        </p>
+        {% endif %}
     </div>
 
     <div>
@@ -48,6 +53,10 @@
         <input id="password" name="password" type="password" autocomplete="new-password"
                placeholder="{% if user %}Leave blank to keep current password{% else %}Set a password{% endif %}"
                {% if not user %}required{% endif %}>
+        <p class="muted" style="font-size:0.78rem; margin-top:4px;">
+            At least 8 characters, with uppercase, lowercase, a number, and a special character.
+        </p>
+        <div id="passwordStrengthMeter"></div>
     </div>
 
     {% if user %}
@@ -66,4 +75,7 @@
     </div>
 
 </form>
+
+<script src="{{ url_for('static', filename='password-strength.js') }}?v=1"></script>
+<script>attachPasswordStrength('password', 'passwordStrengthMeter');</script>
 {% endblock %}

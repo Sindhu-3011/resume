@@ -28,7 +28,7 @@ def check(label, condition):
 
 def test_fresh_session_is_not_expired_and_last_active_advances():
     client = appmod.app.test_client()
-    client.post("/login", data={"username": "admin", "password": "Admin@123"})
+    client.post("/login", data={"username": "admin", "password": "Admin@123!"})
     with client.session_transaction() as sess:
         before = sess.get("last_active")
         check("login sets last_active", before is not None)
@@ -43,7 +43,7 @@ def test_fresh_session_is_not_expired_and_last_active_advances():
 
 def test_stale_session_is_invalidated_with_expiry_message():
     client = appmod.app.test_client()
-    client.post("/login", data={"username": "admin", "password": "Admin@123"})
+    client.post("/login", data={"username": "admin", "password": "Admin@123!"})
 
     # Simulate a session that's been idle far longer than the configured
     # timeout, without waiting in real time.
@@ -71,7 +71,7 @@ def test_inactivity_logout_flashes_same_message_as_server_side_timeout():
     its own countdown expires — that path must show the identical message
     as the server-side backstop, not a different or missing one."""
     client = appmod.app.test_client()
-    client.post("/login", data={"username": "admin", "password": "Admin@123"})
+    client.post("/login", data={"username": "admin", "password": "Admin@123!"})
     r = client.get("/logout?reason=inactivity", follow_redirects=True)
     body = r.get_data(as_text=True)
     check("client-triggered inactivity logout shows the expiry message",
@@ -82,7 +82,7 @@ def test_manual_logout_does_not_show_expiry_message():
     """A deliberate logout (clicking the Logout link) must not claim the
     session "expired due to inactivity" — that would be actively misleading."""
     client = appmod.app.test_client()
-    client.post("/login", data={"username": "admin", "password": "Admin@123"})
+    client.post("/login", data={"username": "admin", "password": "Admin@123!"})
     r = client.get("/logout", follow_redirects=True)
     body = r.get_data(as_text=True)
     check("manual logout does NOT show the inactivity-expiry message",
@@ -127,7 +127,7 @@ def test_log_audit_writes_a_row_with_expected_fields():
 
 def test_generic_hook_logs_view_but_not_json_or_keepalive():
     client = appmod.app.test_client()
-    client.post("/login", data={"username": "admin", "password": "Admin@123"})
+    client.post("/login", data={"username": "admin", "password": "Admin@123!"})
 
     with appmod.db_conn() as conn:
         before = conn.execute("SELECT COUNT(*) AS c FROM audit_log").fetchone()["c"]

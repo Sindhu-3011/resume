@@ -23,6 +23,7 @@
                 <th>Email</th>
                 <th>Role</th>
                 <th>Status</th>
+                <th>Last Login</th>
                 <th>Actions</th>
             </tr>
         </thead>
@@ -34,19 +35,36 @@
                 <td>{{ u.full_name or '—' }}</td>
                 <td>{{ u.email or '—' }}</td>
                 <td>
+                    {% if u.role in role_labels %}
                     <span class="jdm-cat-badge {% if u.role == 'admin' %}jdm-cat-it{% endif %}">
-                        {{ u.role }}
+                        {{ role_labels.get(u.role, u.role) }}
                     </span>
+                    {% else %}
+                    <span class="jdm-cat-badge jdm-status-closed" title="This account's role ({{ u.role }}) isn't one of the current roles — no gated feature will work for it until reassigned.">
+                        &#9888; Needs Role Assignment
+                    </span>
+                    {% endif %}
                 </td>
                 <td>
-                    {% if u.is_active %}
+                    {% if u.locked_at %}
+                        <span class="jdm-cat-badge jdm-status-closed" title="Locked at {{ u.locked_at.strftime('%Y-%m-%d %H:%M') }} after too many failed login attempts">&#128274; Locked</span>
+                    {% elif u.is_active %}
                         <span class="jdm-cat-badge jdm-cat-val">Active</span>
                     {% else %}
                         <span class="jdm-cat-badge">Disabled</span>
                     {% endif %}
                 </td>
+                <td class="text-muted">
+                    {{ u.last_login_at.strftime('%Y-%m-%d %H:%M') if u.last_login_at else 'Never' }}
+                </td>
                 <td class="jdm-actions">
                     <a class="button secondary jdm-btn" href="{{ url_for('user_edit', user_id=u.id) }}">Edit</a>
+                    <a class="button secondary jdm-btn" href="{{ url_for('user_role_history', user_id=u.id) }}">History</a>
+                    {% if u.locked_at %}
+                    <form method="post" action="{{ url_for('user_unlock', user_id=u.id) }}" style="display:inline">
+                        <button type="submit" class="button secondary jdm-btn">Unlock</button>
+                    </form>
+                    {% endif %}
                     <form method="post" action="{{ url_for('user_delete', user_id=u.id) }}" style="display:inline"
                           onsubmit="return confirm('Delete user &quot;{{ u.username }}&quot;? This cannot be undone.')">
                         <button type="submit" class="button danger jdm-btn" {% if u.username == current_username %}disabled title="You can't delete your own account while logged in"{% endif %}>Delete</button>

@@ -28,12 +28,18 @@
     </div>
     <div class="profile-actions">
         <a class="button secondary" href="{{ url_for('profile_list') }}">← Back</a>
+        {% if can_write('write_profile') %}
         <a class="button secondary" href="{{ url_for('edit_resume', resume_id=resume.id) }}">Edit</a>
+        {% endif %}
+        {% if can_write('compare_resume') %}
         <a class="button" style="background:#7c3aed;" href="{{ url_for('compare_select_jd', resume_id=resume.id) }}">&#128202; Compare Resume</a>
+        {% endif %}
         <a class="button" style="background:#10b981;" href="{{ url_for('download_resume_pdf', resume_id=resume.id) }}">📄 Download</a>
+        {% if can_write('delete_profile') %}
         <form method="post" action="{{ url_for('delete_resume', resume_id=resume.id) }}" style="display:inline" onsubmit="return confirm('Delete this profile? This cannot be undone.')">
             <button type="submit" class="button danger">Delete</button>
         </form>
+        {% endif %}
     </div>
 </section>
 
@@ -57,6 +63,7 @@
     <div id="matching-roles-grid" style="display:grid;grid-template-columns:repeat(3,1fr);gap:18px;">
         {% set _tier_class_map = {'Strong Fit': 'verdict-strong', 'Good Fit': 'verdict-good', 'Partial Fit': 'verdict-partial'} %}
         {% set _confidence_word_map = {'Strong Fit': 'Excellent', 'Good Fit': 'Good', 'Partial Fit': 'Partial'} %}
+        {% set _authenticity_class_map = {'Likely Genuine': 'authenticity-genuine', 'Needs Manual Verification': 'authenticity-verify'} %}
         {% set _ring_r = 36 %}
         {% set _ring_circumference = 2 * 3.14159265 * _ring_r %}
         {% for match in top_matches %}
@@ -78,7 +85,11 @@
             <!-- Card body -->
             <div class="match-card-body">
                 <h3 class="match-card-title">
+                    {% if can_write('compare_resume') %}
                     <a href="{{ url_for('compare_result', resume_id=resume.id, jd_id=match.jd_id) }}">{{ match.jd_title }}</a>
+                    {% else %}
+                    {{ match.jd_title }}
+                    {% endif %}
                 </h3>
 
 <div class="match-card-radial-row">
@@ -100,6 +111,29 @@
         <div id="ai-status-{{ match.jd_id }}" class="match-card-ai-status{% if match.is_ai_judged %} is-verified{% endif %}">
             {% if match.is_ai_judged %}&#10003; AI-verified{% else %}Estimated — verifying with AI&hellip;{% endif %}
         </div>
+        <!-- Authenticity Status: a binary consistency check (skills vs.
+             projects, timeline, designation vs. experience, measurable
+             achievements, etc.) — NOT a "written by AI" judgment. Separate
+             from the match % on purpose: this flags something for a
+             recruiter to verify in interview, it never changes the score
+             itself. Always rendered (even when not yet known) so the async
+             upgrade below has an element to fill in. -->
+        <div id="authenticity-{{ match.jd_id }}"
+             class="match-card-authenticity{% if match.authenticity_status %} is-visible {{ _authenticity_class_map.get(match.authenticity_status, 'authenticity-verify') }}{% endif %}"
+             {% if match.authenticity_explanation %}title="{{ match.authenticity_explanation }}"{% endif %}>
+            {% if match.authenticity_status == 'Likely Genuine' %}&#9989; {{ match.authenticity_status }}{% elif match.authenticity_status %}&#9888; {{ match.authenticity_status }}{% endif %}
+        </div>
+        <!-- JD-Mirroring Risk: how much of the JD's own distinctive phrasing
+             appears verbatim in the resume — a cheap, no-LLM check computed
+             instantly (not upgraded via polling like the two badges above,
+             since it never depends on AI verification), so it's already
+             correct the moment the page renders. -->
+        {% if match.jd_mirroring_label %}
+        <div class="match-card-jd-mirroring is-visible"
+             title="Matched phrasing: {{ match.jd_mirroring_phrases[:3]|join(' | ') }}">
+            &#9888; {{ match.jd_mirroring_label }}
+        </div>
+        {% endif %}
     </div>
 </div>
 
@@ -127,9 +161,11 @@
 </div>
 
                 <!-- CTA button -->
+                {% if can_write('compare_resume') %}
                 <a href="{{ url_for('compare_result', resume_id=resume.id, jd_id=match.jd_id) }}" class="match-card-cta">
                     View Full Comparison →
                 </a>
+                {% endif %}
             </div>
         </div>
         {% endfor %}
@@ -198,6 +234,7 @@
     var progressEl = document.getElementById('matches-progress');
     var tierClassMap = {'Strong Fit': 'verdict-strong', 'Good Fit': 'verdict-good', 'Partial Fit': 'verdict-partial'};
     var confidenceWordMap = {'Strong Fit': 'Excellent', 'Good Fit': 'Good', 'Partial Fit': 'Partial'};
+    var authenticityClassMap = {'Likely Genuine': 'authenticity-genuine', 'Needs Manual Verification': 'authenticity-verify'};
     var RING_CIRCUMFERENCE = 2 * Math.PI * 36;
 
     function esc(s) {
@@ -237,6 +274,17 @@
         if (statusEl) {
             statusEl.className = 'match-card-ai-status is-verified';
             statusEl.innerHTML = '&#10003; AI-verified';
+        }
+
+        var authEl = document.getElementById('authenticity-' + jdId);
+        if (authEl && d.authenticity_status) {
+            var authClass = authenticityClassMap[d.authenticity_status] || 'authenticity-verify';
+            var authIcon = d.authenticity_status === 'Likely Genuine' ? '&#9989; ' : '&#9888; ';
+            authEl.className = 'match-card-authenticity is-visible ' + authClass;
+            authEl.innerHTML = authIcon + esc(d.authenticity_status);
+            if (d.authenticity_explanation) {
+                authEl.title = d.authenticity_explanation;
+            }
         }
     }
 

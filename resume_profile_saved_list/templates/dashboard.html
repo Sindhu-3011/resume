@@ -119,7 +119,7 @@
     </table>
     </div>
     {% else %}
-    <p class="muted" style="text-align:center;padding:24px 0;">No open requirements yet. <a href="{{ url_for('requirement_add') }}">Add one</a>.</p>
+    <p class="muted" style="text-align:center;padding:24px 0;">No open requirements yet.{% if can_write('write_requirement') %} <a href="{{ url_for('requirement_add') }}">Add one</a>.{% endif %}</p>
     {% endif %}
 </div>
 
@@ -128,9 +128,12 @@
     <div class="section-header" style="margin-bottom:14px;">
         <div class="section-icon icon-experience">&#128100;</div>
         <h2>Recent Interviews</h2>
+        {% if can_write('schedule_interview') %}
         <button class="button secondary" style="margin-left:auto;padding:6px 14px;font-size:0.85rem;" type="button" id="showScheduleBtn">+ Schedule Interview</button>
+        {% endif %}
     </div>
 
+    {% if can_write('schedule_interview') %}
     <div id="scheduleFormWrap" class="card" style="display:none;background:var(--surface-raised);margin-bottom:16px;box-shadow:none;border:1px dashed var(--border-s);">
         <div class="field-grid">
             <div>
@@ -166,6 +169,7 @@
         </div>
         <p id="scheduleMsg" class="small" style="display:none;margin-top:8px;"></p>
     </div>
+    {% endif %}
 
     <div id="editInterviewFormWrap" class="card" style="display:none;background:var(--surface-raised);margin-bottom:16px;box-shadow:none;border:1px dashed var(--border-s);">
         <div class="field-grid">
@@ -212,12 +216,14 @@
                 <td>{{ iv.interview_date.strftime('%Y-%m-%d') if iv.interview_date else '—' }}</td>
                 <td><span class="role-badge">{{ iv.status }}</span></td>
                 <td>
+                    {% if can_write('update_interview_status') or (current_role == 'interviewer' and is_my_assigned_interview(iv.interviewer)) %}
                     <button type="button" class="button secondary edit-iv-btn" style="padding:4px 12px;font-size:0.8rem;"
                             data-id="{{ iv.id }}"
                             data-candidate="{{ iv.full_name }}"
                             data-interviewer="{{ iv.interviewer or '' }}"
                             data-date="{{ iv.interview_date.strftime('%Y-%m-%d') if iv.interview_date else '' }}"
                             data-status="{{ iv.status }}">Edit</button>
+                    {% endif %}
                 </td>
             </tr>
         {% endfor %}

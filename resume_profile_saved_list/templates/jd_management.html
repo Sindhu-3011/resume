@@ -8,32 +8,22 @@
         <h1>JD Management</h1>
         <p class="muted">View, add, edit, and delete Job Descriptions. Use the built-in JDs or upload your own company-specific ones.</p>
     </div>
+    {% if can_write('write_jd') %}
     <a class="button" href="{{ url_for('jd_add') }}">+ Add New JD</a>
+    {% endif %}
 </section>
 
-<!-- Category filter tabs -->
-{% set categories = jds | map(attribute='category') | unique | list %}
-<div class="jdm-tabs" id="jdm-tabs">
-    <button class="jdm-tab active" data-cat="all">All <span class="jdm-tab-badge">{{ jds | length }}</span></button>
-    {% for cat in ['Validation Roles', 'IT Roles'] %}
-        {% set cat_count = jds | selectattr('category', 'equalto', cat) | list | length %}
-        {% if cat_count %}
-        <button class="jdm-tab" data-cat="{{ cat }}">{{ cat }} <span class="jdm-tab-badge">{{ cat_count }}</span></button>
-        {% endif %}
-    {% endfor %}
-</div>
-
-<!-- Position Status filter tabs -->
-<div class="jdm-tabs" id="jdm-status-tabs" style="margin-top:8px;">
-    <button class="jdm-tab active" data-status="all">All Statuses</button>
-    {% for s in statuses %}
-        {% set status_count = jds | selectattr('position_status', 'equalto', s) | list | length %}
-        <button class="jdm-tab" data-status="{{ s }}">{{ s }} <span class="jdm-tab-badge">{{ status_count }}</span></button>
-    {% endfor %}
-</div>
+<form method="get" class="card" style="display:flex; gap:10px; align-items:center; margin-bottom:16px;">
+    {% if status_filter %}<input type="hidden" name="status" value="{{ status_filter }}">{% endif %}
+    <input type="text" name="q" value="{{ search_query }}" placeholder="Search by title, keyword, or JD ID…"
+           style="flex:1;">
+    <button class="button secondary" type="submit">Search</button>
+    {% if search_query %}<a class="button secondary" href="{{ url_for('jd_management') }}">Clear</a>{% endif %}
+</form>
 
 {% if jds %}
-<div class="card" style="padding:0; overflow:hidden;">
+<div class="card" style="padding:0;">
+    <div style="overflow-x:auto;">
     <table class="jdm-table" id="jdm-table">
         <thead>
             <tr>
@@ -42,13 +32,15 @@
                 <th>Role</th>
                 <th>Category</th>
                 <th>Position Status</th>
+                <th>Approval Status</th>
                 <th>Added On</th>
                 <th>Actions</th>
             </tr>
         </thead>
         <tbody>
+        {% set wf_badge = {'Draft': 'jdm-cat-general', 'Pending Approval': 'jdm-status-hold', 'Approved': 'jdm-status-fulfilled', 'Changes Requested': 'jdm-status-hold', 'Rejected': 'jdm-status-closed', 'Published': 'jdm-status-open'} %}
         {% for jd in jds %}
-            <tr data-cat="{{ jd.category }}" data-status="{{ jd.position_status or 'Open' }}">
+            <tr>
                 <td class="jdm-td-num">{{ loop.index }}</td>
                 <td>
                     <a class="jdm-link" href="{{ url_for('jd_detail', jd_id=jd.id) }}">{{ jd.title }}</a>
@@ -67,21 +59,37 @@
                         {{ _status }}
                     </span>
                 </td>
+                <td>
+                    <span class="jdm-cat-badge {{ wf_badge.get(jd.workflow_status, '') }}">{{ jd.workflow_status }}</span>
+                </td>
                 <td class="text-muted">
                     {{ jd.created_at.strftime('%Y-%m-%d') if jd.created_at else '—' }}
                 </td>
                 <td class="jdm-actions">
-                    <a class="button secondary jdm-btn" href="{{ url_for('jd_detail', jd_id=jd.id) }}">View</a>
-                    <a class="button secondary jdm-btn" href="{{ url_for('jd_edit', jd_id=jd.id) }}">Edit</a>
+                    <a class="button secondary jdm-btn jdm-btn-icon" href="{{ url_for('jd_detail', jd_id=jd.id) }}" title="View">&#128065;</a>
+                    {% if can_write('write_jd') %}
+                    <a class="button secondary jdm-btn jdm-btn-icon" href="{{ url_for('jd_edit', jd_id=jd.id) }}" title="Edit">&#9998;</a>
+                    {% endif %}
+                    {% if can_write('delete_jd') %}
                     <form method="post" action="{{ url_for('jd_delete', jd_id=jd.id) }}" style="display:inline"
-                          onsubmit="return confirm('Delete this JD? This cannot be undone.')">
-                        <button type="submit" class="button danger jdm-btn">Delete</button>
+                          class="app-confirm-form" data-confirm-title="Delete Job Description" data-confirm-ok-label="Delete"
+                          data-confirm-message="{% if jd.active_requirement_count %}This JD has {{ jd.active_requirement_count }} active linked requirement(s). They will be unlinked, not deleted. Continue deleting this JD?{% else %}Are you sure you want to delete &quot;{{ jd.title }}&quot;? This cannot be undone.{% endif %}">
+                        <button type="submit" class="button danger jdm-btn jdm-btn-icon" title="Delete">&#128465;</button>
                     </form>
+                    {% endif %}
                 </td>
             </tr>
         {% endfor %}
         </tbody>
     </table>
+    </div>
+</div>
+{% elif search_query or status_filter %}
+<div class="card" style="text-align:center; padding:48px 24px;">
+    <p style="font-size:3rem; margin-bottom:12px;">&#128269;</p>
+    <h3>No Job Descriptions match your search</h3>
+    <p class="muted" style="margin-bottom:20px;">Try a different title, keyword, or JD ID.</p>
+    <a class="button secondary" href="{{ url_for('jd_management') }}">Clear Search</a>
 </div>
 {% else %}
 <div class="card" style="text-align:center; padding:48px 24px;">
@@ -92,39 +100,4 @@
 </div>
 {% endif %}
 
-<script>
-(function () {
-    var catTabs    = document.querySelectorAll('#jdm-tabs .jdm-tab');
-    var statusTabs = document.querySelectorAll('#jdm-status-tabs .jdm-tab');
-    var rows       = document.querySelectorAll('#jdm-table tbody tr');
-    var activeCat    = 'all';
-    var activeStatus = 'all';
-
-    function applyFilters() {
-        rows.forEach(function (row) {
-            var matchesCat    = (activeCat === 'all' || row.dataset.cat === activeCat);
-            var matchesStatus = (activeStatus === 'all' || row.dataset.status === activeStatus);
-            row.style.display = (matchesCat && matchesStatus) ? '' : 'none';
-        });
-    }
-
-    catTabs.forEach(function (tab) {
-        tab.addEventListener('click', function () {
-            catTabs.forEach(function (t) { t.classList.remove('active'); });
-            tab.classList.add('active');
-            activeCat = tab.dataset.cat;
-            applyFilters();
-        });
-    });
-
-    statusTabs.forEach(function (tab) {
-        tab.addEventListener('click', function () {
-            statusTabs.forEach(function (t) { t.classList.remove('active'); });
-            tab.classList.add('active');
-            activeStatus = tab.dataset.status;
-            applyFilters();
-        });
-    });
-})();
-</script>
 {% endblock %}

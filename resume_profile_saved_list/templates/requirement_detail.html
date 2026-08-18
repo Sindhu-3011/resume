@@ -9,7 +9,9 @@
         <p class="muted">Client: {{ requirement.client or '—' }} &nbsp;·&nbsp; Division/Group: {{ requirement.division or '—' }}</p>
     </div>
     <div style="display:flex;gap:10px;">
+        {% if can_write('write_requirement') %}
         <a class="button secondary" href="{{ url_for('requirement_edit', req_id=requirement.id) }}">Edit</a>
+        {% endif %}
         <a class="button secondary" href="{{ url_for('requirement_management') }}">&larr; Back</a>
     </div>
 </section>
@@ -52,6 +54,18 @@
     </div>
     <div class="field-grid">
         <div><label>Position Status</label><p>{{ requirement.status }}</p></div>
+        <div><label>Priority</label><p>{{ requirement.priority or 'Medium' }}</p></div>
+        <div><label>Assigned Recruiter</label><p>{{ requirement.recruiter_name or '—' }}</p></div>
+        <div>
+            <label>Linked Job Description</label>
+            <p>
+                {% if requirement.jd_id %}
+                <a href="{{ url_for('jd_detail', jd_id=requirement.jd_id) }}">{{ requirement.jd_title or ('JD #' ~ requirement.jd_id) }}</a>
+                {% else %}
+                —
+                {% endif %}
+            </p>
+        </div>
         <div><label>Added On</label><p>{{ requirement.created_at.strftime('%Y-%m-%d') if requirement.created_at else '—' }}</p></div>
         <div><label>Last Updated</label><p>{{ requirement.updated_at.strftime('%Y-%m-%d') if requirement.updated_at else '—' }}</p></div>
     </div>

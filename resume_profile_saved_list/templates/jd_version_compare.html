@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Compare Versions: {{ jd.title }} | JD Management{% endblock %}
+{% block content %}
+
+<section class="hero card">
+    <div>
+        <p class="eyebrow">Compare Versions</p>
+        <h1>{{ jd.title }}</h1>
+        <p class="muted">Comparing <strong>{{ a_label }}</strong> against <strong>{{ b_label }}</strong>. Differing fields are highlighted.</p>
+    </div>
+    <a class="button secondary" href="{{ url_for('jd_versions', jd_id=jd.id) }}">&larr; Back to Version History</a>
+</section>
+
+<div class="card" style="padding:0; overflow:hidden;">
+    <table class="jdm-table">
+        <thead>
+            <tr>
+                <th>Field</th>
+                <th>{{ a_label }}</th>
+                <th>{{ b_label }}</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for row in rows %}
+            <tr {% if row.differs %}style="background:#fef3c7;"{% endif %}>
+                <td><strong>{{ row.field | capitalize }}</strong></td>
+                <td class="jd-content-text">{{ row.a | nl2br }}</td>
+                <td class="jd-content-text">{{ row.b | nl2br }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+{% endblock %}

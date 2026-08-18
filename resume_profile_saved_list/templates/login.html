@@ -51,14 +51,29 @@
                         <label for="password">Password</label>
                         <div class="login-input-wrap">
                             <span class="login-input-icon">&#128274;</span>
-                            <input id="password" name="password" type="password" required autocomplete="current-password">
+                            <input id="password" name="password" type="password" required autocomplete="current-password" style="padding-right:42px;">
+                            <button type="button" id="togglePassword" class="login-input-toggle" aria-label="Show password">&#128065;</button>
                         </div>
                     </div>
-                    <button class="button" type="submit" style="width:100%; margin-top:26px;">Sign In</button>
+                    <p style="margin-top:10px; text-align:right;">
+                        <a href="{{ url_for('forgot_password') }}" class="muted" style="font-size:0.85rem;">Forgot Password?</a>
+                    </p>
+                    <button class="button" type="submit" style="width:100%; margin-top:16px;">Sign In</button>
                 </form>
             </div>
         </div>
 
     </div>
+    <script>
+        (function () {
+            var toggle = document.getElementById('togglePassword');
+            var pw = document.getElementById('password');
+            toggle.addEventListener('click', function () {
+                var showing = pw.type === 'text';
+                pw.type = showing ? 'password' : 'text';
+                toggle.setAttribute('aria-label', showing ? 'Show password' : 'Hide password');
+            });
+        })();
+    </script>
 </body>
 </html>

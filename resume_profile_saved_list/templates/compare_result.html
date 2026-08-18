@@ -293,6 +293,41 @@
                     + '<span class="ai-metric-label">Confidence</span>'
                     + '<span class="ai-metric-hint">' + esc(confReason) + '</span></div>';
             }
+            // Authenticity Status: a binary consistency check (skills vs.
+            // projects, timeline, designation vs. experience, measurable
+            // achievements, contradictions, etc.) — NOT a "was this written
+            // by AI" judgment. Separate from the match % on purpose; this
+            // flags something for the recruiter to verify in interview
+            // rather than silently changing the score.
+            if (d.authenticity_status) {
+                var authTier = d.authenticity_status === 'Likely Genuine' ? 'strong' : 'partial';
+                var authIcon = d.authenticity_status === 'Likely Genuine' ? '✅ ' : '⚠ ';
+                var reasonsHtml = '';
+                (d.authenticity_reasons_positive || []).forEach(function (r) {
+                    reasonsHtml += '<div class="authenticity-reason reason-positive">✓ ' + esc(r) + '</div>';
+                });
+                (d.authenticity_reasons_negative || []).forEach(function (r) {
+                    reasonsHtml += '<div class="authenticity-reason reason-negative">⚠ ' + esc(r) + '</div>';
+                });
+                html += '<div class="ai-metric ai-metric-wide"><span class="ai-metric-val verdict verdict-' + authTier + ' verdict-text">'
+                    + authIcon + esc(d.authenticity_status) + '</span>'
+                    + '<span class="ai-metric-label">Authenticity Status</span>'
+                    + '<span class="ai-metric-hint">' + esc(d.authenticity_explanation || '') + '</span>'
+                    + (reasonsHtml ? '<div class="authenticity-reasons">' + reasonsHtml + '</div>' : '')
+                    + '</div>';
+            }
+            // JD-Mirroring Risk: how much of the JD's own distinctive
+            // phrasing appears verbatim in the resume — a cheap, no-LLM
+            // check (pure text comparison), independent of Authenticity
+            // Status above. High overlap means the resume echoes the JD's
+            // own wording rather than describing independent experience.
+            if (d.jd_mirroring_label) {
+                var mirrorHint = 'Matched phrasing: ' + (d.jd_mirroring_phrases || []).slice(0, 3).join(' | ');
+                html += '<div class="ai-metric"><span class="ai-metric-val verdict verdict-partial verdict-text">'
+                    + esc(d.jd_mirroring_label) + (d.jd_mirroring_pct != null ? ' (' + esc(d.jd_mirroring_pct) + '%)' : '') + '</span>'
+                    + '<span class="ai-metric-label">JD-Mirroring Risk</span>'
+                    + '<span class="ai-metric-hint">' + esc(mirrorHint) + '</span></div>';
+            }
             html += '</div>';
         }
 

@@ -17,6 +17,9 @@ from pathlib import Path
 import re
 import math
 import hashlib
+import secrets
+import smtplib
+from email.mime.text import MIMEText
 import uuid
 from collections import Counter
 import zipfile
@@ -26,7 +29,7 @@ import os
 import urllib.request
 import urllib.error
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import threading
 from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -80,6 +83,31 @@ app.secret_key = os.environ.get("SECRET_KEY", "resume-profile-secret-key")
 # the two presets called out in the spec are 15 (default) and 30 minutes.
 SESSION_TIMEOUT_MINUTES = int(os.environ.get("SESSION_TIMEOUT_MINUTES", "15"))
 SESSION_WARNING_SECONDS = 60  # show the "continue session?" dialog this long before expiry
+
+# Forgot Password / Reset Password config — see _require_permission-style
+# helpers near ensure_users_table for the rest of this feature.
+PASSWORD_RESET_TOKEN_MINUTES = int(os.environ.get("PASSWORD_RESET_TOKEN_MINUTES", "30"))
+PASSWORD_HISTORY_COUNT = int(os.environ.get("PASSWORD_HISTORY_COUNT", "5"))
+PASSWORD_MIN_LENGTH = int(os.environ.get("PASSWORD_MIN_LENGTH", "8"))
+# A password older than this forces a mandatory change at next login (see
+# login()'s expiry check and change_expired_password()) — 0 disables the check.
+PASSWORD_MAX_AGE_DAYS = int(os.environ.get("PASSWORD_MAX_AGE_DAYS", "90"))
+# No email infra existed anywhere in this app before this feature. If
+# SMTP_HOST is left blank (the default — this is a local dev tool with no
+# outbound mail relay configured anywhere), _send_email() logs the message
+# instead of attempting a real send, so the whole flow stays testable
+# without real credentials. Set SMTP_HOST (+ the rest) in .env to send real mail.
+SMTP_HOST = os.environ.get("SMTP_HOST", "")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
+SMTP_USERNAME = os.environ.get("SMTP_USERNAME", "")
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
+SMTP_FROM_EMAIL = os.environ.get("SMTP_FROM_EMAIL", "no-reply@resumeprofile.local")
+SMTP_USE_TLS = os.environ.get("SMTP_USE_TLS", "true").lower() == "true"
+
+# Account lockout — locks an account after this many consecutive failed
+# logins (reset to 0 by any successful login). No auto-expiry: an Admin
+# must manually unlock via User Management (see user_unlock()).
+MAX_FAILED_LOGIN_ATTEMPTS = int(os.environ.get("MAX_FAILED_LOGIN_ATTEMPTS", "5"))
 
 @app.after_request
 def set_cache_control(response):
@@ -6096,6 +6124,9 @@ def home():
 @app.route("/edit", methods=["GET", "POST"])
 @app.route("/edit/<int:resume_id>", methods=["GET", "POST"])
 def edit_resume(resume_id=None):
+    perm_key = "view_add_profile" if resume_id is None else "write_profile"
+    if not _require_permission(perm_key):
+        abort(403)
     with db_conn() as conn:
         if request.method == "POST":
             form_data = {k: request.form.get(k, "").strip() for k in [
@@ -6384,6 +6415,8 @@ def view_current_profile():
 
 @app.route("/profiles")
 def profile_list():
+    if not _require_permission("view_profiles", write=False):
+        abort(403)
     with db_conn() as conn:
         resumes = conn.execute(
             """
@@ -6456,15 +6489,26 @@ def _rank_top_jd_matches(conn, resume_dict, jds):
             recommendation = cached['recommendation']
             strengths = cached.get('strengths') or score.get('matched_skills', [])
             is_ai_judged = True
+            authenticity_status = cached.get('authenticity_status')
+            authenticity_explanation = cached.get('authenticity_explanation') or ''
+            jd_mirroring_label = cached.get('jd_mirroring_label')
+            jd_mirroring_phrases = cached.get('jd_mirroring_phrases') or []
             logger.info(
                 f"Top-3 card resume={resume_dict.get('id')} jd={jd_dict['id']}: "
-                f"AI-judged pct={final_score} tier={tier_label}"
+                f"AI-judged pct={final_score} tier={tier_label} authenticity={authenticity_status}"
             )
         else:
             final_score = estimate_pct
             _, tier_label, recommendation = _tier_from_pct(final_score)
             strengths = score.get('matched_skills', [])
             is_ai_judged = False
+            authenticity_status = None
+            authenticity_explanation = ''
+            # No LLM needed for this — cheap enough to compute for the
+            # estimate-only display too, not just after AI verification.
+            _mirroring = _jd_mirroring_risk(resume_dict, jd_dict)
+            jd_mirroring_label = _mirroring["risk_label"]
+            jd_mirroring_phrases = _mirroring["matched_phrases"]
             uncached_jd_ids.append(jd_dict['id'])
             logger.info(
                 f"Top-3 card resume={resume_dict.get('id')} jd={jd_dict['id']}: "
@@ -6487,6 +6531,10 @@ def _rank_top_jd_matches(conn, resume_dict, jds):
             'recommendation': recommendation,
             'matched_skills': strengths,
             'is_ai_judged': is_ai_judged,
+            'authenticity_status': authenticity_status,
+            'authenticity_explanation': authenticity_explanation,
+            'jd_mirroring_label': jd_mirroring_label,
+            'jd_mirroring_phrases': jd_mirroring_phrases,
         })
 
     if uncached_jd_ids:
@@ -6502,6 +6550,8 @@ def _rank_top_jd_matches(conn, resume_dict, jds):
 
 @app.route("/profile/<int:resume_id>")
 def profile_detail(resume_id):
+    if not _require_permission("view_candidate", write=False):
+        abort(403)
     with db_conn() as conn:
         resume = conn.execute("SELECT * FROM resume WHERE id = %s", (resume_id,)).fetchone()
         if not resume:
@@ -7769,6 +7819,8 @@ def generate_resume_pdf(resume):
 @app.route("/profile/<int:resume_id>/download-pdf")
 def download_resume_pdf(resume_id):
     """Download resume as PDF."""
+    if not _require_permission("download_resume", write=False):
+        abort(403)
     with db_conn() as conn:
         resume = conn.execute("SELECT * FROM resume WHERE id = %s", (resume_id,)).fetchone()
 
@@ -7815,6 +7867,8 @@ def extract_resume_data(resume_id):
 
 @app.route("/profile/<int:resume_id>/delete", methods=["POST"])
 def delete_resume(resume_id):
+    if not _require_permission("delete_profile"):
+        abort(403)
     with db_conn() as conn:
         row = conn.execute("SELECT resume_file, full_name FROM resume WHERE id = %s", (resume_id,)).fetchone()
         if not row:
@@ -8079,6 +8133,8 @@ def _save_raw_meta(meta):
 
 @app.route("/dashboard")
 def dashboard():
+    if not _require_permission("view_dashboard", write=False):
+        abort(403)
     from datetime import datetime as _dt
     with db_conn() as conn:
         total_resumes = conn.execute("SELECT COUNT(*) AS count FROM resume").fetchone()["count"]
@@ -8311,6 +8367,8 @@ def _get_raw_files_and_jds():
 
 @app.route("/upload-files", methods=["GET", "POST"])
 def upload_files():
+    if not _require_permission("view_add_profile"):
+        abort(403)
     import time as _time
     from datetime import datetime as _dt
     if request.method == "POST":
@@ -8959,6 +9017,90 @@ def _ensure_jd_position_status_col():
 
 
 _ensure_jd_position_status_col()
+
+
+# Document-workflow status — separate from position_status (a staffing
+# concept: Open/Fulfilled/On Hold/Closed). This tracks the JD *document's*
+# review lifecycle: a JD is drafted, submitted for approval, approved or
+# rejected (or sent back for changes), then explicitly published.
+JD_WORKFLOW_STATUSES = ["Draft", "Pending Approval", "Approved", "Rejected", "Changes Requested", "Published"]
+DEFAULT_JD_WORKFLOW_STATUS = "Draft"
+
+
+def _ensure_jd_workflow_cols():
+    """Adds the approval-workflow columns to job_description for DBs created
+    before this feature existed. New rows default to 'Published' at the SQL
+    level deliberately: every JD that already exists is already live and in
+    active use by matching/compare/requirements, so defaulting existing rows
+    to 'Draft' would silently pull them out of normal use. jd_add() overrides
+    this default at INSERT time to start new JDs at 'Draft'."""
+    try:
+        with db_conn() as conn:
+            conn.execute(
+                "ALTER TABLE job_description ADD COLUMN IF NOT EXISTS "
+                "workflow_status VARCHAR(30) NOT NULL DEFAULT 'Published'"
+            )
+            conn.execute(
+                "ALTER TABLE job_description ADD COLUMN IF NOT EXISTS "
+                "created_by INTEGER REFERENCES app_user(id)"
+            )
+            conn.execute("ALTER TABLE job_description ADD COLUMN IF NOT EXISTS submitted_at TIMESTAMPTZ")
+            conn.execute(
+                "ALTER TABLE job_description ADD COLUMN IF NOT EXISTS "
+                "decided_by INTEGER REFERENCES app_user(id)"
+            )
+            conn.execute("ALTER TABLE job_description ADD COLUMN IF NOT EXISTS decided_at TIMESTAMPTZ")
+            conn.execute("ALTER TABLE job_description ADD COLUMN IF NOT EXISTS decision_comment TEXT")
+            conn.execute("ALTER TABLE job_description ADD COLUMN IF NOT EXISTS published_at TIMESTAMPTZ")
+    except Exception:
+        pass
+
+
+_ensure_jd_workflow_cols()
+
+
+def _snapshot_jd_version(conn, jd_row, edited_by):
+    """Insert one jd_version row capturing jd_row's current field values,
+    numbered one past whatever's already stored for this jd_id. Called with
+    the PRE-edit row before an edit is applied to a Published JD, and with
+    the PRE-rollback row before a rollback overwrites the live row — either
+    way the snapshot always captures what's about to be overwritten, so
+    history never loses a state."""
+    ensure_jd_version_table(conn)
+    next_num = (conn.execute(
+        "SELECT COALESCE(MAX(version_number), 0) + 1 AS n FROM jd_version WHERE jd_id = %s",
+        (jd_row["id"],),
+    ).fetchone()["n"])
+    conn.execute(
+        """
+        INSERT INTO jd_version
+            (jd_id, version_number, title, role, category, responsibilities,
+             requirements, skills, keywords, position_status, edited_by)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (jd_row["id"], next_num, jd_row["title"], jd_row["role"], jd_row["category"],
+         jd_row["responsibilities"], jd_row["requirements"], jd_row["skills"],
+         jd_row["keywords"], jd_row["position_status"], edited_by),
+    )
+
+
+def ensure_jd_version_table(conn):
+    """One snapshot row per edit made to a JD that was already Published at
+    edit time (see jd_edit) — never updated or deleted, so history only ever
+    grows, including the extra snapshot rollback itself adds."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS jd_version (
+            id               SERIAL PRIMARY KEY,
+            jd_id            INTEGER NOT NULL REFERENCES job_description(id) ON DELETE CASCADE,
+            version_number   INTEGER NOT NULL,
+            title            TEXT, role TEXT, category TEXT, responsibilities TEXT,
+            requirements     TEXT, skills TEXT, keywords TEXT, position_status TEXT,
+            edited_by        INTEGER REFERENCES app_user(id),
+            edited_at        TIMESTAMPTZ DEFAULT NOW()
+        )
+        """
+    )
 
 
 PREDEFINED_JDS = [
@@ -9727,6 +9869,250 @@ def _doc_word_freq(text):
     return Counter(w for w in words if w not in _DOC_STOPWORDS)
 
 
+_JD_MIRROR_NGRAM_SIZE = 6
+_JD_MIRROR_MIN_JD_NGRAMS = 5     # too little distinctive JD text to judge meaningfully below this
+_JD_MIRROR_MIN_MATCHES = 3       # fewer matches than this is noise, not a real signal
+_JD_MIRROR_SOME_THRESHOLD = 8    # % overlap
+_JD_MIRROR_HIGH_THRESHOLD = 30   # % overlap
+
+# Deterministic backstop for the "achievements_measurable" authenticity rule
+# (see _evaluate_authenticity / _hybrid_match) — matches a measurable,
+# verifiable claim: a percentage, a team size, a before/after reduction
+# ("45min to 4min"), a scale ("2M transactions/day"), a named improvement
+# with a number attached, etc.
+# Found live (2026-08-07): a fully fabricated resume — real company names,
+# real-looking date ranges, generic project titles for every claimed skill,
+# grammatically smooth — scored "Strong Evidence" (70-80) from the LLM
+# judge alone under the old evidence-depth system. It has ZERO numbers
+# anywhere. The LLM's own judgment proved too easy to satisfy with "looks
+# structurally complete" rather than "is actually specific" (confirmed:
+# rewording the prompt shifted this same resume's score all over the place,
+# 35 to 65, depending on phrasing — small-model judgment on this specific
+# question is not reliable enough to trust alone). This regex is the
+# reliable, un-gameable half of the signal, and is now the one HARD GATE in
+# _AUTHENTICITY_RULES: a resume with literally no quantified claims cannot
+# be labeled "Likely Genuine", no matter what the other 7 checks say.
+_QUANT_SPECIFICITY_RE = re.compile(
+    r"\d+\s*%"
+    r"|\d+\s*[kmb]\+?\s*(?:transactions?|requests?|users?|customers?|records?|documents?|incidents?|"
+    r"tickets?|systems?|sites?|reports?|deployments?|releases?|rows?|queries)"
+    r"|team\s+of\s+\d+|\d+[\s-]*(?:member|engineer|person|people)"
+    r"|\$\s*\d|\d+\s*(?:crore|lakh|million|billion)"
+    r"|\d+\s*(?:min|minutes|hours?|days?|weeks?|months?)\s*(?:to|->|→)\s*\d+"
+    r"|from\s+\d+.{0,15}to\s+\d+"
+    r"|(?:reduced|increased|improved|cut|grew|boosted|decreased|saved)\b[^.]{0,40}?\d+",
+    re.I,
+)
+_QUANT_SPECIFICITY_MIN_TEXT_LEN = 150  # skip the hard gate for a stub-length resume — nothing to judge yet
+
+
+def _quantified_specificity_count(text):
+    return len(_QUANT_SPECIFICITY_RE.findall(text or ""))
+
+
+# Resume-authenticity signal: 8 consistency checks, one deterministic (the
+# proven regex above) plus 7 LLM-judged plain booleans (much more stable
+# for a small model than a 0-100 scale — see _llm_judge_match), combined
+# via a uniform failure-count threshold across all 8. Modeling this as a
+# registry (rather than one hardcoded if/else) is what makes it genuinely
+# modular: adding a new check later is one entry here, not a rewrite of
+# _evaluate_authenticity's decision logic.
+#
+# `achievements_measurable` was originally an unconditional hard gate (any
+# resume with zero quantified claims was force-flagged, regardless of the
+# other 7). Live data (2026-08-07) showed this over-triggers: many resumes
+# in genuinely non-metric-driven domains (compliance/QA/audit work) have
+# zero quantified claims *and* are completely genuine — the hard gate
+# flagged most of them, defeating the point of a differentiating signal
+# (the same failure mode that killed the old tri-bucket Evidence Depth
+# system). The theoretical worst case the hard gate guarded against (a
+# fabricated resume that fools every one of the other 7 checks) never
+# actually showed up in live testing — the real fabricated case
+# ("Priya Narayanan", see below) always tripped at least one other check
+# too. So `achievements_measurable` is now one equal vote among 8, and
+# `_AUTHENTICITY_FAIL_THRESHOLD = 2` (the user's own spec: "multiple
+# inconsistencies") is what decides — a resume can lack quantified
+# achievements alone and still read as genuine, but that plus even one more
+# red flag is enough to ask a recruiter to take a closer look.
+_AUTHENTICITY_FAIL_THRESHOLD = 2
+_AUTHENTICITY_MIN_CHECKS_PRESENT = 4  # below this, treat as insufficient signal, not "clean"
+
+_AUTHENTICITY_RULES = [
+    {"key": "achievements_measurable", "label": "Achievements contain measurable evidence",
+     "source": "deterministic"},
+    {"key": "skills_match_projects", "label": "Skills are supported by project experience",
+     "source": "llm"},
+    {"key": "experience_matches_responsibilities", "label": "Responsibilities align with experience",
+     "source": "llm"},
+    {"key": "timeline_consistent", "label": "Timeline is consistent",
+     "source": "llm"},
+    {"key": "designation_matches_experience", "label": "Designation matches years of experience",
+     "source": "llm"},
+    {"key": "technologies_demonstrated", "label": "Technologies are demonstrated in experience",
+     "source": "llm"},
+    {"key": "projects_realistic", "label": "Projects appear technically realistic",
+     "source": "llm"},
+    {"key": "no_major_contradictions", "label": "No major contradictions found",
+     "source": "llm"},
+]
+_AUTHENTICITY_SOFT_RULE_KEYS = [r["key"] for r in _AUTHENTICITY_RULES if r["key"] != "achievements_measurable"]
+
+
+def _evaluate_authenticity(resume_dict, consistency_checks):
+    """Binary resume-authenticity decision — "Likely Genuine" or "Needs
+    Manual Verification" — built from _AUTHENTICITY_RULES. Replaces the old
+    tri-bucket Evidence Depth system, which mostly collapsed everything into
+    "Shallow" once candidates started using AI writing tools, making it
+    useless for differentiating candidates.
+
+    `consistency_checks` is the raw dict the LLM returned (or None if the
+    LLM judge didn't run at all — Ollama down). Each of the 7 LLM-judged
+    keys may individually be missing/malformed without invalidating the
+    rest, same graceful-degradation spirit as the old evidence_depth field.
+
+    Returns None (not a fallback bucket) when consistency_checks itself is
+    None, so callers can distinguish "known result" from "not assessed".
+    """
+    if consistency_checks is None:
+        return None
+
+    quant_text = f"{resume_dict.get('experience') or ''} {resume_dict.get('projects') or ''}"
+    achievements_assessed = len(quant_text.strip()) >= _QUANT_SPECIFICITY_MIN_TEXT_LEN
+    achievements_pass = _quantified_specificity_count(quant_text) > 0 if achievements_assessed else None
+
+    rules = {}
+    for rule in _AUTHENTICITY_RULES:
+        key = rule["key"]
+        if key == "achievements_measurable":
+            if achievements_pass is None:
+                rules[key] = {"pass": None, "reason": "Resume too short to assess.", "source": rule["source"]}
+            else:
+                reason = ("Contains measurable outcomes, metrics, or scale." if achievements_pass
+                          else "No measurable outcomes, metrics, or specific quantified details "
+                               "found anywhere in the experience/projects text.")
+                rules[key] = {"pass": achievements_pass, "reason": reason, "source": rule["source"]}
+            continue
+
+        raw = consistency_checks.get(key) if isinstance(consistency_checks, dict) else None
+        if isinstance(raw, dict) and isinstance(raw.get("pass"), bool):
+            rules[key] = {"pass": raw["pass"], "reason": str(raw.get("reason") or "").strip()[:120],
+                          "source": rule["source"]}
+        else:
+            rules[key] = {"pass": None, "reason": "", "source": rule["source"]}
+
+    present = [r["key"] for r in _AUTHENTICITY_RULES if rules[r["key"]]["pass"] is not None]
+    failed_count = sum(1 for k in present if rules[k]["pass"] is False)
+
+    insufficient_signal = len(present) < _AUTHENTICITY_MIN_CHECKS_PRESENT
+    if insufficient_signal:
+        status = "Needs Manual Verification"
+    elif failed_count >= _AUTHENTICITY_FAIL_THRESHOLD:
+        status = "Needs Manual Verification"
+    else:
+        status = "Likely Genuine"
+
+    # Positive reasons reuse the rule's success-framed label directly (e.g.
+    # "Skills are supported by project experience") — negative reasons use
+    # the specific concern text instead (the LLM's own reason, or the
+    # deterministic explanation), since reusing the same label with a
+    # warning icon would misleadingly read as a positive claim.
+    reasons_positive = [r["label"] for r in _AUTHENTICITY_RULES if rules[r["key"]]["pass"] is True][:4]
+    reasons_negative = [
+        rules[r["key"]]["reason"] or f"{r['label']} — not confirmed"
+        for r in _AUTHENTICITY_RULES if rules[r["key"]]["pass"] is False
+    ][:4]
+    if insufficient_signal and not reasons_negative:
+        reasons_negative = ["Not enough signal from the AI reviewer to confirm consistency"][:4]
+
+    if status == "Likely Genuine":
+        explanation = (
+            f"This resume passed {len(reasons_positive)} of {len(_AUTHENTICITY_RULES)} consistency "
+            "checks with no significant contradictions. " + (
+                (reasons_positive[0] + ", and " + reasons_positive[1] + ".") if len(reasons_positive) >= 2
+                else (reasons_positive[0] + "." if reasons_positive else "")
+            )
+        ).strip()
+    else:
+        lead = ("Insufficient signal to confirm consistency." if insufficient_signal
+                else f"This resume shows {len(reasons_negative)} consistency concern(s) worth a closer look.")
+        explanation = (lead + " " + ("; ".join(reasons_negative) + "." if reasons_negative else "")).strip()
+
+    return {
+        "status": status,
+        "reasons_positive": reasons_positive,
+        "reasons_negative": reasons_negative,
+        "explanation": explanation,
+        "rules": rules,
+    }
+
+
+def _extract_meaningful_ngrams(text, n=_JD_MIRROR_NGRAM_SIZE):
+    """Word n-grams ("shingles") from text, keeping only ones with enough
+    non-stopword content to be distinctive phrasing rather than generic
+    connective filler ("...and the ability to work with..."). Used to
+    detect verbatim phrase reuse — see _jd_mirroring_risk.
+    """
+    words = re.findall(r"[a-z0-9]+", (text or "").lower())
+    grams = set()
+    for i in range(len(words) - n + 1):
+        gram = words[i:i + n]
+        meaningful = sum(1 for w in gram if w not in _DOC_STOPWORDS and len(w) > 2)
+        if meaningful >= 3:
+            grams.add(" ".join(gram))
+    return grams
+
+
+def _jd_mirroring_risk(resume_dict, jd_dict):
+    """Cheap, deterministic, no-LLM check: how much of the JD's own
+    distinctive phrasing (6-word shingles) appears verbatim in the resume.
+    High overlap is a strong, independent tell that a resume was derived by
+    closely following — or literally pasting from — the JD's own text,
+    rather than describing genuine, independently-written experience: the
+    AI-generated/JD-copied resume pattern this feature targets.
+
+    Deliberately separate from the keyword/skill match score: a resume
+    sharing required SKILL NAMES with a JD is a good match, not a red flag.
+    This instead looks at whether whole PHRASES (not just terms) recur,
+    which a real candidate describing their own work essentially never does
+    by coincidence — confirmed empirically: an independently-written resume
+    and a paraphrased-in-own-words resume both scored 0% against a real JD,
+    a resume with one lifted sentence scored ~11%, and a near-verbatim copy
+    scored ~69%.
+
+    Computed fresh every time (not cached) — it's pure string comparison
+    over already-fetched text, cheap enough to redo on every read, so it
+    always reflects the current resume/JD content with no staleness concern
+    the way an LLM-computed score needs cache invalidation for.
+    """
+    jd_text = " ".join(str(jd_dict.get(k) or "") for k in
+                        ("skills", "requirements", "responsibilities", "keywords"))
+    resume_text = " ".join(str(resume_dict.get(k) or "") for k in
+                            ("summary", "skills", "experience", "projects"))
+
+    jd_grams = _extract_meaningful_ngrams(jd_text)
+    if len(jd_grams) < _JD_MIRROR_MIN_JD_NGRAMS:
+        return {"overlap_pct": 0, "risk_label": None, "matched_phrases": []}
+
+    resume_grams = _extract_meaningful_ngrams(resume_text)
+    matched = jd_grams & resume_grams
+    overlap_pct = round(len(matched) / len(jd_grams) * 100)
+
+    if len(matched) < _JD_MIRROR_MIN_MATCHES:
+        risk_label = None
+    elif overlap_pct >= _JD_MIRROR_HIGH_THRESHOLD:
+        risk_label = "High JD-Text Overlap"
+    elif overlap_pct >= _JD_MIRROR_SOME_THRESHOLD:
+        risk_label = "Some JD-Text Overlap"
+    else:
+        risk_label = None
+
+    return {
+        "overlap_pct": overlap_pct,
+        "risk_label": risk_label,
+        "matched_phrases": sorted(matched, key=len, reverse=True)[:5],
+    }
+
+
 def _whole_doc_similarity(jd_dict, resume_dict):
     """Cosine similarity between the JD's full text and the resume's full text,
     treated as whole documents rather than a checklist of discrete skills.
@@ -9956,7 +10342,7 @@ _CONFIDENCE_SELF_WEIGHT = 0.35
 # so a version bump makes every existing cache entry a miss and forces a
 # fresh, correctly-computed re-assessment instead of serving an old model's
 # number under the new UI.
-_HYBRID_ALGO_VERSION = "hybrid-v4-title-excluded"
+_HYBRID_ALGO_VERSION = "hybrid-v8-authenticity-calibration"
 
 
 def _resume_match_fingerprint(resume_dict):
@@ -10029,6 +10415,40 @@ def _coerce_str_list(value, limit):
             out.append(s[:80])
         if len(out) >= limit:
             break
+    return out
+
+
+def _coerce_interview_questions(raw, category):
+    """Validate/coerce one category's raw Ollama response into a list of
+    plain question dicts, dropping any individual malformed entry rather
+    than failing the whole category — same graceful-degradation spirit as
+    the rest of this codebase's LLM-output handling (see _coerce_str_list).
+    `category` is trusted (comes from our own per-category prompt loop, not
+    the model), so it isn't re-validated here.
+    """
+    if not isinstance(raw, dict):
+        return []
+    items = raw.get("questions")
+    if not isinstance(items, list):
+        return []
+
+    out = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        question = str(item.get("question") or "").strip()[:400]
+        if not question:
+            continue
+        difficulty = str(item.get("difficulty") or "").strip().title()
+        if difficulty not in INTERVIEW_QUESTION_DIFFICULTIES:
+            difficulty = "Medium"
+        out.append({
+            "category": category,
+            "question": question,
+            "expected_answer": str(item.get("expected_answer") or "").strip()[:600],
+            "key_points": "\n".join(_coerce_str_list(item.get("key_points"), 6)),
+            "difficulty": difficulty,
+        })
     return out
 
 
@@ -10111,6 +10531,34 @@ def _llm_judge_match(resume_dict, jd_dict, keyword_result):
         "- regulatory: regulatory/standards knowledge (e.g. ISO/FDA/GDPR); use 100 if none is required\n"
         "- tools: tools & technologies overlap\n"
         "- soft_skills: communication/leadership/collaboration signals; use 50 if no signal either way\n\n"
+        "Additionally run 7 CONSISTENCY CHECKS on the resume — internal consistency only, NOT "
+        "whether the resume was written or polished with AI assistance. CRITICAL: these checks are "
+        "about whether the resume is coherent with ITSELF, NOT about whether the candidate meets "
+        "THIS JD's requirements — that comparison is already scored separately above. A candidate "
+        "having fewer years than the JD wants, working in a different domain than this JD, or "
+        "lacking a skill this JD asks for, is a FIT gap, not an inconsistency — never fail a check "
+        "for that reason. Only fail a check if the resume contradicts itself or claims something "
+        "implausible on its own terms, regardless of this specific JD:\n"
+        "- skills_match_projects: are the skills claimed actually demonstrated somewhere in the "
+        "candidate's OWN project/experience descriptions, not just listed by name?\n"
+        "- experience_matches_responsibilities: do the responsibilities described for a past role "
+        "plausibly fit the seniority/duration the candidate claims for THAT role — judged against "
+        "the candidate's own claims, not this JD's bar?\n"
+        "- timeline_consistent: do the candidate's own date ranges make sense (no overlaps, gaps, "
+        "or impossible chronology)?\n"
+        "- designation_matches_experience: does the seniority of the candidate's job title fit the "
+        "candidate's own total years of experience?\n"
+        "- technologies_demonstrated: do the tools/technologies the candidate lists under skills "
+        "show up anywhere in their own work experience or projects?\n"
+        "- projects_realistic: do the candidate's project descriptions read as technically "
+        "plausible work, not generic filler that could apply to any candidate — judge this on its "
+        "own merits, not against this JD's domain?\n"
+        "- no_major_contradictions: is the resume free of direct self-contradictions (e.g. "
+        "conflicting titles, durations, or claims elsewhere in the same document)?\n"
+        "For each, answer pass=true only if the resume genuinely supports it, pass=false if it "
+        "doesn't, with one short reason each. Do not penalize a check just because the resume is "
+        "well-written, or because the candidate is a partial fit for this JD — judge only whether "
+        "the resume's own specifics line up with each other.\n\n"
         f"KEYWORD SCAN (grounding facts, not the final answer): {len(matched)}/{len(matched) + len(missing)} "
         f"JD skill/requirement items matched verbatim ({keyword_result.get('match_percentage', 0)}%).\n"
         f"Matched: {', '.join(matched[:20]) or 'none'}\n"
@@ -10130,18 +10578,27 @@ def _llm_judge_match(resume_dict, jd_dict, keyword_result):
         '"concerns": "<1-2 sentences on the biggest gaps, or empty string if none>", '
         '"suggested_roles": ["<role name>", ...up to 3, or empty list], '
         '"confidence": <int 0-100, how confident you are in this judgment given the information available>, '
-        '"confidence_reason": "<one short sentence>"}'
+        '"confidence_reason": "<one short sentence>", '
+        '"consistency_checks": {'
+        '"skills_match_projects": {"pass": <bool>, "reason": "<short phrase>"}, '
+        '"experience_matches_responsibilities": {"pass": <bool>, "reason": "<short phrase>"}, '
+        '"timeline_consistent": {"pass": <bool>, "reason": "<short phrase>"}, '
+        '"designation_matches_experience": {"pass": <bool>, "reason": "<short phrase>"}, '
+        '"technologies_demonstrated": {"pass": <bool>, "reason": "<short phrase>"}, '
+        '"projects_realistic": {"pass": <bool>, "reason": "<short phrase>"}, '
+        '"no_major_contradictions": {"pass": <bool>, "reason": "<short phrase>"}}}'
     )
 
     try:
-        # On CPU-only Ollama, generation time scales with num_predict — 500
-        # output tokens covers 9 category scores plus a short rationale and a
-        # handful of short phrases with headroom, without the runaway cost of
-        # an unbounded cap. This now runs at most once per resume/JD pair ever
-        # (cached + advisory-locked, see _get_or_compute_hybrid_match), not
-        # repeatedly per page view, so this cap is about output quality, not
-        # working around being called repeatedly.
-        raw = _ollama_chat(prompt, as_json=True, num_predict=500, num_ctx=8192)
+        # On CPU-only Ollama, generation time scales with num_predict — 850
+        # output tokens covers 9 category scores, 7 consistency-check
+        # objects, a short rationale, and a handful of short phrases with
+        # headroom, without the runaway cost of an unbounded cap. This now
+        # runs at most once per resume/JD pair ever (cached + advisory-
+        # locked, see _get_or_compute_hybrid_match), not repeatedly per page
+        # view, so this cap is about output quality, not working around
+        # being called repeatedly.
+        raw = _ollama_chat(prompt, as_json=True, num_predict=850, num_ctx=8192)
     except Exception as e:
         logger.warning(f"LLM judge call failed: {e}", exc_info=True)
         return None
@@ -10170,6 +10627,24 @@ def _llm_judge_match(resume_dict, jd_dict, keyword_result):
         logger.warning(f"LLM judge returned the known-poisoned example verbatim — treating as invalid, response: {str(raw)[:200]}")
         return None
 
+    # consistency_checks is deliberately NOT required the way the 9 category
+    # scores are — it's a supplementary signal (see _evaluate_authenticity),
+    # not part of the auditable weighted score. If the model omits it, or
+    # malforms individual keys, the real match assessment must still stand;
+    # _evaluate_authenticity degrades each check to "not assessed"
+    # individually rather than invalidating the whole judgment the way a
+    # missing category score does.
+    raw_checks = raw.get("consistency_checks")
+    consistency_checks = {}
+    if isinstance(raw_checks, dict):
+        for key in _AUTHENTICITY_SOFT_RULE_KEYS:
+            entry = raw_checks.get(key)
+            if isinstance(entry, dict) and isinstance(entry.get("pass"), bool):
+                consistency_checks[key] = {
+                    "pass": entry["pass"],
+                    "reason": str(entry.get("reason") or "").strip()[:120],
+                }
+
     return {
         "category_scores": category_scores,
         "verdict": str(raw.get("verdict") or "").strip()[:100],
@@ -10179,6 +10654,7 @@ def _llm_judge_match(resume_dict, jd_dict, keyword_result):
         "suggested_roles": _coerce_str_list(raw.get("suggested_roles"), 3),
         "confidence": _clamp_pct(raw.get("confidence")),
         "confidence_reason": str(raw.get("confidence_reason") or "").strip()[:200],
+        "consistency_checks": consistency_checks,
     }
 
 
@@ -10204,6 +10680,10 @@ def _hybrid_match(resume_dict, jd_dict):
     # above.
     keyword_result = calculate_match_score(resume_dict, jd_dict, include_title=False)
     llm_result = _llm_judge_match(resume_dict, jd_dict, keyword_result)
+    # Pure string comparison, no LLM involved — computed regardless of
+    # whether the AI judge succeeded, so the fallback path (Ollama down)
+    # still surfaces this flag instead of losing it entirely.
+    jd_mirroring = _jd_mirroring_risk(resume_dict, jd_dict)
 
     if llm_result is None:
         fallback = _holistic_or_default(resume_dict, jd_dict)
@@ -10214,6 +10694,16 @@ def _hybrid_match(resume_dict, jd_dict):
         fallback["confidence_reason"] = "AI judge unavailable — showing keyword + heuristic estimate only."
         fallback["algo_version"] = _HYBRID_ALGO_VERSION
         fallback["is_ai_judged"] = False
+        # No LLM ran, so there's no basis for an authenticity judgment —
+        # left as "not assessed" rather than guessed at.
+        fallback["authenticity_status"] = None
+        fallback["authenticity_reasons_positive"] = []
+        fallback["authenticity_reasons_negative"] = []
+        fallback["authenticity_explanation"] = ""
+        fallback["authenticity_rules"] = {}
+        fallback["jd_mirroring_pct"] = jd_mirroring["overlap_pct"]
+        fallback["jd_mirroring_label"] = jd_mirroring["risk_label"]
+        fallback["jd_mirroring_phrases"] = jd_mirroring["matched_phrases"]
         return fallback
 
     keyword_pct = keyword_result.get("match_percentage", 0)
@@ -10248,6 +10738,17 @@ def _hybrid_match(resume_dict, jd_dict):
     )
     confidence_label = "High" if confidence_pct >= 75 else "Medium" if confidence_pct >= 50 else "Low"
 
+    # Binary resume-authenticity signal — see _evaluate_authenticity /
+    # _AUTHENTICITY_RULES. consistency_checks is always a dict here (never
+    # None) since llm_result exists on this path; _evaluate_authenticity
+    # only returns None when the LLM didn't run at all (the fallback path
+    # above).
+    authenticity = _evaluate_authenticity(resume_dict, llm_result.get("consistency_checks", {}))
+    logger.info(
+        f"Authenticity status={authenticity['status']} "
+        f"failed_rules={[k for k, v in authenticity['rules'].items() if v['pass'] is False]}"
+    )
+
     return {
         "fit_percentage": final_pct,
         "verdict": verdict,
@@ -10267,6 +10768,21 @@ def _hybrid_match(resume_dict, jd_dict):
         ),
         "algo_version": _HYBRID_ALGO_VERSION,
         "is_ai_judged": True,
+        # Binary resume-authenticity signal — see _evaluate_authenticity.
+        # Deliberately kept out of fit_percentage/category_scores: a
+        # flagged resume still gets an honest skill-match score, this is a
+        # separate signal for a recruiter to verify in interview, not a
+        # score penalty.
+        "authenticity_status": authenticity["status"],
+        "authenticity_reasons_positive": authenticity["reasons_positive"],
+        "authenticity_reasons_negative": authenticity["reasons_negative"],
+        "authenticity_explanation": authenticity["explanation"],
+        "authenticity_rules": authenticity["rules"],
+        # Second, independent authenticity signal — see _jd_mirroring_risk.
+        # Not LLM-derived, so it's available even when authenticity isn't.
+        "jd_mirroring_pct": jd_mirroring["overlap_pct"],
+        "jd_mirroring_label": jd_mirroring["risk_label"],
+        "jd_mirroring_phrases": jd_mirroring["matched_phrases"],
     }
 
 
@@ -10312,6 +10828,8 @@ def _read_cached_hybrid_match(conn, resume, jd):
     ):
         return None
 
+    jd_mirroring = _jd_mirroring_risk(resume, jd)
+
     return {
         "fit_percentage": cached["fit_percentage"],
         "verdict": cached["verdict"],
@@ -10329,6 +10847,17 @@ def _read_cached_hybrid_match(conn, resume, jd):
         "confidence_reason": extra.get("confidence_reason", ""),
         "algo_version": _HYBRID_ALGO_VERSION,
         "is_ai_judged": True,
+        "authenticity_status": extra.get("authenticity_status"),
+        "authenticity_reasons_positive": extra.get("authenticity_reasons_positive", []),
+        "authenticity_reasons_negative": extra.get("authenticity_reasons_negative", []),
+        "authenticity_explanation": extra.get("authenticity_explanation", ""),
+        "authenticity_rules": extra.get("authenticity_rules", {}),
+        # Computed fresh on every read, not persisted in `extra` — pure
+        # string comparison over the current resume/JD text, so it never
+        # needs cache-invalidation logic and always reflects live content.
+        "jd_mirroring_pct": jd_mirroring["overlap_pct"],
+        "jd_mirroring_label": jd_mirroring["risk_label"],
+        "jd_mirroring_phrases": jd_mirroring["matched_phrases"],
     }
 
 
@@ -10352,6 +10881,11 @@ def _store_hybrid_match(conn, resume, jd, assessment):
         "algo_version": assessment.get("algo_version", _HYBRID_ALGO_VERSION),
         "is_ai_judged": True,
         "resume_match_fingerprint": _resume_match_fingerprint(resume),
+        "authenticity_status": assessment.get("authenticity_status"),
+        "authenticity_reasons_positive": assessment.get("authenticity_reasons_positive", []),
+        "authenticity_reasons_negative": assessment.get("authenticity_reasons_negative", []),
+        "authenticity_explanation": assessment.get("authenticity_explanation", ""),
+        "authenticity_rules": assessment.get("authenticity_rules", {}),
     })
     conn.execute(
         """
@@ -10499,27 +11033,63 @@ def _top_n_jd_ids_by_estimate(resume_dict, jds, n=3):
 
 @app.route("/jd-management")
 def jd_management():
+    if not _require_permission("view_jd", write=False):
+        abort(403)
     status_filter = (request.args.get("status") or "").strip()
+    search_query = (request.args.get("q") or "").strip()
     with db_conn() as conn:
         ensure_jd_table(conn)
+        ensure_requirement_table(conn)
         seed_jds(conn)
+        conditions, params = [], []
         if status_filter in POSITION_STATUSES:
-            jds = conn.execute(
-                "SELECT id, title, role, category, position_status, created_at"
-                " FROM job_description WHERE position_status = %s ORDER BY category, title",
-                (status_filter,),
-            ).fetchall()
-        else:
-            jds = conn.execute(
-                "SELECT id, title, role, category, position_status, created_at"
-                " FROM job_description ORDER BY category, title"
-            ).fetchall()
-    return render_template("jd_management.html", jds=list(jds),
-                           statuses=POSITION_STATUSES, status_filter=status_filter)
+            conditions.append("position_status = %s")
+            params.append(status_filter)
+        if search_query:
+            # "Keyword" covers the keywords/skills text fields too, since
+            # those aren't visible table columns the client-side category/
+            # status tabs could ever search — this has to be a real query.
+            like = f"%{search_query}%"
+            conditions.append("(title ILIKE %s OR keywords ILIKE %s OR skills ILIKE %s OR CAST(id AS TEXT) = %s)")
+            params += [like, like, like, search_query]
+        where_sql = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        jds = conn.execute(
+            "SELECT id, title, role, category, position_status, workflow_status, created_at"
+            f" FROM job_description {where_sql} ORDER BY category, title",
+            params,
+        ).fetchall()
+        active_counts = conn.execute(
+            "SELECT jd_id, COUNT(*) AS cnt FROM requirement "
+            "WHERE jd_id IS NOT NULL AND status != 'Closed' GROUP BY jd_id"
+        ).fetchall()
+    active_count_by_jd = {r["jd_id"]: r["cnt"] for r in active_counts}
+    jds = [dict(jd, active_requirement_count=active_count_by_jd.get(jd["id"], 0)) for jd in jds]
+    return render_template("jd_management.html", jds=jds,
+                           statuses=POSITION_STATUSES, status_filter=status_filter,
+                           search_query=search_query)
+
+
+# Every field except the optional file upload is mandatory (2026-08-13:
+# explicit follow-up ask — the form previously only required Job Title,
+# letting a JD save with everything else blank).
+_JD_REQUIRED_FIELDS = [
+    ("title", "Job Title"), ("role", "Role"), ("category", "Category"),
+    ("responsibilities", "Responsibilities"), ("requirements", "Requirements / Qualifications"),
+    ("skills", "Required Skills"), ("keywords", "Keywords"),
+]
+
+
+def _validate_jd_required_fields(data):
+    missing = [label for key, label in _JD_REQUIRED_FIELDS if not data.get(key)]
+    if missing:
+        return f"Please fill in all required fields: {', '.join(missing)}."
+    return None
 
 
 @app.route("/jd/add", methods=["GET", "POST"])
 def jd_add():
+    if not _require_permission("write_jd"):
+        abort(403)
     if request.method == "POST":
         import time as _t
         data = {k: request.form.get(k, "").strip() for k in
@@ -10543,31 +11113,61 @@ def jd_add():
                     data["responsibilities"] = (txt or "")[:4000]
                 except Exception:
                     pass
+        error = _validate_jd_required_fields(data)
+        if error:
+            flash(error, "error")
+            return render_template("jd_form.html", jd=None, all_roles=ALL_JD_ROLES,
+                                   statuses=POSITION_STATUSES, default_status=DEFAULT_POSITION_STATUS), 400
+
+        # Duplicate-JD warning — this app's JD model has no "Department" field,
+        # so Category (e.g. "IT Roles"/"Validation Roles") is the closest
+        # existing equivalent. Not a hard block: "Add Anyway" (confirm_duplicate=1)
+        # bypasses this exact check on the resubmit.
+        if request.form.get("confirm_duplicate") != "1":
+            with db_conn() as conn:
+                ensure_jd_table(conn)
+                dup = conn.execute(
+                    "SELECT id, title FROM job_description WHERE LOWER(title) = LOWER(%s) AND category = %s LIMIT 1",
+                    (data["title"], data["category"]),
+                ).fetchone()
+            if dup:
+                flash(f"A JD titled \"{dup['title']}\" already exists in the {data['category']} category.",
+                      "error")
+                return render_template("jd_form.html", jd=data, all_roles=ALL_JD_ROLES,
+                                       statuses=POSITION_STATUSES, default_status=DEFAULT_POSITION_STATUS,
+                                       duplicate_warning=True)
+
+        data["created_by"] = session.get("user_id")
         with db_conn() as conn:
             ensure_jd_table(conn)
             cursor = conn.execute(
                 """
                 INSERT INTO job_description
-                    (title, role, category, responsibilities, requirements, skills, keywords, jd_file, position_status)
+                    (title, role, category, responsibilities, requirements, skills, keywords, jd_file,
+                     position_status, workflow_status, created_by)
                 VALUES
                     (%(title)s, %(role)s, %(category)s, %(responsibilities)s,
-                     %(requirements)s, %(skills)s, %(keywords)s, %(jd_file)s, %(position_status)s)
+                     %(requirements)s, %(skills)s, %(keywords)s, %(jd_file)s, %(position_status)s,
+                     'Draft', %(created_by)s)
                 RETURNING id
                 """,
                 data,
             )
             new_jd_id = cursor.fetchone()["id"]
         log_audit("JD Management", "Add", record_id=new_jd_id, record_label=data["title"])
-        flash(f"Job Description '{data['title']}' added.", "success")
-        return redirect(url_for("jd_management"))
+        flash(f"Job Description '{data['title']}' added as a Draft. Submit it for approval when ready.", "success")
+        return redirect(url_for("jd_detail", jd_id=new_jd_id))
     return render_template("jd_form.html", jd=None, all_roles=ALL_JD_ROLES,
                            statuses=POSITION_STATUSES, default_status=DEFAULT_POSITION_STATUS)
 
 
 @app.route("/jd/<int:jd_id>")
 def jd_detail(jd_id):
+    if not _require_permission("view_jd", write=False):
+        abort(403)
     with db_conn() as conn:
         ensure_jd_table(conn)
+        ensure_requirement_table(conn)
         jd = conn.execute(
             "SELECT * FROM job_description WHERE id = %s", (jd_id,)
         ).fetchone()
@@ -10576,7 +11176,35 @@ def jd_detail(jd_id):
         resumes = conn.execute(
             "SELECT id, full_name, title FROM resume ORDER BY updated_at DESC LIMIT 30"
         ).fetchall()
-    return render_template("jd_detail.html", jd=dict(jd), resumes=list(resumes))
+        creator = conn.execute(
+            "SELECT full_name FROM app_user WHERE id = %s", (jd["created_by"],)
+        ).fetchone() if jd["created_by"] else None
+        decider = conn.execute(
+            "SELECT full_name FROM app_user WHERE id = %s", (jd["decided_by"],)
+        ).fetchone() if jd["decided_by"] else None
+        linked_requirements = conn.execute(
+            "SELECT id, requirement_code, requirement_name, status FROM requirement "
+            "WHERE jd_id = %s ORDER BY created_at DESC",
+            (jd_id,),
+        ).fetchall()
+    linked_requirements = list(linked_requirements)
+    active_linked = [r for r in linked_requirements if r["status"] != "Closed"]
+    if active_linked:
+        codes = ", ".join(r["requirement_code"] for r in active_linked)
+        delete_confirm_message = (
+            f"This JD has {len(active_linked)} active linked requirement(s) ({codes}). "
+            "They will be unlinked, not deleted. Continue deleting this JD?"
+        )
+    else:
+        delete_confirm_message = f'Are you sure you want to delete "{jd["title"]}"? This cannot be undone.'
+    return render_template(
+        "jd_detail.html", jd=dict(jd), resumes=list(resumes),
+        creator_name=creator["full_name"] if creator else None,
+        decider_name=decider["full_name"] if decider else None,
+        linked_requirements=linked_requirements,
+        active_linked_requirements=active_linked,
+        delete_confirm_message=delete_confirm_message,
+    )
 
 
 @app.route("/jd/<int:jd_id>/download-pdf")
@@ -10592,6 +11220,14 @@ def download_jd_pdf(jd_id):
         return "Job Description not found", 404
 
     jd_dict = dict(jd)
+
+    # A Draft/Rejected JD is not yet finalized content — this is the one
+    # place a JD's content can actually leave the authenticated app (e.g.
+    # emailed to a candidate), so it's blocked here rather than requiring
+    # every future export surface to remember the same check.
+    if jd_dict.get("workflow_status") in ("Draft", "Rejected"):
+        flash("This JD is in Draft/Rejected status and cannot be exported until it's approved.", "error")
+        return redirect(url_for("jd_detail", jd_id=jd_id))
 
     # Generate PDF
     buffer = BytesIO()
@@ -10720,6 +11356,8 @@ def extract_jd_data(jd_id):
 
 @app.route("/jd/<int:jd_id>/edit", methods=["GET", "POST"])
 def jd_edit(jd_id):
+    if not _require_permission("write_jd"):
+        abort(403)
     with db_conn() as conn:
         ensure_jd_table(conn)
         if request.method == "POST":
@@ -10729,6 +11367,16 @@ def jd_edit(jd_id):
             if data["position_status"] not in POSITION_STATUSES:
                 data["position_status"] = DEFAULT_POSITION_STATUS
             data["id"] = jd_id
+            error = _validate_jd_required_fields(data)
+            if error:
+                flash(error, "error")
+                return render_template("jd_form.html", jd=data, all_roles=ALL_JD_ROLES,
+                                       statuses=POSITION_STATUSES, default_status=DEFAULT_POSITION_STATUS), 400
+            current = conn.execute(
+                "SELECT * FROM job_description WHERE id = %s", (jd_id,)
+            ).fetchone()
+            if current and current["workflow_status"] == "Published":
+                _snapshot_jd_version(conn, current, session.get("user_id"))
             conn.execute(
                 """
                 UPDATE job_description SET
@@ -10754,6 +11402,8 @@ def jd_edit(jd_id):
 
 @app.route("/jd/<int:jd_id>/delete", methods=["POST"])
 def jd_delete(jd_id):
+    if not _require_permission("delete_jd"):
+        abort(403)
     with db_conn() as conn:
         ensure_jd_table(conn)
         row = conn.execute(
@@ -10767,6 +11417,271 @@ def jd_delete(jd_id):
     return redirect(url_for("jd_management"))
 
 
+def _jd_link(jd_id):
+    """Absolute URL to the JD's detail page, used in notification emails so
+    the recipient can click straight through to review/act on it (login is
+    still required — this is a deep link, not a bypass-auth magic link)."""
+    try:
+        return url_for("jd_detail", jd_id=jd_id, _external=True)
+    except RuntimeError:
+        return None  # no active request context (e.g. called from a test/script)
+
+
+def _notify_jd_approvers(jd_id, jd_title, submitted_by_name):
+    """Emails every active Hiring Manager/Admin that a JD needs their
+    review — role-based routing, not a per-JD approver assignment."""
+    with db_conn() as conn:
+        approvers = conn.execute(
+            "SELECT email, full_name FROM app_user WHERE role IN ('admin', 'hiring_manager') AND is_active"
+        ).fetchall()
+    link = _jd_link(jd_id)
+    link_line = f"\n\nReview it here: {link}" if link else ""
+    for a in approvers:
+        if not a["email"]:
+            continue
+        _send_email(
+            a["email"],
+            f"JD pending your approval: {jd_title}",
+            f"Hello {a['full_name'] or ''},\n\n"
+            f"\"{jd_title}\" was submitted by {submitted_by_name or 'a user'} and is now "
+            f"pending your approval in JD Management.{link_line}\n\n"
+            "Open the link above (log in if prompted), then use Approve, Reject, or "
+            "Request Changes on the JD's Approval card.",
+        )
+
+
+def _notify_jd_creator_of_decision(jd_row, decision, comment):
+    """Emails the JD's creator when a decision is made. Silently skipped for
+    legacy JDs with no created_by (created before this feature existed)."""
+    if not jd_row.get("created_by"):
+        return
+    with db_conn() as conn:
+        creator = conn.execute(
+            "SELECT email, full_name FROM app_user WHERE id = %s", (jd_row["created_by"],)
+        ).fetchone()
+    if not creator or not creator["email"]:
+        return
+    comment_line = f"\n\nComment: {comment}" if comment else ""
+    link = _jd_link(jd_row["id"])
+    link_line = f"\n\nView it here: {link}" if link else ""
+    _send_email(
+        creator["email"],
+        f"Your JD \"{jd_row['title']}\" was {decision}",
+        f"Hello {creator['full_name'] or ''},\n\n"
+        f"\"{jd_row['title']}\" was {decision.lower()}.{comment_line}{link_line}",
+    )
+
+
+@app.route("/jd/<int:jd_id>/submit-for-approval", methods=["POST"])
+def jd_submit_for_approval(jd_id):
+    if not _require_permission("write_jd"):
+        abort(403)
+    with db_conn() as conn:
+        ensure_jd_table(conn)
+        row = conn.execute("SELECT * FROM job_description WHERE id = %s", (jd_id,)).fetchone()
+        if not row:
+            return "Job Description not found", 404
+        if row["workflow_status"] not in ("Draft", "Changes Requested"):
+            flash("Only a Draft or Changes-Requested JD can be submitted for approval.", "error")
+            return redirect(url_for("jd_detail", jd_id=jd_id))
+        conn.execute(
+            "UPDATE job_description SET workflow_status = 'Pending Approval', submitted_at = NOW(), "
+            "created_by = COALESCE(created_by, %s) WHERE id = %s",
+            (session.get("user_id"), jd_id),
+        )
+    log_audit("JD Management", "Submit for Approval", record_id=jd_id, record_label=row["title"])
+    _notify_jd_approvers(jd_id, row["title"], session.get("full_name"))
+    flash("Submitted for approval.", "success")
+    return redirect(url_for("jd_detail", jd_id=jd_id))
+
+
+def _jd_decision(jd_id, new_status, decision_label, require_comment):
+    """Shared body for approve/reject/request-changes — same guards
+    (must be Pending Approval, creator can't act on their own submission),
+    same field updates, same notify+audit steps; only the target status,
+    label, and comment-required-ness differ per caller."""
+    if not _require_permission("approve_jd"):
+        abort(403)
+    comment = request.form.get("comment", "").strip()
+    if require_comment and not comment:
+        return jsonify({"error": "A comment is required for this decision."}), 400
+    with db_conn() as conn:
+        ensure_jd_table(conn)
+        row = conn.execute("SELECT * FROM job_description WHERE id = %s", (jd_id,)).fetchone()
+        if not row:
+            return "Job Description not found", 404
+        if row["workflow_status"] != "Pending Approval":
+            flash("This JD is not currently pending approval.", "error")
+            return redirect(url_for("jd_detail", jd_id=jd_id))
+        if row["created_by"] and session.get("user_id") == row["created_by"]:
+            flash("You cannot act on a JD you submitted yourself — another Hiring Manager "
+                  "or Admin must review it.", "error")
+            return redirect(url_for("jd_detail", jd_id=jd_id))
+        conn.execute(
+            "UPDATE job_description SET workflow_status = %s, decided_by = %s, decided_at = NOW(), "
+            "decision_comment = %s WHERE id = %s",
+            (new_status, session.get("user_id"), comment, jd_id),
+        )
+    log_audit("JD Management", decision_label, record_id=jd_id, record_label=row["title"],
+              details=comment or None)
+    _notify_jd_creator_of_decision(row, decision_label, comment)
+    flash(f"JD {decision_label.lower()}.", "success")
+    return redirect(url_for("jd_detail", jd_id=jd_id))
+
+
+@app.route("/jd/<int:jd_id>/approve", methods=["POST"])
+def jd_approve(jd_id):
+    return _jd_decision(jd_id, "Approved", "Approved", require_comment=False)
+
+
+@app.route("/jd/<int:jd_id>/reject", methods=["POST"])
+def jd_reject(jd_id):
+    return _jd_decision(jd_id, "Rejected", "Rejected", require_comment=True)
+
+
+@app.route("/jd/<int:jd_id>/request-changes", methods=["POST"])
+def jd_request_changes(jd_id):
+    return _jd_decision(jd_id, "Changes Requested", "Changes Requested", require_comment=True)
+
+
+@app.route("/jd/<int:jd_id>/publish", methods=["POST"])
+def jd_publish(jd_id):
+    if not _require_permission("approve_jd"):
+        abort(403)
+    with db_conn() as conn:
+        ensure_jd_table(conn)
+        row = conn.execute("SELECT * FROM job_description WHERE id = %s", (jd_id,)).fetchone()
+        if not row:
+            return "Job Description not found", 404
+        # Route-level guard, not just a hidden button: a Rejected (or any
+        # non-Approved) JD can never be published, no matter how this route
+        # is invoked.
+        if row["workflow_status"] != "Approved":
+            flash("Only an Approved JD can be published.", "error")
+            return redirect(url_for("jd_detail", jd_id=jd_id))
+        conn.execute(
+            "UPDATE job_description SET workflow_status = 'Published', published_at = NOW() WHERE id = %s",
+            (jd_id,),
+        )
+    log_audit("JD Management", "Publish", record_id=jd_id, record_label=row["title"])
+    flash("Job Description published.", "success")
+    return redirect(url_for("jd_detail", jd_id=jd_id))
+
+
+def _jd_field_diff(a, b):
+    """Field names that differ between two JD-shaped dicts (version snapshot
+    or the live row) — drives both the versions list's "changed" summary and
+    the compare page's highlighting."""
+    fields = ["title", "role", "category", "responsibilities", "requirements", "skills",
+              "keywords", "position_status"]
+    return [f for f in fields if (a.get(f) or "") != (b.get(f) or "")]
+
+
+@app.route("/jd/<int:jd_id>/versions")
+def jd_versions(jd_id):
+    if not _require_permission("view_jd", write=False):
+        abort(403)
+    with db_conn() as conn:
+        ensure_jd_table(conn)
+        ensure_jd_version_table(conn)
+        jd = conn.execute("SELECT * FROM job_description WHERE id = %s", (jd_id,)).fetchone()
+        if not jd:
+            return "Job Description not found", 404
+        versions = conn.execute(
+            """
+            SELECT v.*, u.full_name AS editor_name
+            FROM jd_version v LEFT JOIN app_user u ON u.id = v.edited_by
+            WHERE v.jd_id = %s ORDER BY v.version_number DESC
+            """,
+            (jd_id,),
+        ).fetchall()
+    versions = [dict(v) for v in versions]
+    # Each version snapshot captured the state right BEFORE that edit — so
+    # "what changed" in edit N is the diff between version N and whatever
+    # came right after it (version N+1, or the live row for the newest one).
+    for i, v in enumerate(versions):
+        newer = versions[i - 1] if i > 0 else dict(jd)
+        v["changed_fields"] = _jd_field_diff(v, newer)
+    return render_template("jd_versions.html", jd=dict(jd), versions=versions)
+
+
+def _load_jd_snapshot(conn, jd_id, ref):
+    """ref is either the literal 'current' (the live job_description row) or
+    a jd_version id — used by the compare view so either side of a
+    comparison can be "what it looks like right now"."""
+    if ref == "current":
+        row = conn.execute("SELECT * FROM job_description WHERE id = %s", (jd_id,)).fetchone()
+        return dict(row) if row else None, "Current"
+    row = conn.execute(
+        "SELECT v.*, u.full_name AS editor_name FROM jd_version v "
+        "LEFT JOIN app_user u ON u.id = v.edited_by WHERE v.id = %s AND v.jd_id = %s",
+        (ref, jd_id),
+    ).fetchone()
+    return (dict(row), f"Version {row['version_number']}") if row else (None, None)
+
+
+@app.route("/jd/<int:jd_id>/versions/compare")
+def jd_version_compare(jd_id):
+    if not _require_permission("view_jd", write=False):
+        abort(403)
+    a_ref = request.args.get("a", "current")
+    b_ref = request.args.get("b", "current")
+    with db_conn() as conn:
+        ensure_jd_table(conn)
+        ensure_jd_version_table(conn)
+        jd = conn.execute("SELECT * FROM job_description WHERE id = %s", (jd_id,)).fetchone()
+        if not jd:
+            return "Job Description not found", 404
+        a_snapshot, a_label = _load_jd_snapshot(conn, jd_id, a_ref)
+        b_snapshot, b_label = _load_jd_snapshot(conn, jd_id, b_ref)
+    if not a_snapshot or not b_snapshot:
+        return "Version not found", 404
+    fields = ["title", "role", "category", "responsibilities", "requirements", "skills",
+              "keywords", "position_status"]
+    rows = [{"field": f, "a": a_snapshot.get(f) or "", "b": b_snapshot.get(f) or "",
+             "differs": (a_snapshot.get(f) or "") != (b_snapshot.get(f) or "")} for f in fields]
+    return render_template("jd_version_compare.html", jd=dict(jd), rows=rows,
+                           a_label=a_label, b_label=b_label)
+
+
+@app.route("/jd/<int:jd_id>/versions/<int:version_id>/rollback", methods=["POST"])
+def jd_version_rollback(jd_id, version_id):
+    # Admin/approver-only, per spec — reuses the same gate as the approval
+    # decisions rather than write_jd, since rollback is a higher-privilege
+    # action than a normal edit.
+    if not _require_permission("approve_jd"):
+        abort(403)
+    with db_conn() as conn:
+        ensure_jd_table(conn)
+        ensure_jd_version_table(conn)
+        current = conn.execute("SELECT * FROM job_description WHERE id = %s", (jd_id,)).fetchone()
+        if not current:
+            return "Job Description not found", 404
+        target = conn.execute(
+            "SELECT * FROM jd_version WHERE id = %s AND jd_id = %s", (version_id, jd_id)
+        ).fetchone()
+        if not target:
+            return "Version not found", 404
+        # Preserve the pre-rollback state as its own version first — history
+        # only ever grows, a rollback is never destructive to prior history.
+        _snapshot_jd_version(conn, current, session.get("user_id"))
+        conn.execute(
+            """
+            UPDATE job_description SET
+                title=%s, role=%s, category=%s, responsibilities=%s,
+                requirements=%s, skills=%s, keywords=%s, position_status=%s, updated_at=NOW()
+            WHERE id=%s
+            """,
+            (target["title"], target["role"], target["category"], target["responsibilities"],
+             target["requirements"], target["skills"], target["keywords"],
+             target["position_status"], jd_id),
+        )
+    log_audit("JD Management", "Rollback", record_id=jd_id, record_label=current["title"],
+              details=f"Rolled back to version {target['version_number']}")
+    flash(f"Rolled back to version {target['version_number']}.", "success")
+    return redirect(url_for("jd_detail", jd_id=jd_id))
+
+
 @app.route("/uploads/jd/<path:filename>")
 def jd_uploaded_file(filename):
     safe = secure_filename(filename)
@@ -10778,6 +11693,8 @@ def jd_uploaded_file(filename):
 
 @app.route("/compare/<int:resume_id>")
 def compare_select_jd(resume_id):
+    if not _require_permission("compare_resume"):
+        abort(403)
     with db_conn() as conn:
         ensure_jd_table(conn)
         seed_jds(conn)
@@ -10794,6 +11711,8 @@ def compare_select_jd(resume_id):
 
 @app.route("/compare/<int:resume_id>/<int:jd_id>")
 def compare_result(resume_id, jd_id):
+    if not _require_permission("compare_resume"):
+        abort(403)
     with db_conn() as conn:
         ensure_jd_table(conn)
         resume = conn.execute("SELECT * FROM resume WHERE id = %s", (resume_id,)).fetchone()
@@ -10845,11 +11764,14 @@ def compare_ai_status(resume_id, jd_id):
     judgment can take on local hardware.
     """
     with db_conn() as conn:
-        # Full row, not just id/updated_at — _read_cached_hybrid_match now
+        # Full rows, not just id/updated_at — _read_cached_hybrid_match now
         # compares a content fingerprint over summary/skills/experience/etc.
-        # (see _resume_match_fingerprint), which needs those columns present.
+        # (see _resume_match_fingerprint) and computes jd_mirroring_risk
+        # fresh on every read (see _jd_mirroring_risk), both of which need
+        # the actual skills/requirements/responsibilities columns present,
+        # not just id/updated_at.
         resume = conn.execute("SELECT * FROM resume WHERE id = %s", (resume_id,)).fetchone()
-        jd = conn.execute("SELECT id, updated_at FROM job_description WHERE id = %s", (jd_id,)).fetchone()
+        jd = conn.execute("SELECT * FROM job_description WHERE id = %s", (jd_id,)).fetchone()
         if not resume or not jd:
             return jsonify({"ready": False, "error": "Resume or JD not found"}), 404
         cached = _read_cached_hybrid_match(conn, resume, jd)
@@ -10893,9 +11815,272 @@ def jd_top_matches(jd_id):
     )
 
 
+# ── Interview Questions & Answers (per-JD, under JD Management) ─────────────
+# Fully additive: its own table (interview_questions), its own routes, its
+# own template. Never touches resume parsing, JD matching, ai_match_cache, or
+# any existing Profile/Resume screen.
+
+# Per-category Ollama calls needed to reach the user's 25-question spec
+# (10 Technical / 5 Functional / 5 Scenario / 5 Behavioral). Each call asks
+# for at most 5 questions — found live (2026-08-12) that a single 10-question
+# call reliably TIMED OUT at 180s on CPU-only Ollama while every 5-question
+# call succeeded comfortably, so Technical is split into two 5-question
+# calls rather than raised to a much longer timeout. This also follows this
+# codebase's established lesson that a small local model is far less
+# reliable one-shotting a large, richly-detailed JSON response than being
+# fed small, homogeneous pieces (see parse_resume_with_llm_text and
+# _llm_judge_match's prompt-design comments).
+_INTERVIEW_QUESTION_BATCHES = [
+    ("Technical", 5), ("Technical", 5),
+    ("Functional", 5),
+    ("Scenario Based", 5),
+    ("Behavioral", 5),
+]
+
+# One-line style hint per category — found live (2026-08-12) that without
+# this, Functional/Scenario/Behavioral all converged on near-identical
+# "describe a time when..." phrasing (genuine content, correctly JD-specific,
+# but not actually distinguishing the 3 question styles from each other).
+_INTERVIEW_QUESTION_STYLE_HINTS = {
+    "Technical": "test the candidate's domain/technical knowledge directly — not a personal story.",
+    "Functional": "ask how the candidate would carry out a specific day-to-day responsibility of this role.",
+    "Scenario Based": "pose a hypothetical situation (\"Imagine...\"/\"Suppose...\") and ask how they'd handle it.",
+    "Behavioral": "ask the candidate to describe a specific past experience (\"Tell me about a time...\").",
+}
+
+
+def _build_jd_text_for_questions(jd_dict):
+    return (
+        f"Title: {jd_dict.get('title') or ''}\n"
+        f"Role: {jd_dict.get('role') or ''}\n"
+        f"Responsibilities: {jd_dict.get('responsibilities') or ''}\n"
+        f"Requirements: {jd_dict.get('requirements') or ''}\n"
+        f"Skills: {jd_dict.get('skills') or ''}\n"
+        f"Keywords: {jd_dict.get('keywords') or ''}"
+    )
+
+
+def _generate_interview_questions_for_category(jd_text, category, count):
+    """One Ollama call for one category. Returns a list of coerced question
+    dicts (possibly empty if the model fails or returns nothing usable) —
+    never raises for bad/malformed JSON (mirrors _ollama_chat's own
+    contract), only for a genuine call failure (Ollama down/timeout), which
+    the caller catches.
+    """
+    style_hint = _INTERVIEW_QUESTION_STYLE_HINTS.get(category, "")
+    prompt = (
+        "You are an experienced technical interviewer. Analyze the following Job "
+        f"Description and create {count} {category} interview questions specifically "
+        f"for this role. {style_hint}\n"
+        "Questions must be directly relevant to the responsibilities, skills, "
+        "technologies, qualifications, and experience mentioned in the JD. Do not "
+        "invent technologies or requirements that are not relevant to it.\n\n"
+        f"JOB DESCRIPTION:\n{jd_text}\n\n"
+        "Respond with ONLY a single JSON object, no other text before or after it, in "
+        "EXACTLY this shape:\n"
+        '{"questions": [{"question": <string>, "expected_answer": <string>, '
+        '"key_points": [<string>, ...up to 6], "difficulty": <"Easy"|"Medium"|"High">}, '
+        f"... {count} items total]}}"
+    )
+    # Each call is capped at 5 questions (see _INTERVIEW_QUESTION_BATCHES) —
+    # 1000 covers question + a several-sentence answer + up to 6 short
+    # bullets, x5, with headroom; 180s timeout comfortably fits a 5-question
+    # batch on CPU-only Ollama per live testing.
+    raw = _ollama_chat(prompt, as_json=True, num_predict=1000, num_ctx=8192, timeout=180)
+    return _coerce_interview_questions(raw, category)
+
+
+@app.route("/jd/<int:jd_id>/interview-questions")
+def jd_interview_questions(jd_id):
+    if not _require_permission("view_jd", write=False):
+        abort(403)
+    with db_conn() as conn:
+        ensure_jd_table(conn)
+        ensure_interview_questions_table(conn)
+        jd = conn.execute("SELECT * FROM job_description WHERE id = %s", (jd_id,)).fetchone()
+        if not jd:
+            return "Job Description not found", 404
+        rows = conn.execute(
+            "SELECT * FROM interview_questions WHERE jd_id = %s ORDER BY category, id",
+            (jd_id,),
+        ).fetchall()
+
+    questions_by_category = {cat: [] for cat in INTERVIEW_QUESTION_CATEGORIES}
+    for row in rows:
+        questions_by_category.setdefault(row["category"], []).append(dict(row))
+
+    return render_template(
+        "interview_questions.html",
+        jd=dict(jd),
+        categories=INTERVIEW_QUESTION_CATEGORIES,
+        difficulties=INTERVIEW_QUESTION_DIFFICULTIES,
+        questions_by_category=questions_by_category,
+        has_questions=len(rows) > 0,
+    )
+
+
+@app.route("/jd/<int:jd_id>/interview-questions/generate", methods=["POST"])
+def generate_interview_questions(jd_id):
+    """Generates (or regenerates) the full ~25-question set for one JD. Runs
+    5 sequential Ollama calls (2 Technical + 1 each of Functional/Scenario/
+    Behavioral) — see _INTERVIEW_QUESTION_BATCHES and
+    _generate_interview_questions_for_category for why. A batch that comes
+    back empty (model failure/timeout for just that call) is simply omitted
+    rather than failing the whole request; only a total Ollama outage
+    (every batch empty) is reported as an error.
+
+    Gated on view_jd (not write_jd): every role that can view a JD at all
+    can trigger its own one-time auto-generation (see interview_questions.html's
+    inline script) — this must not require write access, or a view-only role
+    opening a brand new JD first would get stuck on a permanent "unable to
+    generate" error instead of ever seeing its auto-populated questions.
+    """
+    if not _require_permission("view_jd", write=False):
+        abort(403)
+    with db_conn() as conn:
+        ensure_jd_table(conn)
+        jd = conn.execute("SELECT * FROM job_description WHERE id = %s", (jd_id,)).fetchone()
+        if not jd:
+            return jsonify({"success": False, "message": "Job Description not found"}), 404
+        jd_dict = dict(jd)
+
+    jd_text = _build_jd_text_for_questions(jd_dict)
+    all_questions = []
+    for category, count in _INTERVIEW_QUESTION_BATCHES:
+        try:
+            all_questions.extend(_generate_interview_questions_for_category(jd_text, category, count))
+        except Exception as e:
+            # Caught per-batch, not around the whole loop — one flaky/
+            # timed-out call (a real risk with 5 sequential CPU-bound local
+            # calls) shouldn't lose the batches that already succeeded.
+            logger.warning(f"Interview question generation failed for jd={jd_id} category={category}: {e}",
+                            exc_info=True)
+
+    if not all_questions:
+        return jsonify({"success": False,
+                         "message": "Unable to generate interview questions. Please try again."}), 502
+
+    with db_conn() as conn:
+        ensure_interview_questions_table(conn)
+        conn.execute("DELETE FROM interview_questions WHERE jd_id = %s", (jd_id,))
+        for q in all_questions:
+            conn.execute(
+                """
+                INSERT INTO interview_questions
+                    (jd_id, category, question, expected_answer, key_points, difficulty)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (jd_id, q["category"], q["question"], q["expected_answer"], q["key_points"], q["difficulty"]),
+            )
+
+    log_audit("JD Management", "Generate Interview Questions", record_id=jd_id,
+              record_label=jd_dict.get("title"), details=f"{len(all_questions)} questions")
+
+    questions_by_category = {cat: [] for cat in INTERVIEW_QUESTION_CATEGORIES}
+    for q in all_questions:
+        questions_by_category[q["category"]].append(q)
+    return jsonify({"success": True, "questions": questions_by_category})
+
+
+@app.route("/jd/<int:jd_id>/interview-questions/add", methods=["POST"])
+def add_interview_question(jd_id):
+    if not _require_permission("write_jd"):
+        abort(403)
+    data = request.get_json(silent=True) or {}
+    category = str(data.get("category") or "").strip().title()
+    question = str(data.get("question") or "").strip()
+    if category not in INTERVIEW_QUESTION_CATEGORIES:
+        return jsonify({"ok": False, "error": "Invalid category"}), 400
+    if not question:
+        return jsonify({"ok": False, "error": "Question is required"}), 400
+    difficulty = str(data.get("difficulty") or "Medium").strip().title()
+    if difficulty not in INTERVIEW_QUESTION_DIFFICULTIES:
+        difficulty = "Medium"
+    expected_answer = str(data.get("expected_answer") or "").strip()[:600]
+    key_points = data.get("key_points")
+    if isinstance(key_points, list):
+        key_points = "\n".join(_coerce_str_list(key_points, 6))
+    else:
+        key_points = str(key_points or "").strip()
+
+    with db_conn() as conn:
+        ensure_jd_table(conn)
+        ensure_interview_questions_table(conn)
+        jd = conn.execute("SELECT title FROM job_description WHERE id = %s", (jd_id,)).fetchone()
+        if not jd:
+            return jsonify({"ok": False, "error": "Job Description not found"}), 404
+        new_id = conn.execute(
+            """
+            INSERT INTO interview_questions
+                (jd_id, category, question, expected_answer, key_points, difficulty)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING id
+            """,
+            (jd_id, category, question, expected_answer, key_points, difficulty),
+        ).fetchone()["id"]
+
+    log_audit("JD Management", "Add Interview Question", record_id=new_id, record_label=jd["title"])
+    return jsonify({"ok": True, "question": {
+        "id": new_id, "category": category, "question": question,
+        "expected_answer": expected_answer, "key_points": key_points, "difficulty": difficulty,
+    }})
+
+
+@app.route("/api/interview-question/<int:q_id>/update", methods=["POST"])
+def update_interview_question(q_id):
+    if not _require_permission("write_jd"):
+        abort(403)
+    data = request.get_json(silent=True) or {}
+    question = str(data.get("question") or "").strip()
+    if not question:
+        return jsonify({"ok": False, "error": "Question is required"}), 400
+    difficulty = str(data.get("difficulty") or "Medium").strip().title()
+    if difficulty not in INTERVIEW_QUESTION_DIFFICULTIES:
+        difficulty = "Medium"
+    expected_answer = str(data.get("expected_answer") or "").strip()[:600]
+    key_points = data.get("key_points")
+    if isinstance(key_points, list):
+        key_points = "\n".join(_coerce_str_list(key_points, 6))
+    else:
+        key_points = str(key_points or "").strip()
+
+    with db_conn() as conn:
+        ensure_interview_questions_table(conn)
+        row = conn.execute("SELECT id FROM interview_questions WHERE id = %s", (q_id,)).fetchone()
+        if not row:
+            return jsonify({"ok": False, "error": "Question not found"}), 404
+        conn.execute(
+            """
+            UPDATE interview_questions
+            SET question = %s, expected_answer = %s, key_points = %s, difficulty = %s,
+                updated_at = NOW()
+            WHERE id = %s
+            """,
+            (question, expected_answer, key_points, difficulty, q_id),
+        )
+    log_audit("JD Management", "Edit Interview Question", record_id=q_id)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/interview-question/<int:q_id>/delete", methods=["POST"])
+def delete_interview_question(q_id):
+    if not _require_permission("write_jd"):
+        abort(403)
+    with db_conn() as conn:
+        ensure_interview_questions_table(conn)
+        row = conn.execute("SELECT id FROM interview_questions WHERE id = %s", (q_id,)).fetchone()
+        if not row:
+            return jsonify({"ok": False, "error": "Question not found"}), 404
+        conn.execute("DELETE FROM interview_questions WHERE id = %s", (q_id,))
+    log_audit("JD Management", "Delete Interview Question", record_id=q_id)
+    return jsonify({"ok": True})
+
+
 # ── NEW: Candidate list API (used by dashboard refresh) ──────────────────────
 @app.route("/api/candidates")
 def api_candidates():
+    if not _require_permission("view_candidate", write=False):
+        abort(403)
     with db_conn() as conn:
         rows = conn.execute(
             "SELECT id, full_name, title, location, experience, summary, created_at,"
@@ -11119,6 +12304,7 @@ def ensure_requirement_table(conn):
 
 
 ONSITE_OFFSHORE_OPTIONS = ["Onsite", "Offshore", "Hybrid"]
+PRIORITY_LEVELS = ["Low", "Medium", "High", "Critical"]
 
 
 def _ensure_onsite_offshore_col():
@@ -11131,8 +12317,41 @@ def _ensure_onsite_offshore_col():
         pass
 
 
+def _ensure_requirement_recruiter_priority_cols():
+    """Assigned Recruiter + Priority — used for the Requirement Management
+    filter set. Nullable/defaulted so existing rows are unaffected."""
+    try:
+        with db_conn() as conn:
+            conn.execute(
+                "ALTER TABLE requirement ADD COLUMN IF NOT EXISTS "
+                "assigned_recruiter_id INTEGER REFERENCES app_user(id)"
+            )
+            conn.execute(
+                "ALTER TABLE requirement ADD COLUMN IF NOT EXISTS priority TEXT DEFAULT 'Medium'"
+            )
+    except Exception:
+        pass
+
+
+def _ensure_requirement_jd_col():
+    """Links a requirement to the (single) JD it was raised against. A JD can
+    have many requirements linked to it, so the FK lives on requirement, not
+    a join table. ON DELETE SET NULL: deleting a JD must never delete the
+    requisition records raised against it — it only drops the link."""
+    try:
+        with db_conn() as conn:
+            conn.execute(
+                "ALTER TABLE requirement ADD COLUMN IF NOT EXISTS "
+                "jd_id INTEGER REFERENCES job_description(id) ON DELETE SET NULL"
+            )
+    except Exception:
+        pass
+
+
 _migrate_requirement_status_filled_to_fulfilled()
 _ensure_onsite_offshore_col()
+_ensure_requirement_jd_col()
+_ensure_requirement_recruiter_priority_cols()
 
 
 def ensure_interview_schedule_table(conn):
@@ -11151,57 +12370,200 @@ def ensure_interview_schedule_table(conn):
     )
 
 
+# Child table of job_description — one row per generated/hand-added interview
+# question. Deliberately real columns, not a JSONB blob (contrast
+# ai_match_cache.extra): questions need individual edit/delete, which a
+# one-row-per-question table supports directly, matching the
+# interview_schedule precedent above rather than the cache-blob convention.
+INTERVIEW_QUESTION_CATEGORIES = ["Technical", "Functional", "Scenario Based", "Behavioral"]
+INTERVIEW_QUESTION_DIFFICULTIES = ["Easy", "Medium", "High"]
+
+
+def ensure_interview_questions_table(conn):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS interview_questions (
+            id              SERIAL PRIMARY KEY,
+            jd_id           INTEGER NOT NULL REFERENCES job_description(id) ON DELETE CASCADE,
+            category        VARCHAR(20) NOT NULL,
+            question        TEXT NOT NULL,
+            expected_answer TEXT DEFAULT '',
+            key_points      TEXT DEFAULT '',
+            difficulty      VARCHAR(10) DEFAULT 'Medium',
+            created_at      TIMESTAMPTZ DEFAULT NOW(),
+            updated_at      TIMESTAMPTZ DEFAULT NOW()
+        )
+        """
+    )
+
+
+def _migrate_interview_question_labels():
+    """One-time rename to match the category/difficulty labels now used
+    throughout the UI: 'Scenario' -> 'Scenario Based', 'Hard' -> 'High'.
+    Existing questions/answers are relabeled in place, never deleted —
+    every old row keeps its question+answer, just under the new label."""
+    try:
+        with db_conn() as conn:
+            ensure_interview_questions_table(conn)
+            conn.execute("UPDATE interview_questions SET category = 'Scenario Based' WHERE category = 'Scenario'")
+            conn.execute("UPDATE interview_questions SET difficulty = 'High' WHERE difficulty = 'Hard'")
+    except Exception:
+        pass
+
+
+_migrate_interview_question_labels()
+
+
 # ── Requirement Management Routes ────────────────────────────────────────────
 
 @app.route("/requirement-management")
 def requirement_management():
+    if not _require_permission("view_requirement", write=False):
+        abort(403)
+    search_query = (request.args.get("q") or "").strip()
     with db_conn() as conn:
         ensure_requirement_table(conn)
+        ensure_jd_table(conn)
+        conditions, params = [], []
+        if search_query:
+            like = f"%{search_query}%"
+            conditions.append(
+                "(r.requirement_code ILIKE %s OR r.requirement_name ILIKE %s OR r.client ILIKE %s "
+                "OR r.division ILIKE %s OR CAST(r.id AS TEXT) = %s)"
+            )
+            params += [like, like, like, like, search_query]
+        where_sql = ("WHERE " + " AND ".join(conditions)) if conditions else ""
         requirements = conn.execute(
-            "SELECT * FROM requirement ORDER BY created_at DESC"
+            "SELECT r.*, jd.title AS jd_title, u.full_name AS recruiter_name FROM requirement r "
+            "LEFT JOIN job_description jd ON jd.id = r.jd_id "
+            f"LEFT JOIN app_user u ON u.id = r.assigned_recruiter_id {where_sql} "
+            "ORDER BY r.created_at DESC",
+            params,
         ).fetchall()
-    return render_template("requirement_management.html", requirements=list(requirements))
+    return render_template("requirement_management.html", requirements=list(requirements),
+                           search_query=search_query, priority_levels=PRIORITY_LEVELS,
+                           statuses=REQUIREMENT_STATUSES)
+
+
+def _jd_options_for_requirement(conn, current_jd_id=None):
+    """Published JDs only (the spec's "select an existing published JD"),
+    plus the requirement's currently-linked JD even if its status has since
+    moved on — so editing a requirement never silently drops an existing
+    link from the dropdown."""
+    rows = [dict(r) for r in conn.execute(
+        "SELECT id, title, workflow_status FROM job_description "
+        "WHERE workflow_status = 'Published' ORDER BY title"
+    ).fetchall()]
+    if current_jd_id and not any(r["id"] == current_jd_id for r in rows):
+        extra = conn.execute(
+            "SELECT id, title, workflow_status FROM job_description WHERE id = %s", (current_jd_id,)
+        ).fetchone()
+        if extra:
+            rows.append(dict(extra))
+    return rows
+
+
+def _recruiter_options(conn):
+    """Users eligible to be a requirement's Assigned Recruiter."""
+    return [dict(r) for r in conn.execute(
+        "SELECT id, full_name, username FROM app_user "
+        "WHERE role IN ('recruiter', 'hiring_manager') AND is_active ORDER BY full_name"
+    ).fetchall()]
+
+
+def _validate_jd_link(conn, jd_id_raw):
+    """Empty selection is valid (means "no link"). Returns (jd_id_or_None,
+    error_message_or_None) — server-side re-check beyond the dropdown
+    filtering, since a Draft/Rejected JD must never be linkable even if the
+    form is tampered with directly."""
+    jd_id_raw = (jd_id_raw or "").strip()
+    if not jd_id_raw:
+        return None, None
+    try:
+        jd_id = int(jd_id_raw)
+    except ValueError:
+        return None, "Invalid Job Description selection."
+    row = conn.execute("SELECT workflow_status FROM job_description WHERE id = %s", (jd_id,)).fetchone()
+    if not row:
+        return None, "Selected Job Description no longer exists."
+    if row["workflow_status"] in ("Draft", "Rejected"):
+        return None, "A Draft or Rejected JD cannot be linked to a requirement."
+    return jd_id, None
 
 
 @app.route("/requirement/add", methods=["GET", "POST"])
 def requirement_add():
+    if not _require_permission("write_requirement"):
+        abort(403)
     if request.method == "POST":
         data = {k: request.form.get(k, "").strip() for k in
-                ["requirement_code", "requirement_name", "client", "division", "status", "onsite_offshore"]}
+                ["requirement_name", "client", "division", "status", "onsite_offshore", "priority"]}
+        if data["priority"] not in PRIORITY_LEVELS:
+            data["priority"] = "Medium"
         for k in ["num_requirement", "profiles_shared", "interviewed", "offered"]:
             try:
                 data[k] = int(request.form.get(k, "0") or "0")
             except ValueError:
                 data[k] = 0
+        recruiter_raw = request.form.get("assigned_recruiter_id", "").strip()
+        data["assigned_recruiter_id"] = int(recruiter_raw) if recruiter_raw.isdigit() else None
         with db_conn() as conn:
             ensure_requirement_table(conn)
+            ensure_jd_table(conn)
+            jd_id, jd_error = _validate_jd_link(conn, request.form.get("jd_id"))
+            if jd_error:
+                flash(jd_error, "error")
+                return render_template(
+                    "requirement_form.html", requirement=None, statuses=REQUIREMENT_STATUSES,
+                    onsite_offshore_options=ONSITE_OFFSHORE_OPTIONS, priority_levels=PRIORITY_LEVELS,
+                    jd_options=_jd_options_for_requirement(conn), recruiter_options=_recruiter_options(conn),
+                ), 400
+            data["jd_id"] = jd_id
+            # requirement_code is system-generated, not user-entered — insert
+            # with a placeholder, then derive the real code from the row's
+            # own new id (unique by construction, no collision check needed).
             cursor = conn.execute(
                 """
                 INSERT INTO requirement
                     (requirement_code, requirement_name, client, division, num_requirement,
-                     status, profiles_shared, interviewed, offered, onsite_offshore)
+                     status, profiles_shared, interviewed, offered, onsite_offshore, jd_id,
+                     assigned_recruiter_id, priority)
                 VALUES
-                    (%(requirement_code)s, %(requirement_name)s, %(client)s, %(division)s,
+                    ('', %(requirement_name)s, %(client)s, %(division)s,
                      %(num_requirement)s, %(status)s, %(profiles_shared)s, %(interviewed)s, %(offered)s,
-                     %(onsite_offshore)s)
+                     %(onsite_offshore)s, %(jd_id)s, %(assigned_recruiter_id)s, %(priority)s)
                 RETURNING id
                 """,
                 data,
             )
             new_req_id = cursor.fetchone()["id"]
+            new_code = f"REQ-{new_req_id:05d}"
+            conn.execute("UPDATE requirement SET requirement_code = %s WHERE id = %s", (new_code, new_req_id))
         log_audit("Requirements", "Add", record_id=new_req_id, record_label=data["requirement_name"])
-        flash(f"Requirement '{data['requirement_name']}' added.", "success")
+        flash(f"Requirement '{data['requirement_name']}' added as {new_code}.", "success")
         return redirect(url_for("requirement_management"))
+    with db_conn() as conn:
+        ensure_jd_table(conn)
+        jd_options = _jd_options_for_requirement(conn)
+        recruiter_options = _recruiter_options(conn)
     return render_template("requirement_form.html", requirement=None,
-                            statuses=REQUIREMENT_STATUSES, onsite_offshore_options=ONSITE_OFFSHORE_OPTIONS)
+                            statuses=REQUIREMENT_STATUSES, onsite_offshore_options=ONSITE_OFFSHORE_OPTIONS,
+                            jd_options=jd_options, recruiter_options=recruiter_options,
+                            priority_levels=PRIORITY_LEVELS)
 
 
 @app.route("/requirement/<int:req_id>")
 def requirement_detail(req_id):
+    if not _require_permission("view_requirement", write=False):
+        abort(403)
     with db_conn() as conn:
         ensure_requirement_table(conn)
+        ensure_jd_table(conn)
         requirement = conn.execute(
-            "SELECT * FROM requirement WHERE id = %s", (req_id,)
+            "SELECT r.*, jd.title AS jd_title, u.full_name AS recruiter_name FROM requirement r "
+            "LEFT JOIN job_description jd ON jd.id = r.jd_id "
+            "LEFT JOIN app_user u ON u.id = r.assigned_recruiter_id WHERE r.id = %s",
+            (req_id,),
         ).fetchone()
         if not requirement:
             return "Requirement not found", 404
@@ -11210,24 +12572,45 @@ def requirement_detail(req_id):
 
 @app.route("/requirement/<int:req_id>/edit", methods=["GET", "POST"])
 def requirement_edit(req_id):
+    if not _require_permission("write_requirement"):
+        abort(403)
     with db_conn() as conn:
         ensure_requirement_table(conn)
+        ensure_jd_table(conn)
         if request.method == "POST":
             data = {k: request.form.get(k, "").strip() for k in
-                    ["requirement_code", "requirement_name", "client", "division", "status", "onsite_offshore"]}
+                    ["requirement_name", "client", "division", "status", "onsite_offshore", "priority"]}
+            if data["priority"] not in PRIORITY_LEVELS:
+                data["priority"] = "Medium"
             for k in ["num_requirement", "profiles_shared", "interviewed", "offered"]:
                 try:
                     data[k] = int(request.form.get(k, "0") or "0")
                 except ValueError:
                     data[k] = 0
+            recruiter_raw = request.form.get("assigned_recruiter_id", "").strip()
+            data["assigned_recruiter_id"] = int(recruiter_raw) if recruiter_raw.isdigit() else None
+            jd_id, jd_error = _validate_jd_link(conn, request.form.get("jd_id"))
+            if jd_error:
+                flash(jd_error, "error")
+                existing = conn.execute("SELECT * FROM requirement WHERE id = %s", (req_id,)).fetchone()
+                return render_template(
+                    "requirement_form.html", requirement=dict(existing) if existing else None,
+                    statuses=REQUIREMENT_STATUSES, onsite_offshore_options=ONSITE_OFFSHORE_OPTIONS,
+                    jd_options=_jd_options_for_requirement(conn, existing["jd_id"] if existing else None),
+                    recruiter_options=_recruiter_options(conn), priority_levels=PRIORITY_LEVELS,
+                ), 400
+            # requirement_code is intentionally left out of this UPDATE — it's
+            # system-generated once at creation and immutable afterward.
+            data["jd_id"] = jd_id
             data["id"] = req_id
             conn.execute(
                 """
                 UPDATE requirement SET
-                    requirement_code=%(requirement_code)s, requirement_name=%(requirement_name)s,
+                    requirement_name=%(requirement_name)s,
                     client=%(client)s, division=%(division)s, num_requirement=%(num_requirement)s,
                     status=%(status)s, profiles_shared=%(profiles_shared)s,
                     interviewed=%(interviewed)s, offered=%(offered)s, onsite_offshore=%(onsite_offshore)s,
+                    jd_id=%(jd_id)s, assigned_recruiter_id=%(assigned_recruiter_id)s, priority=%(priority)s,
                     updated_at=NOW()
                 WHERE id=%(id)s
                 """,
@@ -11241,12 +12624,18 @@ def requirement_edit(req_id):
         ).fetchone()
         if not requirement:
             return "Requirement not found", 404
+        jd_options = _jd_options_for_requirement(conn, requirement["jd_id"])
+        recruiter_options = _recruiter_options(conn)
     return render_template("requirement_form.html", requirement=dict(requirement),
-                            statuses=REQUIREMENT_STATUSES, onsite_offshore_options=ONSITE_OFFSHORE_OPTIONS)
+                            statuses=REQUIREMENT_STATUSES, onsite_offshore_options=ONSITE_OFFSHORE_OPTIONS,
+                            jd_options=jd_options, recruiter_options=recruiter_options,
+                            priority_levels=PRIORITY_LEVELS)
 
 
 @app.route("/requirement/<int:req_id>/delete", methods=["POST"])
 def requirement_delete(req_id):
+    if not _require_permission("delete_requirement"):
+        abort(403)
     with db_conn() as conn:
         ensure_requirement_table(conn)
         row = conn.execute("SELECT requirement_name FROM requirement WHERE id = %s", (req_id,)).fetchone()
@@ -11258,6 +12647,8 @@ def requirement_delete(req_id):
 
 @app.route("/api/schedule-interview", methods=["POST"])
 def schedule_interview():
+    if not _require_permission("schedule_interview"):
+        abort(403)
     data = request.get_json(silent=True) or {}
     resume_id = data.get("resume_id")
     interviewer = (data.get("interviewer") or "").strip()
@@ -11318,7 +12709,7 @@ def update_interview_schedule(interview_id):
         ensure_interview_schedule_table(conn)
         row = conn.execute(
             """
-            SELECT i.id, r.full_name
+            SELECT i.id, i.interviewer AS current_interviewer, r.full_name
             FROM interview_schedule i
             JOIN resume r ON r.id = i.resume_id
             WHERE i.id = %s
@@ -11327,6 +12718,15 @@ def update_interview_schedule(interview_id):
         ).fetchone()
         if not row:
             return jsonify({"ok": False, "error": "Interview not found"}), 404
+
+        # "Assigned Only" per the RBAC matrix: an Interviewer may update only
+        # interviews currently assigned to them (best-effort name match, see
+        # _is_my_assigned_interview) — every other role needs the standard
+        # "full" permission level.
+        if not _require_permission("update_interview_status"):
+            if session.get("role") != "interviewer" or not _is_my_assigned_interview(row["current_interviewer"]):
+                abort(403)
+
         conn.execute(
             """
             UPDATE interview_schedule
@@ -11602,7 +13002,7 @@ def _audit_trail_query(args):
 
 @app.route("/audit-trail")
 def audit_trail():
-    if not _require_admin():
+    if not _require_permission("view_audit_trail", write=False):
         abort(403)
 
     page = max(1, int(request.args.get("page", 1) or 1))
@@ -11635,7 +13035,7 @@ def audit_trail():
 
 @app.route("/audit-trail/export.csv")
 def audit_trail_export_csv():
-    if not _require_admin():
+    if not _require_permission("export_audit_trail"):
         abort(403)
     import csv as _csv
 
@@ -11668,8 +13068,164 @@ def audit_trail_export_csv():
 
 # ── User Management & Authentication (new feature — additive only) ──────────
 
-USER_ROLES = ["admin", "user"]
+# 5-role RBAC per the client-supplied permission matrix (2026-08-13). Existing
+# accounts are deliberately NOT auto-migrated onto these — a legacy `role`
+# value (e.g. the old 'user') simply isn't a key in ROLE_PERMISSIONS below, so
+# _permission_level() safely falls back to "none" for every gated feature
+# until an admin explicitly reassigns that account via User Management. See
+# user_management.html's "Needs Role Assignment" flag.
+USER_ROLES = ["admin", "recruiter", "hiring_manager", "interviewer", "viewer_auditor"]
+ROLE_LABELS = {
+    "admin": "Admin",
+    "recruiter": "Recruiter",
+    "hiring_manager": "Hiring Manager",
+    "interviewer": "Interviewer",
+    "viewer_auditor": "Viewer / Auditor",
+}
 _DEFAULT_ADMIN_PASSWORD = "Admin@123"
+
+# Permission matrix — one dict per feature, each mapping role -> "full" (view
+# + write) | "view" (read-only, write controls hidden/blocked) | "none" (no
+# access, route 403s). Built directly from the client's RBAC spreadsheet.
+# Interviewer's "Assigned Only" case (update_interview_status) isn't a static
+# level — it depends on the specific record — so it's handled separately, see
+# _is_my_assigned_interview.
+ROLE_PERMISSIONS = {
+    "view_dashboard": {
+        "admin": "full", "recruiter": "full", "hiring_manager": "full",
+        "interviewer": "full", "viewer_auditor": "full",
+    },
+    "view_candidate": {
+        "admin": "full", "recruiter": "full", "hiring_manager": "full",
+        "interviewer": "full", "viewer_auditor": "view",
+    },
+    "schedule_interview": {
+        "admin": "full", "recruiter": "full", "hiring_manager": "full",
+        "interviewer": "none", "viewer_auditor": "none",
+    },
+    "update_interview_status": {
+        "admin": "full", "recruiter": "full", "hiring_manager": "full",
+        "interviewer": "none", "viewer_auditor": "none",  # interviewer's real access is "assigned" — see _is_my_assigned_interview
+    },
+    "view_jd": {
+        "admin": "full", "recruiter": "full", "hiring_manager": "full",
+        "interviewer": "full", "viewer_auditor": "view",
+    },
+    "write_jd": {  # Add + Edit JD
+        "admin": "full", "recruiter": "full", "hiring_manager": "full",
+        "interviewer": "none", "viewer_auditor": "none",
+    },
+    "delete_jd": {
+        "admin": "full", "recruiter": "none", "hiring_manager": "full",
+        "interviewer": "none", "viewer_auditor": "none",
+    },
+    # Not a row in the client's spreadsheet — added for the JD approval
+    # workflow (2026-08-13): Approve/Reject/Request Changes/Publish/Rollback
+    # a JD. Single-level approval, role-based (no per-JD approver
+    # assignment) — any Hiring Manager or Admin can act on any JD pending
+    # approval, mirroring delete_jd's existing admin+hiring_manager pairing.
+    "approve_jd": {
+        "admin": "full", "recruiter": "none", "hiring_manager": "full",
+        "interviewer": "none", "viewer_auditor": "none",
+    },
+    "view_requirement": {
+        "admin": "full", "recruiter": "full", "hiring_manager": "full",
+        "interviewer": "full", "viewer_auditor": "view",
+    },
+    "write_requirement": {  # Add + Edit Requirement
+        "admin": "full", "recruiter": "full", "hiring_manager": "full",
+        "interviewer": "none", "viewer_auditor": "none",
+    },
+    "delete_requirement": {
+        "admin": "full", "recruiter": "none", "hiring_manager": "full",
+        "interviewer": "none", "viewer_auditor": "none",
+    },
+    "view_users": {
+        "admin": "full", "recruiter": "none", "hiring_manager": "none",
+        "interviewer": "none", "viewer_auditor": "none",
+    },
+    "write_users": {  # Add + Edit + Delete User
+        "admin": "full", "recruiter": "none", "hiring_manager": "none",
+        "interviewer": "none", "viewer_auditor": "none",
+    },
+    "view_audit_trail": {
+        "admin": "full", "recruiter": "view", "hiring_manager": "view",
+        "interviewer": "view", "viewer_auditor": "view",
+    },
+    "export_audit_trail": {
+        "admin": "full", "recruiter": "full", "hiring_manager": "full",
+        "interviewer": "none", "viewer_auditor": "none",
+    },
+    "view_profiles": {
+        "admin": "full", "recruiter": "full", "hiring_manager": "full",
+        "interviewer": "full", "viewer_auditor": "view",
+    },
+    "write_profile": {  # upload/edit/save/bulk-upload
+        "admin": "full", "recruiter": "full", "hiring_manager": "full",
+        "interviewer": "none", "viewer_auditor": "none",
+    },
+    "delete_profile": {
+        "admin": "full", "recruiter": "full", "hiring_manager": "full",
+        "interviewer": "none", "viewer_auditor": "none",
+    },
+    "download_resume": {
+        "admin": "full", "recruiter": "full", "hiring_manager": "full",
+        "interviewer": "full", "viewer_auditor": "view",
+    },
+    "view_add_profile": {
+        "admin": "full", "recruiter": "full", "hiring_manager": "full",
+        "interviewer": "none", "viewer_auditor": "none",
+    },
+    # Not a row in the client's spreadsheet — added per explicit follow-up
+    # request (2026-08-14): Interviewer and Viewer/Auditor should not see or
+    # use Compare Resume. Same access pattern as write_profile/schedule_interview.
+    "compare_resume": {
+        "admin": "full", "recruiter": "full", "hiring_manager": "full",
+        "interviewer": "none", "viewer_auditor": "none",
+    },
+}
+
+
+def _permission_level(key):
+    return ROLE_PERMISSIONS.get(key, {}).get(session.get("role"), "none")
+
+
+def _require_permission(key, write=True):
+    """One inline `if not _require_permission(...): abort(403)` call at the
+    top of a view function, same convention every route in this app uses.
+    write=True requires "full" (a write/mutating action); write=False
+    accepts "full" or "view" (read-only access to the page)."""
+    level = _permission_level(key)
+    if write:
+        return level == "full"
+    return level in ("full", "view")
+
+
+def _is_my_assigned_interview(interviewer_field):
+    """Interviewer's "Assigned Only" access to update_interview_status:
+    interview_schedule.interviewer is free text (no FK to app_user exists),
+    so this is a best-effort name match against the logged-in user's
+    full_name — not a guaranteed identity link, since the field was never
+    designed as one.
+
+    Found live (2026-08-14): an interviewer's own account full_name ("Kumar")
+    didn't exact-match the fuller name typed when the interview was
+    scheduled ("Satheesh Kumar") — same person, different name format,
+    correctly assigned to them, but incorrectly blocked. Fixed with a
+    word-subset match: one side's words must be fully contained in the
+    other's (not just any shared word), so "Kumar" ⊆ {"Satheesh","Kumar"}
+    matches, but "Kumar Patel" vs "Kumar Singh" — a real, different-person
+    collision — correctly does not (neither word set is a subset of the
+    other).
+    """
+    me = (session.get("full_name") or "").strip().lower()
+    them = (interviewer_field or "").strip().lower()
+    if not me or not them:
+        return False
+    if me == them:
+        return True
+    me_words, them_words = set(me.split()), set(them.split())
+    return me_words <= them_words or them_words <= me_words
 
 
 def ensure_users_table(conn):
@@ -11699,12 +13255,227 @@ def ensure_users_table(conn):
         )
 
 
+def _ensure_password_changed_at_col():
+    """Bumped only on an actual password change (self-service reset or an
+    admin editing a user's password) — never by unrelated profile edits.
+    Snapshotted into the session at login and compared on every request by
+    _require_login(); a mismatch means the password changed since this
+    session's cookie was issued, so the old session is invalidated. This is
+    the only way to achieve "log out other sessions" without a server-side
+    session store — this app's sessions are Flask's default stateless
+    signed cookies, there is no session table to delete rows from."""
+    try:
+        with db_conn() as conn:
+            conn.execute(
+                "ALTER TABLE app_user ADD COLUMN IF NOT EXISTS "
+                "password_changed_at TIMESTAMPTZ DEFAULT NOW()"
+            )
+    except Exception:
+        pass
+
+
+_ensure_password_changed_at_col()
+
+
+def _ensure_last_login_col():
+    """NULL = never logged in. Stamped by login() and by
+    change_expired_password() (which also ends in an authenticated session,
+    just via the forced-password-change detour)."""
+    try:
+        with db_conn() as conn:
+            conn.execute(
+                "ALTER TABLE app_user ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ"
+            )
+    except Exception:
+        pass
+
+
+_ensure_last_login_col()
+
+
+def ensure_user_role_history_table(conn):
+    """One row per role assignment/change for a user — the initial role at
+    creation (old_role NULL) plus every subsequent change via user_edit().
+    Never updated or deleted, so this is a append-only history."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_role_history (
+            id          SERIAL PRIMARY KEY,
+            user_id     INTEGER NOT NULL REFERENCES app_user(id) ON DELETE CASCADE,
+            old_role    TEXT,
+            new_role    TEXT NOT NULL,
+            changed_by  INTEGER REFERENCES app_user(id),
+            changed_at  TIMESTAMPTZ DEFAULT NOW()
+        )
+        """
+    )
+
+
+def _ensure_account_lockout_cols():
+    """failed_login_attempts: consecutive count, reset to 0 by any
+    successful login. locked_at: NULL = not locked; a timestamp = locked
+    (and when) — no auto-expiry, only user_unlock() (Admin-only) clears it."""
+    try:
+        with db_conn() as conn:
+            conn.execute(
+                "ALTER TABLE app_user ADD COLUMN IF NOT EXISTS "
+                "failed_login_attempts INTEGER DEFAULT 0"
+            )
+            conn.execute("ALTER TABLE app_user ADD COLUMN IF NOT EXISTS locked_at TIMESTAMPTZ")
+    except Exception:
+        pass
+
+
+_ensure_account_lockout_cols()
+
+
+def ensure_password_reset_table(conn):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS password_reset_token (
+            id          SERIAL PRIMARY KEY,
+            user_id     INTEGER NOT NULL REFERENCES app_user(id) ON DELETE CASCADE,
+            token_hash  TEXT NOT NULL UNIQUE,
+            created_at  TIMESTAMPTZ DEFAULT NOW(),
+            expires_at  TIMESTAMPTZ NOT NULL,
+            used_at     TIMESTAMPTZ
+        )
+        """
+    )
+
+
+def ensure_password_history_table(conn):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS password_history (
+            id            SERIAL PRIMARY KEY,
+            user_id       INTEGER NOT NULL REFERENCES app_user(id) ON DELETE CASCADE,
+            password_hash TEXT NOT NULL,
+            created_at    TIMESTAMPTZ DEFAULT NOW()
+        )
+        """
+    )
+
+
+def _generate_reset_token():
+    """Returns (raw_token, token_hash). Only token_hash is ever persisted —
+    the raw token exists solely in the emailed link and the user's browser,
+    mirroring how a password itself is never stored in plain form."""
+    raw = secrets.token_urlsafe(32)
+    return raw, hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _validate_password_complexity(password):
+    if len(password) < PASSWORD_MIN_LENGTH:
+        return False, f"Password must be at least {PASSWORD_MIN_LENGTH} characters long."
+    if not re.search(r"[a-z]", password):
+        return False, "Password must contain at least one lowercase letter."
+    if not re.search(r"[A-Z]", password):
+        return False, "Password must contain at least one uppercase letter."
+    if not re.search(r"\d", password):
+        return False, "Password must contain at least one number."
+    if not re.search(r"[^A-Za-z0-9]", password):
+        return False, "Password must contain at least one special character."
+    return True, ""
+
+
+# Deliberately a simple "looks like an email" shape check (local@domain.tld),
+# not a full RFC 5322 validator — good enough to catch typos/garbage without
+# rejecting real-world addresses a stricter regex might choke on.
+_EMAIL_FORMAT_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _validate_email_format(email):
+    return bool(_EMAIL_FORMAT_RE.match(email))
+
+
+def _password_reused(conn, user_id, new_password, current_hash):
+    """True if new_password matches the current password or any of the last
+    PASSWORD_HISTORY_COUNT historical ones for this user."""
+    if current_hash and check_password_hash(current_hash, new_password):
+        return True
+    ensure_password_history_table(conn)
+    rows = conn.execute(
+        "SELECT password_hash FROM password_history WHERE user_id = %s "
+        "ORDER BY created_at DESC LIMIT %s",
+        (user_id, PASSWORD_HISTORY_COUNT),
+    ).fetchall()
+    return any(check_password_hash(row["password_hash"], new_password) for row in rows)
+
+
+def _record_password_change(conn, user_id, old_hash):
+    """Call this BEFORE overwriting app_user.password_hash with the new one
+    — archives the outgoing hash for future reuse checks, prunes to the
+    newest PASSWORD_HISTORY_COUNT, and bumps password_changed_at so every
+    other outstanding session for this user is invalidated on its next
+    request (see _ensure_password_changed_at_col)."""
+    ensure_password_history_table(conn)
+    if old_hash:
+        conn.execute(
+            "INSERT INTO password_history (user_id, password_hash) VALUES (%s, %s)",
+            (user_id, old_hash),
+        )
+    conn.execute(
+        """
+        DELETE FROM password_history WHERE id IN (
+            SELECT id FROM password_history WHERE user_id = %s
+            ORDER BY created_at DESC OFFSET %s
+        )
+        """,
+        (user_id, PASSWORD_HISTORY_COUNT),
+    )
+    conn.execute("UPDATE app_user SET password_changed_at = NOW() WHERE id = %s", (user_id,))
+
+
+def _send_email(to_addr, subject, body):
+    """Stdlib-only (no new dependency). If SMTP_HOST is unset (the default
+    — this app has no mail relay configured anywhere), logs the message
+    instead of attempting a real send, so this feature is fully testable
+    without real SMTP credentials. Never raises — a failed/unsent email
+    must not break the password-reset flow itself; the reset link/new
+    password already took effect regardless of whether the notification
+    email made it out.
+    """
+    if not to_addr:
+        logger.warning(f"_send_email: no recipient address, skipping. subject={subject!r}")
+        return
+    if not SMTP_HOST:
+        logger.info(f"[DEV MODE — no SMTP_HOST configured] Email to {to_addr}: {subject}\n{body}")
+        return
+    try:
+        msg = MIMEText(body)
+        msg["Subject"] = subject
+        msg["From"] = SMTP_FROM_EMAIL
+        msg["To"] = to_addr
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as server:
+            if SMTP_USE_TLS:
+                server.starttls()
+            if SMTP_USERNAME:
+                server.login(SMTP_USERNAME, SMTP_PASSWORD)
+            server.sendmail(SMTP_FROM_EMAIL, [to_addr], msg.as_string())
+        logger.info(f"Email sent via {SMTP_HOST} to {to_addr}: {subject!r}")
+    except Exception as e:
+        logger.warning(f"_send_email failed to {to_addr}: {e}", exc_info=True)
+
+
 @app.context_processor
 def _inject_auth_context():
     return {
         "current_username": session.get("username"),
         "current_full_name": session.get("full_name"),
         "current_role": session.get("role"),
+        "current_user_id": session.get("user_id"),
+        "role_labels": ROLE_LABELS,
+        # Single source of truth shared with the backend's own gating
+        # (_require_permission) — templates hide a button with the exact
+        # same permission check the route itself enforces, so there's no
+        # separate/divergent notion of "can this role do X" in the UI layer.
+        "can_view": lambda key: _permission_level(key) in ("full", "view"),
+        "can_write": lambda key: _permission_level(key) == "full",
+        # Same word-subset name match _require_permission's assigned-only
+        # branch uses server-side — exposed here so templates never
+        # reimplement (and potentially diverge from) this matching logic.
+        "is_my_assigned_interview": _is_my_assigned_interview,
         # Consumed by base.html's inline bootstrap for static/session-timeout.js
         # — kept in one place (this processor) so every page agrees on the
         # configured duration without each template hardcoding it.
@@ -11713,7 +13484,7 @@ def _inject_auth_context():
     }
 
 
-_LOGIN_EXEMPT_ENDPOINTS = {"login", "static"}
+_LOGIN_EXEMPT_ENDPOINTS = {"login", "static", "forgot_password", "reset_password", "change_expired_password"}
 
 
 @app.before_request
@@ -11748,12 +13519,31 @@ def _require_login():
             flash("Your session has expired due to inactivity. Please log in again.", "error")
             return redirect(url_for("login", next=request.path))
 
+    # Password-change session invalidation: this app's sessions are
+    # stateless signed cookies (no server-side session store/table), so
+    # "log out all other sessions after a password reset" is implemented by
+    # snapshotting app_user.password_changed_at into the session at login
+    # and comparing it here on every request. A mismatch means the password
+    # changed (self-service reset or an admin edit) since this cookie was
+    # issued, so it's invalidated exactly like the inactivity-timeout branch
+    # above. One extra indexed lookup per authenticated request — this
+    # before_request hook made zero DB calls previously.
+    stored_pca = session.get("password_changed_at")
+    if stored_pca:
+        with db_conn() as conn:
+            row = conn.execute(
+                "SELECT password_changed_at FROM app_user WHERE id = %s", (session["user_id"],)
+            ).fetchone()
+        current_pca = row["password_changed_at"].isoformat() if row and row["password_changed_at"] else None
+        if current_pca and current_pca != stored_pca:
+            log_audit("Auth", "Session Invalidated", status="Success",
+                      details="password changed since this session was issued")
+            session.clear()
+            flash("Your password was changed. Please log in again.", "error")
+            return redirect(url_for("login", next=request.path))
+
     session["last_active"] = now.isoformat()
     return None
-
-
-def _require_admin():
-    return session.get("role") == "admin"
 
 
 @app.route("/api/session/keepalive")
@@ -11777,14 +13567,106 @@ def login():
             row = conn.execute(
                 "SELECT * FROM app_user WHERE LOWER(username) = LOWER(%s)", (username,)
             ).fetchone()
+        # A locked account is rejected unconditionally — checked BEFORE the
+        # password comparison, so even the correct password never succeeds
+        # while locked_at is set. No auto-expiry; only user_unlock() (Admin
+        # -only, User Management) clears this. Admin accounts are exempt
+        # (see the failure-tracking block below for why) — this check also
+        # covers the edge case of an admin account somehow already carrying
+        # a locked_at value (e.g. from before this exemption existed).
+        if row and row["locked_at"] and row["role"] != "admin":
+            log_audit("Auth", "Login", record_label=row["username"], status="Failure",
+                      details="Account locked")
+            flash("Your account has been locked due to too many failed login attempts. "
+                  "Please contact your administrator to unlock it.", "error")
+            return render_template("login.html", next=request.form.get("next", ""))
+
         if row and row["is_active"] and check_password_hash(row["password_hash"], password):
+            with db_conn() as conn:
+                conn.execute(
+                    "UPDATE app_user SET failed_login_attempts = 0, last_login_at = NOW() WHERE id = %s",
+                    (row["id"],),
+                )
+            # Credentials are correct, but a password older than
+            # PASSWORD_MAX_AGE_DAYS blocks normal login — only a temporary
+            # marker is set (not the real session), so _require_login() still
+            # treats this user as logged out everywhere except the mandatory
+            # change-password screen (see change_expired_password() and its
+            # entry in _LOGIN_EXEMPT_ENDPOINTS).
+            if PASSWORD_MAX_AGE_DAYS and row["password_changed_at"]:
+                age_days = (datetime.now(timezone.utc) - row["password_changed_at"]).days
+                if age_days >= PASSWORD_MAX_AGE_DAYS:
+                    session["pending_password_change_user_id"] = row["id"]
+                    log_audit("Auth", "Login", record_label=row["username"], status="Failure",
+                              details=f"Password expired ({age_days} days old) — must be changed")
+                    flash("Your password has expired and must be changed before you can continue.", "error")
+                    return redirect(url_for("change_expired_password"))
             session["user_id"] = row["id"]
             session["username"] = row["username"]
             session["full_name"] = row["full_name"]
             session["role"] = row["role"]
             session["last_active"] = datetime.now(timezone.utc).isoformat()
+            session["password_changed_at"] = (
+                row["password_changed_at"].isoformat() if row["password_changed_at"] else None
+            )
             log_audit("Auth", "Login", record_label=row["username"], status="Success")
             return redirect(request.form.get("next") or url_for("dashboard"))
+
+        if row:
+            # A real account, wrong password (or disabled) — track the
+            # consecutive-failure count and lock once it hits the
+            # configured threshold. A nonexistent username (the `else`
+            # implied by `not row`) never reaches here, so it never gets an
+            # attempts-remaining counter — nothing to attach a count to,
+            # and it avoids adding a *second* signal beyond the generic
+            # message for a username that doesn't exist.
+            #
+            # Admin accounts are exempt from ever being LOCKED (found live
+            # 2026-08-14: the only admin account got itself locked out,
+            # which meant no one was left who could unlock it — a
+            # self-inflicted total-lockout risk this app can't recover
+            # from without direct DB access). The failure count is still
+            # tracked for audit visibility, it just never flips locked_at.
+            is_admin_account = row["role"] == "admin"
+            with db_conn() as conn:
+                new_count = conn.execute(
+                    "UPDATE app_user SET failed_login_attempts = failed_login_attempts + 1 "
+                    "WHERE id = %s RETURNING failed_login_attempts",
+                    (row["id"],),
+                ).fetchone()["failed_login_attempts"]
+                if new_count >= MAX_FAILED_LOGIN_ATTEMPTS and not is_admin_account:
+                    conn.execute("UPDATE app_user SET locked_at = NOW() WHERE id = %s", (row["id"],))
+            if new_count >= MAX_FAILED_LOGIN_ATTEMPTS and not is_admin_account:
+                _send_email(
+                    row["email"],
+                    "Your account has been locked — Resume Profile",
+                    f"Hello {row['full_name'] or row['username']},\n\n"
+                    f"Your account was locked after {new_count} consecutive failed login attempts. "
+                    "Please contact your administrator to unlock it.\n\n"
+                    "If this wasn't you, your administrator should also verify no one else is "
+                    "trying to access your account.",
+                )
+                log_audit("Auth", "Login", record_label=row["username"], status="Failure",
+                          details=f"Account locked after {new_count} failed attempts")
+                flash("Your account has been locked due to too many failed login attempts. "
+                      "Please contact your administrator to unlock it.", "error")
+                return render_template("login.html", next=request.form.get("next", ""))
+            if is_admin_account:
+                # No attempts-remaining/lock-threat messaging for admin — it
+                # would be misleading since this account can never actually
+                # lock. Still logged for audit so unusually high failure
+                # counts on an admin account remain visible/investigable.
+                log_audit("Auth", "Login", record_label=row["username"], status="Failure",
+                          details=f"Failed attempt {new_count} (admin — exempt from lockout)")
+                flash("Invalid username or password.", "error")
+                return render_template("login.html", next=request.form.get("next", ""))
+            remaining = MAX_FAILED_LOGIN_ATTEMPTS - new_count
+            log_audit("Auth", "Login", record_label=row["username"], status="Failure",
+                      details=f"Failed attempt {new_count}/{MAX_FAILED_LOGIN_ATTEMPTS}")
+            flash(f"Invalid username or password. {remaining} attempt(s) remaining "
+                  "before your account is locked.", "error")
+            return render_template("login.html", next=request.form.get("next", ""))
+
         log_audit("Auth", "Login", record_label=username, status="Failure",
                   details="Invalid username or password")
         flash("Invalid username or password.", "error")
@@ -11807,11 +13689,210 @@ def logout():
     return redirect(url_for("login"))
 
 
+@app.route("/forgot-password", methods=["GET", "POST"])
+def forgot_password():
+    if request.method == "POST":
+        email = request.form.get("email", "").strip()
+        # Same confirmation message regardless of whether the email is
+        # registered — avoids leaking which addresses have accounts. This
+        # still satisfies "an unregistered email cannot be used to reset a
+        # password": nothing is created/sent unless a real, active account
+        # matches, only the user-facing wording doesn't reveal which case
+        # occurred.
+        generic_message = (
+            "If that email is registered, we've sent a password reset link to it. "
+            "The link is valid for %d minutes." % PASSWORD_RESET_TOKEN_MINUTES
+        )
+        if email:
+            with db_conn() as conn:
+                ensure_users_table(conn)
+                ensure_password_reset_table(conn)
+                user = conn.execute(
+                    "SELECT * FROM app_user WHERE LOWER(email) = LOWER(%s) AND is_active = TRUE",
+                    (email,),
+                ).fetchone()
+                if user:
+                    # Only the latest requested link should ever work —
+                    # invalidate any earlier unused ones for this user first.
+                    conn.execute(
+                        "UPDATE password_reset_token SET used_at = NOW() "
+                        "WHERE user_id = %s AND used_at IS NULL",
+                        (user["id"],),
+                    )
+                    raw_token, token_hash = _generate_reset_token()
+                    expires_at = datetime.now(timezone.utc) + timedelta(minutes=PASSWORD_RESET_TOKEN_MINUTES)
+                    conn.execute(
+                        "INSERT INTO password_reset_token (user_id, token_hash, expires_at) "
+                        "VALUES (%s, %s, %s)",
+                        (user["id"], token_hash, expires_at),
+                    )
+                    reset_link = url_for("reset_password", token=raw_token, _external=True)
+                    _send_email(
+                        user["email"],
+                        "Password Reset Request — Resume Profile",
+                        f"Hello {user['full_name'] or user['username']},\n\n"
+                        f"A password reset was requested for your account. Click the link below "
+                        f"to set a new password. This link is valid for {PASSWORD_RESET_TOKEN_MINUTES} "
+                        f"minutes and can only be used once.\n\n{reset_link}\n\n"
+                        "If you didn't request this, you can safely ignore this email.",
+                    )
+                    log_audit("Auth", "Forgot Password Requested", record_label=user["username"],
+                              status="Success")
+                else:
+                    log_audit("Auth", "Forgot Password Requested", record_label=email,
+                              status="Failure", details="No matching active account")
+        flash(generic_message, "success")
+        return redirect(url_for("login"))
+    return render_template("forgot_password.html")
+
+
+@app.route("/reset-password/<token>", methods=["GET", "POST"])
+def reset_password(token):
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    with db_conn() as conn:
+        ensure_password_reset_table(conn)
+        token_row = conn.execute(
+            "SELECT * FROM password_reset_token WHERE token_hash = %s", (token_hash,)
+        ).fetchone()
+
+    error = None
+    if not token_row:
+        error = "This password reset link is invalid."
+    elif token_row["used_at"]:
+        error = "This password reset link has already been used. Please request a new one."
+    elif token_row["expires_at"] < datetime.now(timezone.utc):
+        error = "This password reset link has expired. Please request a new one."
+
+    if error:
+        return render_template("reset_password.html", error=error)
+
+    if request.method == "POST":
+        new_password = request.form.get("new_password", "")
+        confirm_password = request.form.get("confirm_password", "")
+        if new_password != confirm_password:
+            flash("New password and confirmation do not match.", "error")
+            return render_template("reset_password.html", error=None)
+
+        ok, complexity_error = _validate_password_complexity(new_password)
+        if not ok:
+            flash(complexity_error, "error")
+            return render_template("reset_password.html", error=None)
+
+        with db_conn() as conn:
+            ensure_password_reset_table(conn)
+            # Re-fetch and re-validate — defends against a race between the
+            # GET that rendered this form and this POST (e.g. the same link
+            # opened twice, or it expiring/getting used in between).
+            token_row = conn.execute(
+                "SELECT * FROM password_reset_token WHERE token_hash = %s", (token_hash,)
+            ).fetchone()
+            if not token_row or token_row["used_at"] or token_row["expires_at"] < datetime.now(timezone.utc):
+                flash("This password reset link is no longer valid. Please request a new one.", "error")
+                return redirect(url_for("forgot_password"))
+
+            user = conn.execute(
+                "SELECT * FROM app_user WHERE id = %s", (token_row["user_id"],)
+            ).fetchone()
+            if not user:
+                flash("Account not found.", "error")
+                return redirect(url_for("forgot_password"))
+
+            if _password_reused(conn, user["id"], new_password, user["password_hash"]):
+                flash(f"You cannot reuse any of your last {PASSWORD_HISTORY_COUNT} passwords.", "error")
+                return render_template("reset_password.html", error=None)
+
+            _record_password_change(conn, user["id"], user["password_hash"])
+            conn.execute(
+                "UPDATE app_user SET password_hash = %s, updated_at = NOW() WHERE id = %s",
+                (generate_password_hash(new_password), user["id"]),
+            )
+            conn.execute(
+                "UPDATE password_reset_token SET used_at = NOW() WHERE id = %s", (token_row["id"],)
+            )
+
+        _send_email(
+            user["email"],
+            "Your password was changed — Resume Profile",
+            f"Hello {user['full_name'] or user['username']},\n\n"
+            "This is a confirmation that your password was just changed. If you did not make "
+            "this change, contact your administrator immediately.\n\n"
+            "You have been logged out of all other sessions and must log in again with your new password.",
+        )
+        log_audit("Auth", "Password Reset", record_label=user["username"], status="Success")
+        flash("Your password has been reset. Please log in with your new password.", "success")
+        return redirect(url_for("login"))
+
+    return render_template("reset_password.html", error=None)
+
+
+@app.route("/change-expired-password", methods=["GET", "POST"])
+def change_expired_password():
+    """Reached only via login()'s expiry redirect, which sets
+    session['pending_password_change_user_id'] instead of establishing a
+    real session — so _require_login() still blocks every other page for
+    this user until they set a new password here. Reuses the exact same
+    complexity/reuse/history calls reset_password() and user_edit() already
+    use, just with a different entry point (a temporary marker instead of a
+    one-time emailed token, since the user already proved their identity
+    with their current password moments ago)."""
+    user_id = session.get("pending_password_change_user_id")
+    if not user_id:
+        return redirect(url_for("login"))
+    with db_conn() as conn:
+        user = conn.execute("SELECT * FROM app_user WHERE id = %s", (user_id,)).fetchone()
+    if not user:
+        session.pop("pending_password_change_user_id", None)
+        return redirect(url_for("login"))
+
+    if request.method == "POST":
+        new_password = request.form.get("new_password", "")
+        confirm_password = request.form.get("confirm_password", "")
+        if new_password != confirm_password:
+            flash("New password and confirmation do not match.", "error")
+            return render_template("change_expired_password.html")
+
+        ok, complexity_error = _validate_password_complexity(new_password)
+        if not ok:
+            flash(complexity_error, "error")
+            return render_template("change_expired_password.html")
+
+        with db_conn() as conn:
+            if _password_reused(conn, user["id"], new_password, user["password_hash"]):
+                flash(f"You cannot reuse any of your last {PASSWORD_HISTORY_COUNT} passwords.", "error")
+                return render_template("change_expired_password.html")
+            _record_password_change(conn, user["id"], user["password_hash"])
+            conn.execute(
+                "UPDATE app_user SET password_hash = %s, updated_at = NOW(), last_login_at = NOW() WHERE id = %s",
+                (generate_password_hash(new_password), user["id"]),
+            )
+            # Re-fetch rather than stamping a Python-side timestamp — this
+            # must match the DB's stored value exactly, since _require_login()
+            # compares this snapshot against a fresh DB read on every request.
+            updated_user = conn.execute(
+                "SELECT password_changed_at FROM app_user WHERE id = %s", (user["id"],)
+            ).fetchone()
+
+        session.pop("pending_password_change_user_id", None)
+        session["user_id"] = user["id"]
+        session["username"] = user["username"]
+        session["full_name"] = user["full_name"]
+        session["role"] = user["role"]
+        session["last_active"] = datetime.now(timezone.utc).isoformat()
+        session["password_changed_at"] = (
+            updated_user["password_changed_at"].isoformat() if updated_user["password_changed_at"] else None
+        )
+        log_audit("Auth", "Password Changed (Expired)", record_label=user["username"], status="Success")
+        flash("Your password has been changed.", "success")
+        return redirect(url_for("dashboard"))
+
+    return render_template("change_expired_password.html")
+
+
 # ── User Management routes (admin only) ──────────────────────────────────────
 
 @app.route("/users")
 def user_management():
-    if not _require_admin():
+    if not _require_permission("view_users", write=False):
         abort(403)
     with db_conn() as conn:
         ensure_users_table(conn)
@@ -11820,18 +13901,32 @@ def user_management():
 
 @app.route("/users/add", methods=["GET", "POST"])
 def user_add():
-    if not _require_admin():
+    if not _require_permission("write_users"):
         abort(403)
     if request.method == "POST":
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "")
         full_name = request.form.get("full_name", "").strip()
         email = request.form.get("email", "").strip()
-        role = request.form.get("role", "user")
+        role = request.form.get("role", "viewer_auditor")
         if role not in USER_ROLES:
-            role = "user"
+            role = "viewer_auditor"
         if not username or not password:
             flash("Username and password are required.", "error")
+            return render_template("user_form.html", user=None, roles=USER_ROLES)
+        # Email itself stays optional (unchanged) — but if one is entered, it
+        # must at least look like a real address.
+        if email and not _validate_email_format(email):
+            flash("Please enter a valid email address.", "error")
+            return render_template("user_form.html", user=None, roles=USER_ROLES)
+        # Same complexity policy the self-service reset flow enforces (see
+        # _validate_password_complexity) — introduced alongside password
+        # reset since no policy existed anywhere before; applying it only to
+        # self-service reset would let an admin-created password be weaker
+        # than a self-reset one.
+        ok, complexity_error = _validate_password_complexity(password)
+        if not ok:
+            flash(complexity_error, "error")
             return render_template("user_form.html", user=None, roles=USER_ROLES)
         with db_conn() as conn:
             ensure_users_table(conn)
@@ -11841,6 +13936,13 @@ def user_add():
             if existing:
                 flash(f"Username '{username}' is already taken.", "error")
                 return render_template("user_form.html", user=None, roles=USER_ROLES)
+            if email:
+                existing_email = conn.execute(
+                    "SELECT id FROM app_user WHERE LOWER(email) = LOWER(%s)", (email,)
+                ).fetchone()
+                if existing_email:
+                    flash(f"Email '{email}' is already in use by another account.", "error")
+                    return render_template("user_form.html", user=None, roles=USER_ROLES)
             cursor = conn.execute(
                 """
                 INSERT INTO app_user (username, password_hash, full_name, email, role)
@@ -11850,6 +13952,15 @@ def user_add():
                 (username, generate_password_hash(password), full_name, email, role),
             )
             new_user_id = cursor.fetchone()["id"]
+            # Initial role assignment — old_role NULL marks this as account
+            # creation rather than a later change, so history is complete
+            # from the start, not just from the first edit onward.
+            ensure_user_role_history_table(conn)
+            conn.execute(
+                "INSERT INTO user_role_history (user_id, old_role, new_role, changed_by) "
+                "VALUES (%s, NULL, %s, %s)",
+                (new_user_id, role, session.get("user_id")),
+            )
         log_audit("User Management", "Add", record_id=new_user_id, record_label=username)
         flash(f"User '{username}' added.", "success")
         return redirect(url_for("user_management"))
@@ -11858,19 +13969,51 @@ def user_add():
 
 @app.route("/users/<int:user_id>/edit", methods=["GET", "POST"])
 def user_edit(user_id):
-    if not _require_admin():
+    if not _require_permission("write_users"):
         abort(403)
     with db_conn() as conn:
         ensure_users_table(conn)
         if request.method == "POST":
             full_name = request.form.get("full_name", "").strip()
             email = request.form.get("email", "").strip()
-            role = request.form.get("role", "user")
+            role = request.form.get("role", "viewer_auditor")
             if role not in USER_ROLES:
-                role = "user"
+                role = "viewer_auditor"
+            # Captured before the UPDATE below overwrites it — compared after
+            # the save succeeds to decide whether a role-history row is needed.
+            existing_role_row = conn.execute("SELECT role FROM app_user WHERE id = %s", (user_id,)).fetchone()
+            old_role = existing_role_row["role"] if existing_role_row else None
+            # Email itself stays optional (unchanged) — but if one is entered,
+            # it must at least look like a real address, and must not already
+            # belong to a different account.
+            if email and not _validate_email_format(email):
+                flash("Please enter a valid email address.", "error")
+                user_row = conn.execute("SELECT * FROM app_user WHERE id = %s", (user_id,)).fetchone()
+                return render_template("user_form.html", user=dict(user_row), roles=USER_ROLES)
+            if email:
+                existing_email = conn.execute(
+                    "SELECT id FROM app_user WHERE LOWER(email) = LOWER(%s) AND id != %s", (email, user_id)
+                ).fetchone()
+                if existing_email:
+                    flash(f"Email '{email}' is already in use by another account.", "error")
+                    user_row = conn.execute("SELECT * FROM app_user WHERE id = %s", (user_id,)).fetchone()
+                    return render_template("user_form.html", user=dict(user_row), roles=USER_ROLES)
             is_active = bool(request.form.get("is_active"))
             new_password = request.form.get("password", "")
             if new_password:
+                ok, complexity_error = _validate_password_complexity(new_password)
+                if not ok:
+                    flash(complexity_error, "error")
+                    user_row = conn.execute("SELECT * FROM app_user WHERE id = %s", (user_id,)).fetchone()
+                    return render_template("user_form.html", user=dict(user_row), roles=USER_ROLES)
+                current = conn.execute(
+                    "SELECT password_hash FROM app_user WHERE id = %s", (user_id,)
+                ).fetchone()
+                if _password_reused(conn, user_id, new_password, current["password_hash"] if current else None):
+                    flash(f"That user cannot reuse any of their last {PASSWORD_HISTORY_COUNT} passwords.", "error")
+                    user_row = conn.execute("SELECT * FROM app_user WHERE id = %s", (user_id,)).fetchone()
+                    return render_template("user_form.html", user=dict(user_row), roles=USER_ROLES)
+                _record_password_change(conn, user_id, current["password_hash"] if current else None)
                 conn.execute(
                     """
                     UPDATE app_user SET full_name=%s, email=%s, role=%s, is_active=%s,
@@ -11887,6 +14030,13 @@ def user_edit(user_id):
                     """,
                     (full_name, email, role, is_active, user_id),
                 )
+            if old_role != role:
+                ensure_user_role_history_table(conn)
+                conn.execute(
+                    "INSERT INTO user_role_history (user_id, old_role, new_role, changed_by) "
+                    "VALUES (%s, %s, %s, %s)",
+                    (user_id, old_role, role, session.get("user_id")),
+                )
             if session.get("user_id") == user_id:
                 session["full_name"] = full_name
                 session["role"] = role
@@ -11899,9 +14049,29 @@ def user_edit(user_id):
     return render_template("user_form.html", user=dict(user), roles=USER_ROLES)
 
 
+@app.route("/users/<int:user_id>/role-history")
+def user_role_history(user_id):
+    if not _require_permission("view_users", write=False):
+        abort(403)
+    with db_conn() as conn:
+        ensure_users_table(conn)
+        ensure_user_role_history_table(conn)
+        user = conn.execute("SELECT id, username, full_name FROM app_user WHERE id = %s", (user_id,)).fetchone()
+        if not user:
+            return "User not found", 404
+        history = conn.execute(
+            "SELECT h.*, u.full_name AS changed_by_name FROM user_role_history h "
+            "LEFT JOIN app_user u ON u.id = h.changed_by "
+            "WHERE h.user_id = %s ORDER BY h.changed_at DESC",
+            (user_id,),
+        ).fetchall()
+    return render_template("user_role_history.html", user=dict(user), history=list(history),
+                           role_labels=ROLE_LABELS)
+
+
 @app.route("/users/<int:user_id>/delete", methods=["POST"])
 def user_delete(user_id):
-    if not _require_admin():
+    if not _require_permission("write_users"):
         abort(403)
     if session.get("user_id") == user_id:
         flash("You cannot delete your own account while logged in.", "error")
@@ -11911,6 +14081,21 @@ def user_delete(user_id):
         conn.execute("DELETE FROM app_user WHERE id = %s", (user_id,))
     log_audit("User Management", "Delete", record_id=user_id, record_label=row["username"] if row else None)
     flash("User deleted.", "success")
+    return redirect(url_for("user_management"))
+
+
+@app.route("/users/<int:user_id>/unlock", methods=["POST"])
+def user_unlock(user_id):
+    if not _require_permission("write_users"):
+        abort(403)
+    with db_conn() as conn:
+        conn.execute(
+            "UPDATE app_user SET failed_login_attempts = 0, locked_at = NULL WHERE id = %s",
+            (user_id,),
+        )
+        row = conn.execute("SELECT username FROM app_user WHERE id = %s", (user_id,)).fetchone()
+    log_audit("User Management", "Unlock", record_id=user_id, record_label=row["username"] if row else None)
+    flash("Account unlocked.", "success")
     return redirect(url_for("user_management"))
 
 

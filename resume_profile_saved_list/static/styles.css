@@ -870,6 +870,23 @@ select.field-error { border-color: var(--clr-danger) !important; box-shadow: 0 0
 .jdm-link:hover { text-decoration: underline; }
 .jdm-actions { white-space: nowrap; }
 .jdm-btn { padding: 6px 14px !important; font-size: 0.9rem !important; margin-right: 4px; }
+/* Icon-only actions (JD Management) — same buttons, far less horizontal
+   space, so the row fits without a horizontal scrollbar. */
+.jdm-btn-icon { padding: 6px 10px !important; font-size: 1rem !important; line-height: 1; min-width: 0; }
+
+/* Shared styled confirm dialog (static/confirm-dialog.js) — replaces the
+   plain browser confirm() popup for destructive actions. */
+.app-confirm-overlay {
+    display: none; position: fixed; inset: 0; background: rgba(15,23,42,0.55);
+    align-items: center; justify-content: center; z-index: 2000;
+}
+.app-confirm-box {
+    background: var(--surface); border-radius: 14px; padding: 24px 26px;
+    max-width: 440px; width: 90%; box-shadow: 0 24px 60px rgba(0,0,0,0.28);
+}
+.app-confirm-title { font-size: 1.1rem; font-weight: 700; color: var(--tx-2); margin: 0 0 10px; }
+.app-confirm-message { color: var(--tx-muted); font-size: 0.95rem; line-height: 1.6; margin: 0 0 22px; white-space: pre-line; }
+.app-confirm-actions { display: flex; justify-content: flex-end; gap: 10px; }
 .jdm-cat-badge { display: inline-block; padding: 4px 12px; border-radius: 999px; font-size: 0.9rem; font-weight: 600; }
 .jdm-cat-val { background: #dbeafe; color: #1e40af; }
 .jdm-cat-it  { background: #d1fae5; color: #065f46; }
@@ -1458,6 +1475,17 @@ body.login-page {
     opacity: 0.55;
     pointer-events: none;
 }
+.login-input-toggle {
+    position: absolute;
+    right: 10px; top: 50%;
+    transform: translateY(-50%);
+    background: none; border: none; cursor: pointer;
+    font-size: 0.95rem;
+    opacity: 0.55;
+    padding: 4px;
+    line-height: 1;
+}
+.login-input-toggle:hover { opacity: 0.85; }
 
 @media (max-width: 860px) {
     .login-shell { flex-direction: column; }
@@ -1646,6 +1674,25 @@ body.login-page {
 .match-card-req-count { font-size: 0.78rem; color: var(--tx-muted, #6b7280); }
 .match-card-ai-status { font-size: 0.72rem; color: #9ca3af; }
 .match-card-ai-status.is-verified { color: #059669; font-weight: 600; }
+.match-card-authenticity {
+    display: none; align-self: flex-start; margin-top: 2px; padding: 2px 9px; border-radius: 999px;
+    font-size: 0.68rem; font-weight: 700; letter-spacing: .02em; cursor: default;
+}
+.match-card-authenticity.is-visible { display: inline-block; }
+.match-card-authenticity.authenticity-genuine { background: #dcfce7; color: #15803d; }
+.match-card-authenticity.authenticity-verify { background: #fef3c7; color: #92400e; }
+.ai-metric-wide { flex-basis: 100%; }
+.ai-metric-wide .ai-metric-hint { max-width: none; }
+.authenticity-reasons { margin-top: 6px; display: flex; flex-direction: column; gap: 3px; }
+.authenticity-reason { font-size: 0.78rem; }
+.authenticity-reason.reason-positive { color: #15803d; }
+.authenticity-reason.reason-negative { color: #92400e; }
+.match-card-jd-mirroring {
+    display: none; align-self: flex-start; margin-top: 2px; padding: 2px 9px; border-radius: 999px;
+    font-size: 0.68rem; font-weight: 700; letter-spacing: .02em; cursor: default;
+    background: #fef3c7; color: #92400e;
+}
+.match-card-jd-mirroring.is-visible { display: inline-block; }
 .match-card-sg-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 4px; }
 .match-card-sg-col { min-width: 0; }
 .match-card-sg-heading {

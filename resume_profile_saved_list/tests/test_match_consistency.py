@@ -265,6 +265,366 @@ def test_incomplete_category_scores_rejected_not_silently_averaged():
         appmod._ollama_chat = real_ollama_chat
 
 
+_ALL_SOFT_CHECKS_PASS = {
+    key: {"pass": True, "reason": "ok"} for key in appmod._AUTHENTICITY_SOFT_RULE_KEYS
+}
+
+
+def test_ollama_down_leaves_authenticity_unassessed():
+    """When the LLM judge doesn't run at all (Ollama down / call failed),
+    _hybrid_match falls back to the heuristic path — authenticity_status
+    must be None ("not assessed"), never guessed at, while the real
+    fit_percentage/verdict still come back from the fallback."""
+    real_ollama_chat = appmod._ollama_chat
+    try:
+        def _boom(*a, **k):
+            raise RuntimeError("Ollama unavailable")
+        appmod._ollama_chat = _boom
+        hybrid = appmod._hybrid_match({"title": "x", "skills": "Python"}, {"title": "y", "skills": "Python"})
+        check("fallback path still returns a fit_percentage", hybrid.get("fit_percentage") is not None)
+        check("is_ai_judged is False on the fallback path", hybrid["is_ai_judged"] is False)
+        check("authenticity_status is None (not assessed), not a fallback guess",
+              hybrid["authenticity_status"] is None)
+    finally:
+        appmod._ollama_chat = real_ollama_chat
+
+
+def test_missing_consistency_checks_flags_insufficient_signal():
+    """Unlike the 9 category_scores (strictly required), consistency_checks
+    is supplementary — but unlike the old evidence_depth field, silently
+    omitting it must NOT default to "Likely Genuine" (absence of evidence
+    isn't evidence of consistency). Fewer than 4 of 7 usable soft checks
+    should flag "Needs Manual Verification" with an insufficient-signal
+    reason, while the real match assessment still stands."""
+    real_ollama_chat = appmod._ollama_chat
+    try:
+        appmod._ollama_chat = lambda *a, **k: {
+            "category_scores": {cat: 70 for cat in appmod._CATEGORY_WEIGHTS},
+            "verdict": "Good Match", "rationale": "x", "strengths": [], "concerns": "",
+            "suggested_roles": [], "confidence": 80, "confidence_reason": "",
+            # consistency_checks deliberately omitted entirely
+        }
+        result = appmod._llm_judge_match(
+            {"title": "x"}, {"title": "y"},
+            {"matched_skills": [], "missing_skills": [], "match_percentage": 0, "total_jd_requirements": 0},
+        )
+        check("judgment is still accepted despite missing consistency_checks", result is not None)
+        if result:
+            check("consistency_checks defaults to an empty dict, not an error", result["consistency_checks"] == {})
+
+        hybrid = appmod._hybrid_match({"title": "x", "skills": "Python"}, {"title": "y", "skills": "Python"})
+        check("_hybrid_match still succeeds (is_ai_judged=True)", hybrid["is_ai_judged"] is True)
+        check("insufficient signal flags Needs Manual Verification, not a silent Likely Genuine",
+              hybrid["authenticity_status"] == "Needs Manual Verification")
+    finally:
+        appmod._ollama_chat = real_ollama_chat
+
+
+def test_authenticity_likely_genuine_when_all_checks_pass():
+    """A genuinely detailed resume (quantified achievements present) with
+    all 7 soft checks passing must be labeled Likely Genuine, and reach the
+    final assessment plus survive a store -> read cache round trip intact —
+    the same guarantee every other field in ai_match_cache already has."""
+    resume = {"title": "x", "skills": "Python", "experience": _GENUINE_QUANT_EXPERIENCE, "projects": ""}
+    jd = {"title": "y", "skills": "Python"}
+    real_ollama_chat = appmod._ollama_chat
+    try:
+        appmod._ollama_chat = lambda *a, **k: {
+            "category_scores": {cat: 70 for cat in appmod._CATEGORY_WEIGHTS},
+            "verdict": "Good Match", "rationale": "x", "strengths": [], "concerns": "",
+            "suggested_roles": [], "confidence": 80, "confidence_reason": "",
+            "consistency_checks": _ALL_SOFT_CHECKS_PASS,
+        }
+        hybrid = appmod._hybrid_match(resume, jd)
+        check("status is Likely Genuine when all checks pass", hybrid["authenticity_status"] == "Likely Genuine")
+        check("reasons_positive lists all 8 rule labels", len(hybrid["authenticity_reasons_positive"]) > 0)
+        check("reasons_negative is empty", hybrid["authenticity_reasons_negative"] == [])
+    finally:
+        appmod._ollama_chat = real_ollama_chat
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    resume_row = {"id": FAKE_RESUME_ID, "updated_at": now, "title": "x", "skills": "Python"}
+    jd_row = {"id": FAKE_JD_ID, "updated_at": now}
+    with appmod.db_conn() as conn:
+        conn.execute("DELETE FROM ai_match_cache WHERE resume_id = %s AND jd_id = %s",
+                     (FAKE_RESUME_ID, FAKE_JD_ID))
+        conn.commit()
+        appmod._store_hybrid_match(conn, resume_row, jd_row, dict(hybrid))
+        conn.commit()
+        reread = appmod._read_cached_hybrid_match(conn, resume_row, jd_row)
+        check("cached authenticity_status round-trips exactly",
+              reread is not None and reread["authenticity_status"] == "Likely Genuine")
+        if reread:
+            check("cached authenticity_reasons_positive round-trips exactly",
+                  reread["authenticity_reasons_positive"] == hybrid["authenticity_reasons_positive"])
+        conn.execute("DELETE FROM ai_match_cache WHERE resume_id = %s AND jd_id = %s",
+                     (FAKE_RESUME_ID, FAKE_JD_ID))
+        conn.commit()
+
+
+def test_authenticity_soft_threshold():
+    """The soft-rule decision is a failure-COUNT threshold (>=2), per the
+    user's own spec ("multiple inconsistencies") — a single soft failure on
+    an otherwise clean, quantified resume should not flag it, but two should."""
+    resume = {"title": "x", "skills": "Python", "experience": _GENUINE_QUANT_EXPERIENCE, "projects": ""}
+    jd = {"title": "y", "skills": "Python"}
+    real_ollama_chat = appmod._ollama_chat
+    try:
+        one_failure = dict(_ALL_SOFT_CHECKS_PASS)
+        one_failure["timeline_consistent"] = {"pass": False, "reason": "Dates overlap slightly."}
+        appmod._ollama_chat = lambda *a, **k: {
+            "category_scores": {cat: 70 for cat in appmod._CATEGORY_WEIGHTS},
+            "verdict": "Good Match", "rationale": "x", "strengths": [], "concerns": "",
+            "suggested_roles": [], "confidence": 80, "confidence_reason": "",
+            "consistency_checks": one_failure,
+        }
+        hybrid = appmod._hybrid_match(resume, jd)
+        check("1 soft failure alone does not flag the resume", hybrid["authenticity_status"] == "Likely Genuine")
+
+        two_failures = dict(one_failure)
+        two_failures["no_major_contradictions"] = {"pass": False, "reason": "Conflicting job titles."}
+        appmod._ollama_chat = lambda *a, **k: {
+            "category_scores": {cat: 70 for cat in appmod._CATEGORY_WEIGHTS},
+            "verdict": "Good Match", "rationale": "x", "strengths": [], "concerns": "",
+            "suggested_roles": [], "confidence": 80, "confidence_reason": "",
+            "consistency_checks": two_failures,
+        }
+        hybrid2 = appmod._hybrid_match(resume, jd)
+        check("2 soft failures flags the resume", hybrid2["authenticity_status"] == "Needs Manual Verification")
+        check("negative reasons carry the specific concern text, not a generic label",
+              "Dates overlap slightly." in hybrid2["authenticity_reasons_negative"])
+    finally:
+        appmod._ollama_chat = real_ollama_chat
+
+
+# A real fabricated resume found live on 2026-08-07 ("PRIYA NARAYANAN"): real
+# company names, real-looking date ranges, a generic project title for every
+# claimed skill, grammatically smooth — and literally zero numbers anywhere.
+# The LLM alone scored this "Strong Evidence" (70-80/100) under the old
+# evidence-depth system; rewording the prompt shifted the same text's score
+# anywhere from 35 to 80 depending on phrasing, proving the LLM's own
+# judgment isn't reliable enough here to trust alone. This is exactly why
+# _quantified_specificity_count exists as a deterministic vote in
+# _AUTHENTICITY_RULES (see test_authenticity_flags_fabricated_resume_when_a_second_check_also_fails
+# below for why it's one vote among 8, not an absolute override).
+_FABRICATED_NO_QUANT_EXPERIENCE = (
+    "Senior Design Control Consultant - Siemens Healthineers (2022-Present): Led DHF "
+    "remediation, FDA readiness, IVDR compliance and SOP harmonization. Design Quality "
+    "Engineer - GE Healthcare (2019-2022): Managed design reviews, validation, CAPA and "
+    "audits. Quality Engineer - Roche Diagnostics (2017-2019): Maintained DHFs, risk files "
+    "and supplier quality."
+)
+_FABRICATED_NO_QUANT_PROJECTS = (
+    "Global IVD DHF Remediation; EU IVDR Transition; Design Control Process "
+    "Harmonization; Audit Readiness Program; Electronic DHF Migration."
+)
+_GENUINE_QUANT_EXPERIENCE = (
+    "8 years backend engineer. Built a payment-processing platform at Acme Corp using "
+    "Python/Django handling 2M transactions/day; migrated it from EC2 to Kubernetes over "
+    "6 months, reducing deploy time from 45min to 4min. Own the CI/CD pipeline for a "
+    "12-engineer team."
+)
+
+
+def test_quantified_specificity_count_discriminates_fabricated_from_genuine():
+    """The deterministic regex backstop must find zero quantified claims in
+    a real fabricated resume (company names/dates/generic titles only, no
+    numbers), and several in a genuinely detailed one."""
+    fabricated_count = appmod._quantified_specificity_count(
+        _FABRICATED_NO_QUANT_EXPERIENCE + " " + _FABRICATED_NO_QUANT_PROJECTS
+    )
+    genuine_count = appmod._quantified_specificity_count(_GENUINE_QUANT_EXPERIENCE)
+    check("fabricated (company/date/title-only) text has zero quantified claims", fabricated_count == 0)
+    check("genuinely detailed text has multiple quantified claims", genuine_count >= 2)
+
+
+def test_authenticity_zero_quant_alone_is_not_enough_to_flag():
+    """Calibration test for the fix shipped 2026-08-07 (v8): achievements_measurable
+    failing alone (a resume with zero quantified claims, but otherwise
+    internally consistent per the LLM's own judgment) must NOT flag the
+    resume by itself. An earlier version treated this as an absolute
+    override, which over-triggered on real data — resumes in genuinely
+    non-metric-driven domains (compliance/QA/audit work) routinely have zero
+    quantified claims and are completely genuine; the override flagged most
+    of them, defeating the point of a differentiating signal. One failure
+    out of 8 checks is below the _AUTHENTICITY_FAIL_THRESHOLD = 2 bar."""
+    resume = {
+        "title": "x", "skills": "Design Control, FDA 21 CFR Part 820, ISO 13485",
+        "experience": _FABRICATED_NO_QUANT_EXPERIENCE,
+        "projects": _FABRICATED_NO_QUANT_PROJECTS,
+    }
+    jd = {"title": "y", "skills": "Design Control, FDA 21 CFR Part 820, ISO 13485"}
+
+    real_ollama_chat = appmod._ollama_chat
+    try:
+        appmod._ollama_chat = lambda *a, **k: {
+            "category_scores": {cat: 75 for cat in appmod._CATEGORY_WEIGHTS},
+            "verdict": "Strong Match", "rationale": "x", "strengths": [], "concerns": "",
+            "suggested_roles": [], "confidence": 80, "confidence_reason": "",
+            "consistency_checks": _ALL_SOFT_CHECKS_PASS,
+        }
+        result = appmod._hybrid_match(resume, jd)
+        check("a single failed check (zero quantified claims) alone does not flag the resume",
+              result["authenticity_status"] == "Likely Genuine")
+        check("achievements_measurable is still recorded as failed in the debug trail",
+              result["authenticity_rules"]["achievements_measurable"]["pass"] is False)
+    finally:
+        appmod._ollama_chat = real_ollama_chat
+
+
+def test_authenticity_flags_fabricated_resume_when_a_second_check_also_fails():
+    """Regression test for the exact bug found live on 2026-08-07 ("Priya
+    Narayanan"): the LLM judge alone rated this fully fabricated,
+    zero-quantified-detail resume as "Strong Evidence". Re-run live against
+    the real prompt after the v8 calibration fix, the LLM did NOT give this
+    resume a clean bill on every other check — it independently flagged at
+    least one more issue. That's the realistic case this test models: zero
+    quantified claims PLUS one more failed check crosses the threshold and
+    correctly flags the resume, without needing an absolute override."""
+    resume = {
+        "title": "x", "skills": "Design Control, FDA 21 CFR Part 820, ISO 13485",
+        "experience": _FABRICATED_NO_QUANT_EXPERIENCE,
+        "projects": _FABRICATED_NO_QUANT_PROJECTS,
+    }
+    jd = {"title": "y", "skills": "Design Control, FDA 21 CFR Part 820, ISO 13485"}
+
+    real_ollama_chat = appmod._ollama_chat
+    try:
+        checks = dict(_ALL_SOFT_CHECKS_PASS)
+        checks["projects_realistic"] = {"pass": False, "reason": "Projects read as generic filler."}
+        appmod._ollama_chat = lambda *a, **k: {
+            "category_scores": {cat: 75 for cat in appmod._CATEGORY_WEIGHTS},
+            "verdict": "Strong Match", "rationale": "x", "strengths": [], "concerns": "",
+            "suggested_roles": [], "confidence": 80, "confidence_reason": "",
+            "consistency_checks": checks,
+        }
+        result = appmod._hybrid_match(resume, jd)
+        check("zero quantified claims + one more failed check flags the resume",
+              result["authenticity_status"] == "Needs Manual Verification")
+        check("the measurable-achievements concern is surfaced in reasons_negative",
+              any("measurable" in r.lower() for r in result["authenticity_reasons_negative"]))
+    finally:
+        appmod._ollama_chat = real_ollama_chat
+
+
+def test_authenticity_stub_length_resume_not_penalized_for_missing_achievements():
+    """A resume too short/sparse to meaningfully judge (a stub, e.g. right
+    after Add before any real content is entered) must not be penalized for
+    achievements_measurable just for being short — it's marked "not
+    assessed" and excluded from both the failure count and the
+    minimum-checks-present floor, not counted as a failure."""
+    resume = {"title": "x", "skills": "Python", "experience": "Engineer.", "projects": ""}
+    jd = {"title": "y", "skills": "Python"}
+
+    real_ollama_chat = appmod._ollama_chat
+    try:
+        appmod._ollama_chat = lambda *a, **k: {
+            "category_scores": {cat: 75 for cat in appmod._CATEGORY_WEIGHTS},
+            "verdict": "Strong Match", "rationale": "x", "strengths": [], "concerns": "",
+            "suggested_roles": [], "confidence": 80, "confidence_reason": "",
+            "consistency_checks": _ALL_SOFT_CHECKS_PASS,
+        }
+        result = appmod._hybrid_match(resume, jd)
+        check("a stub-length resume is not flagged", result["authenticity_status"] == "Likely Genuine")
+        check("achievements_measurable is marked not-assessed, not failed",
+              result["authenticity_rules"]["achievements_measurable"]["pass"] is None)
+    finally:
+        appmod._ollama_chat = real_ollama_chat
+
+
+_JD_MIRROR_TEST_JD_TEXT = (
+    "We are looking for a Senior Backend Engineer with strong experience in Python, Django, AWS, and "
+    "Kubernetes. The candidate should have 5+ years of experience building scalable backend systems and "
+    "deploying containerized applications using Docker and Kubernetes. Experience with PostgreSQL and Redis "
+    "is required. The candidate must have hands-on experience designing and implementing CI/CD pipelines "
+    "using Jenkins or GitHub Actions. Strong understanding of microservices architecture and RESTful API "
+    "design is essential."
+)
+
+
+def test_jd_mirroring_risk_discriminates_copied_text_from_original_writing():
+    """The actual discrimination this feature exists for: a resume that
+    lifts a JD's own sentences near-verbatim must score high overlap, while
+    a resume describing genuinely different (or independently paraphrased)
+    experience must score ~0 — confirmed against real prose, not synthetic
+    keyword lists, since that's what an actual JD-copied resume looks like.
+    """
+    jd = {"requirements": _JD_MIRROR_TEST_JD_TEXT, "skills": "", "responsibilities": "", "keywords": ""}
+
+    genuine = {"summary": (
+        "8 years backend engineer. Built a payment-processing platform at Acme Corp using Python/Django "
+        "handling 2M transactions/day; migrated it from EC2 to Kubernetes over 6 months, reducing deploy "
+        "time from 45min to 4min. Wrote a custom Redis-backed rate limiter after a 2023 incident caused a "
+        "cascading outage."
+    ), "skills": "", "experience": "", "projects": ""}
+
+    paraphrased = {"summary": (
+        "Senior Backend Engineer with solid background in Python and Django development. Have built "
+        "scalable backend systems and deployed containerized apps with Docker/Kubernetes over the past 6 "
+        "years. Comfortable with PostgreSQL and Redis for data storage."
+    ), "skills": "", "experience": "", "projects": ""}
+
+    near_verbatim = {"summary": (
+        "Senior Backend Engineer with strong experience in Python, Django, AWS, and Kubernetes. 6+ years of "
+        "experience building scalable backend systems and deploying containerized applications using Docker "
+        "and Kubernetes. Experience with PostgreSQL and Redis. Hands-on experience designing and "
+        "implementing CI/CD pipelines using Jenkins or GitHub Actions. Strong understanding of microservices "
+        "architecture and RESTful API design."
+    ), "skills": "", "experience": "", "projects": ""}
+
+    genuine_risk = appmod._jd_mirroring_risk(genuine, jd)
+    paraphrased_risk = appmod._jd_mirroring_risk(paraphrased, jd)
+    verbatim_risk = appmod._jd_mirroring_risk(near_verbatim, jd)
+
+    check("genuinely-written resume is not flagged", genuine_risk["risk_label"] is None)
+    check("paraphrased-in-own-words resume is not flagged", paraphrased_risk["risk_label"] is None)
+    check("near-verbatim copy is flagged High JD-Text Overlap", verbatim_risk["risk_label"] == "High JD-Text Overlap")
+    check("near-verbatim copy's overlap is much higher than genuine writing's",
+          verbatim_risk["overlap_pct"] > genuine_risk["overlap_pct"] + 30)
+    check("matched phrases are surfaced as evidence for the flag", len(verbatim_risk["matched_phrases"]) > 0)
+
+
+def test_jd_mirroring_risk_ignores_jds_with_too_little_distinctive_text():
+    """A JD that's just a short skill list (or empty) doesn't have enough
+    distinctive phrasing to judge overlap meaningfully — must return "not
+    flagged" rather than a misleadingly precise-looking percentage."""
+    short_jd = {"requirements": "Python SQL", "skills": "", "responsibilities": "", "keywords": ""}
+    result = appmod._jd_mirroring_risk({"summary": "Python SQL developer"}, short_jd)
+    check("a JD with too little distinctive text is never flagged", result["risk_label"] is None)
+    check("overlap_pct defaults to 0, not a misleading number", result["overlap_pct"] == 0)
+
+
+def test_jd_mirroring_flows_through_both_hybrid_match_paths():
+    """jd_mirroring is pure string comparison, not LLM-derived — it must be
+    present on BOTH the real AI-judged path and the heuristic fallback path
+    (Ollama unreachable), unlike evidence_depth which only the AI path can
+    provide."""
+    jd = {"title": "y", "requirements": _JD_MIRROR_TEST_JD_TEXT, "skills": "", "responsibilities": "", "keywords": ""}
+    verbatim_resume = {"title": "x", "summary": _JD_MIRROR_TEST_JD_TEXT, "skills": "", "experience": "", "projects": ""}
+
+    real_ollama_chat = appmod._ollama_chat
+    try:
+        # Fallback path: LLM unreachable.
+        appmod._ollama_chat = lambda *a, **k: (_ for _ in ()).throw(Exception("simulated Ollama down"))
+        fallback = appmod._hybrid_match(verbatim_resume, jd)
+        check("fallback path is flagged is_ai_judged=False", fallback["is_ai_judged"] is False)
+        check("jd_mirroring is still computed on the fallback path (no LLM needed)",
+              fallback["jd_mirroring_label"] == "High JD-Text Overlap")
+
+        # Success path: LLM available.
+        appmod._ollama_chat = lambda *a, **k: {
+            "category_scores": {cat: 70 for cat in appmod._CATEGORY_WEIGHTS},
+            "verdict": "Good Match", "rationale": "x", "strengths": [], "concerns": "",
+            "suggested_roles": [], "confidence": 80, "confidence_reason": "",
+        }
+        success = appmod._hybrid_match(verbatim_resume, jd)
+        check("success path is flagged is_ai_judged=True", success["is_ai_judged"] is True)
+        check("jd_mirroring is present on the success path too",
+              success["jd_mirroring_label"] == "High JD-Text Overlap")
+    finally:
+        appmod._ollama_chat = real_ollama_chat
+
+
 def test_cache_never_persists_fallback_and_self_heals_legacy_rows():
     """End-to-end against the real ai_match_cache table:
       - a fallback assessment must never be written to the cache
@@ -474,6 +834,17 @@ def main():
         test_weighted_category_sum_is_deterministic_and_matches_hand_calculation,
         test_title_excluded_from_ai_matching_and_cache_stays_valid_across_title_edits,
         test_incomplete_category_scores_rejected_not_silently_averaged,
+        test_ollama_down_leaves_authenticity_unassessed,
+        test_missing_consistency_checks_flags_insufficient_signal,
+        test_authenticity_likely_genuine_when_all_checks_pass,
+        test_authenticity_soft_threshold,
+        test_quantified_specificity_count_discriminates_fabricated_from_genuine,
+        test_authenticity_zero_quant_alone_is_not_enough_to_flag,
+        test_authenticity_flags_fabricated_resume_when_a_second_check_also_fails,
+        test_authenticity_stub_length_resume_not_penalized_for_missing_achievements,
+        test_jd_mirroring_risk_discriminates_copied_text_from_original_writing,
+        test_jd_mirroring_risk_ignores_jds_with_too_little_distinctive_text,
+        test_jd_mirroring_flows_through_both_hybrid_match_paths,
         test_cache_never_persists_fallback_and_self_heals_legacy_rows,
         test_rank_top_jd_matches_prefers_cached_ai_result_over_estimate,
         test_concurrent_requests_for_same_pair_compute_only_once,
