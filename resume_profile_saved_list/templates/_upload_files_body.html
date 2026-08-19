@@ -690,6 +690,14 @@
             parseAllBtn.textContent = '⏳ Parsing…';
             var deptSelect = document.getElementById('bulk_department');
             var deptValue = deptSelect ? deptSelect.value : '';
+            // Scope to whatever's checked in the table — matches how
+            // "Compare Selected" already works on this same page. Nothing
+            // checked falls back to processing every unparsed file, same as
+            // before this selection option existed.
+            var selectedNames = Array.prototype.map.call(
+                document.querySelectorAll('.file-chk:checked'),
+                function (chk) { return chk.getAttribute('data-name'); }
+            );
             var xhr = new XMLHttpRequest();
             xhr.open('POST', '/api/process-raw-files', true);
             xhr.setRequestHeader('Content-Type', 'application/json');
@@ -721,7 +729,7 @@
                 parseAllBtn.innerHTML = '&#128196; Parse &amp; Save to Profiles';
                 showResult('Network error. Please try again.', 'error');
             };
-            xhr.send(JSON.stringify({ department: deptValue }));
+            xhr.send(JSON.stringify({ department: deptValue, files: selectedNames }));
         });
     }
 

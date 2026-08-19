@@ -6541,6 +6541,16 @@ def _rank_top_jd_matches(conn, resume_dict, jds):
             authenticity_explanation = cached.get('authenticity_explanation') or ''
             jd_mirroring_label = cached.get('jd_mirroring_label')
             jd_mirroring_phrases = cached.get('jd_mirroring_phrases') or []
+            # Full AI-judged detail — only ever populated once this pair has a
+            # real LLM judgment (never on the estimate-only path below), so
+            # the Export PDF and any other detailed view can tell an actual
+            # AI rationale apart from a placeholder.
+            rationale = cached.get('rationale') or ''
+            concerns = cached.get('concerns') or ''
+            suggested_roles = cached.get('suggested_roles') or []
+            confidence = cached.get('confidence')
+            confidence_label = cached.get('confidence_label') or ''
+            category_scores = cached.get('category_scores') or {}
             logger.info(
                 f"Top-3 card resume={resume_dict.get('id')} jd={jd_dict['id']}: "
                 f"AI-judged pct={final_score} tier={tier_label} authenticity={authenticity_status}"
@@ -6557,6 +6567,12 @@ def _rank_top_jd_matches(conn, resume_dict, jds):
             _mirroring = _jd_mirroring_risk(resume_dict, jd_dict)
             jd_mirroring_label = _mirroring["risk_label"]
             jd_mirroring_phrases = _mirroring["matched_phrases"]
+            rationale = ''
+            concerns = ''
+            suggested_roles = []
+            confidence = None
+            confidence_label = ''
+            category_scores = {}
             uncached_jd_ids.append(jd_dict['id'])
             logger.info(
                 f"Top-3 card resume={resume_dict.get('id')} jd={jd_dict['id']}: "
@@ -6583,6 +6599,12 @@ def _rank_top_jd_matches(conn, resume_dict, jds):
             'authenticity_explanation': authenticity_explanation,
             'jd_mirroring_label': jd_mirroring_label,
             'jd_mirroring_phrases': jd_mirroring_phrases,
+            'rationale': rationale,
+            'concerns': concerns,
+            'suggested_roles': suggested_roles,
+            'confidence': confidence,
+            'confidence_label': confidence_label,
+            'category_scores': category_scores,
         })
 
     if uncached_jd_ids:
@@ -7627,6 +7649,13 @@ def export_rich_profile_pdf(resume_id):
              Paragraph(f'{match_count} of {total}', mb_det)],
             [Paragraph('Experience', mb_met),
              Paragraph(exp_det, mb_det)],
+            [Paragraph('AI Verification', mb_met),
+             Paragraph(
+                 '✓ AI-Verified Assessment' if m.get('is_ai_judged')
+                 else '⏳ Preliminary Estimate (full AI verification pending)',
+                 _ps(f'RP_MBAiv{idx}', fontName='Helvetica-Bold', fontSize=9,
+                     textColor=C_GREEN if m.get('is_ai_judged') else C_ORANGE)),
+             ],
         ]
         mb_style = [
             ('BACKGROUND',    (0, 0), (-1, 0),  C_DARK),
@@ -7714,6 +7743,116 @@ def export_rich_profile_pdf(resume_id):
             story.append(yr_row)
         story.append(Spacer(1, 0.12 * inch))
 
+        # ── AI Category Score Breakdown (only once this pair is AI-verified —
+        # an estimate-only match has no per-category LLM judgment to show) ──
+        category_scores = m.get('category_scores') or {}
+        if category_scores:
+            def _pct_col(pct):
+                if pct is None:
+                    return C_MUTED
+                if pct >= 70:
+                    return C_GREEN
+                if pct >= 50:
+                    return C_ORANGE
+                return C_RED
+
+            story.append(Paragraph('AI Category Score Breakdown',
+                                    _ps(f'RP_CatH{idx}', fontName='Helvetica-Bold', fontSize=11,
+                                        textColor=C_DARK, spaceAfter=6)))
+            cat_hh = _ps(f'RP_CatWH{idx}', fontName='Helvetica-Bold', fontSize=9, textColor=C_WHITE)
+            cat_data = [[Paragraph('Category', cat_hh), Paragraph('Score', cat_hh),
+                         Paragraph('Weight', cat_hh)]]
+            for cat_key, cat_weight in _CATEGORY_WEIGHTS.items():
+                cat_pct = category_scores.get(cat_key)
+                cat_data.append([
+                    Paragraph(_CATEGORY_LABELS.get(cat_key, cat_key),
+                              _ps(f'RP_CatL{idx}{cat_key}', fontName='Helvetica', fontSize=9, textColor=C_DARK)),
+                    Paragraph(f'{cat_pct}%' if cat_pct is not None else 'N/A',
+                              _ps(f'RP_CatS{idx}{cat_key}', fontName='Helvetica-Bold', fontSize=9,
+                                  textColor=_pct_col(cat_pct), alignment=TA_CENTER)),
+                    Paragraph(f'{round(cat_weight * 100)}%',
+                              _ps(f'RP_CatW{idx}{cat_key}', fontName='Helvetica', fontSize=9,
+                                  textColor=C_MUTED, alignment=TA_CENTER)),
+                ])
+            cat_style = [
+                ('BACKGROUND',    (0, 0), (-1, 0),  C_DARK),
+                ('TOPPADDING',    (0, 0), (-1, -1), 5),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
+                ('LEFTPADDING',   (0, 0), (-1, -1), 8),
+                ('RIGHTPADDING',  (0, 0), (-1, -1), 8),
+                ('GRID',          (0, 0), (-1, -1), 0.5, rl_colors.HexColor('#e2e8f0')),
+                ('VALIGN',        (0, 0), (-1, -1), 'MIDDLE'),
+            ]
+            for ri in range(1, len(cat_data)):
+                cat_style.append(('BACKGROUND', (0, ri), (-1, ri),
+                                  C_WHITE if ri % 2 == 1 else rl_colors.HexColor('#f8fafc')))
+            cat_tbl = Table(cat_data, colWidths=[0.5 * W, 0.25 * W, 0.25 * W])
+            cat_tbl.setStyle(TableStyle(cat_style))
+            story.append(cat_tbl)
+            story.append(Spacer(1, 0.14 * inch))
+
+        # ── AI Assessment Rationale ───────────────────────────────────────
+        if m.get('rationale'):
+            story.append(Paragraph('AI Assessment Rationale',
+                                    _ps(f'RP_RatH{idx}', fontName='Helvetica-Bold', fontSize=11,
+                                        textColor=C_DARK, spaceAfter=6)))
+            story.append(Paragraph(str(m['rationale']),
+                                    _ps(f'RP_RatT{idx}', fontName='Helvetica', fontSize=9,
+                                        textColor=C_MUTED, leading=14, spaceAfter=4)))
+            if m.get('confidence') is not None:
+                story.append(Paragraph(
+                    f"AI confidence in this judgment: <b>{m['confidence']}%</b>"
+                    + (f" ({m['confidence_label']})" if m.get('confidence_label') else ''),
+                    _ps(f'RP_ConfT{idx}', fontName='Helvetica', fontSize=8.5, textColor=C_MUTED, leading=13)))
+            story.append(Spacer(1, 0.14 * inch))
+
+        # ── Authenticity & Content-Integrity Check ────────────────────────
+        # Deliberately separate from the fit score — flags an internally
+        # inconsistent or template/JD-copied resume for a recruiter to
+        # verify at interview, without penalizing the candidate's fit%.
+        auth_status = m.get('authenticity_status')
+        mirror_label = m.get('jd_mirroring_label')
+        if auth_status or mirror_label:
+            story.append(Paragraph('Authenticity &amp; Content-Integrity Check',
+                                    _ps(f'RP_AuthH{idx}', fontName='Helvetica-Bold', fontSize=11,
+                                        textColor=C_DARK, spaceAfter=6)))
+            auth_rows = []
+            if auth_status:
+                auth_col = C_GREEN if auth_status == 'Likely Genuine' else C_ORANGE
+                auth_icon = '✓' if auth_status == 'Likely Genuine' else '⚠'
+                auth_rows.append(Paragraph(f'{auth_icon} <b>{auth_status}</b>',
+                                            _ps(f'RP_AuthS{idx}', fontName='Helvetica-Bold', fontSize=9.5,
+                                                textColor=auth_col, spaceAfter=3)))
+                if m.get('authenticity_explanation'):
+                    auth_rows.append(Paragraph(str(m['authenticity_explanation']),
+                                                _ps(f'RP_AuthE{idx}', fontName='Helvetica', fontSize=8.5,
+                                                    textColor=C_MUTED, leading=13, spaceAfter=4)))
+            if mirror_label:
+                mirror_pct = m.get('jd_mirroring_pct')
+                mirror_txt = f'⚠ {mirror_label}' + (f' ({mirror_pct}% phrase overlap with this JD)' if mirror_pct is not None else '')
+                auth_rows.append(Paragraph(mirror_txt,
+                                            _ps(f'RP_MirT{idx}', fontName='Helvetica-Bold', fontSize=9.5,
+                                                textColor=C_ORANGE, spaceAfter=3)))
+                mirror_phrases = list(m.get('jd_mirroring_phrases') or [])
+                if mirror_phrases:
+                    auth_rows.append(Paragraph(
+                        'Matched phrasing: ' + ', '.join(f'"{p}"' for p in mirror_phrases[:3]),
+                        _ps(f'RP_MirP{idx}', fontName='Helvetica', fontSize=8.5,
+                            textColor=C_MUTED, leading=13)))
+            for r in auth_rows:
+                story.append(r)
+            story.append(Spacer(1, 0.14 * inch))
+
+        # ── Areas of Concern ───────────────────────────────────────────────
+        if m.get('concerns'):
+            story.append(Paragraph('Areas of Concern',
+                                    _ps(f'RP_ConH{idx}', fontName='Helvetica-Bold', fontSize=11,
+                                        textColor=C_DORANG, spaceAfter=6)))
+            story.append(Paragraph(str(m['concerns']),
+                                    _ps(f'RP_ConT{idx}', fontName='Helvetica', fontSize=9,
+                                        textColor=C_MUTED, leading=14)))
+            story.append(Spacer(1, 0.14 * inch))
+
         # Recommendations
         story.append(Paragraph('Recommendations',
                                 _ps(f'RP_RecH{idx}', fontName='Helvetica-Bold', fontSize=11,
@@ -7728,6 +7867,13 @@ def export_rich_profile_pdf(resume_id):
             story.append(Paragraph(f'• Key areas to strengthen: {top_gaps}',
                                     _ps(f'RP_Rec2{idx}', fontName='Helvetica', fontSize=9,
                                         textColor=C_DARK, leading=14)))
+        suggested_roles = list(m.get('suggested_roles') or [])
+        if suggested_roles:
+            story.append(Paragraph(
+                '• AI-suggested alternative roles worth considering for this candidate: '
+                + ', '.join(str(r) for r in suggested_roles[:3]),
+                _ps(f'RP_Rec3{idx}', fontName='Helvetica', fontSize=9,
+                    textColor=C_DARK, leading=14)))
         story.append(Spacer(1, 0.2 * inch))
 
     doc.build(story)
@@ -8538,9 +8684,21 @@ def delete_all_uploads():
 
 @app.route("/api/process-raw-files", methods=["POST"])
 def process_raw_files():
-    """Parse all unprocessed files in RAW_UPLOAD_FOLDER and insert into resume DB."""
+    """Parse unprocessed files in RAW_UPLOAD_FOLDER and insert into resume DB.
+
+    Scoped to `files` (a list of filenames) when the caller provides a
+    non-empty one — e.g. the Upload Files screen's checkboxes — so ticking a
+    handful of rows and clicking "Parse & Save to Profiles" only touches
+    those, not every unparsed file sitting in the folder (which previously
+    included unrelated leftovers from earlier ZIP batches the user never
+    selected, surfacing duplicate warnings for files they weren't trying to
+    save at all). No selection provided at all still processes every
+    unparsed file, same as before.
+    """
     _req_data = request.get_json(silent=True) or {}
     bulk_department = (_req_data.get("department") or "").strip()
+    _selected_files = _req_data.get("files")
+    _selected_names = set(_selected_files) if isinstance(_selected_files, list) and _selected_files else None
     meta = _load_raw_meta()
     processed = []
     errors = []
@@ -8571,6 +8729,8 @@ def process_raw_files():
         if not p.is_file():
             continue
         if p.name.startswith('_') or p.suffix.lower() not in ('.pdf', '.docx', '.doc'):
+            continue
+        if _selected_names is not None and p.name not in _selected_names:
             continue
         fm = meta.get(p.name, {})
         _rid = fm.get('resume_id')
