@@ -20,5 +20,6 @@ pypdfium2==5.10.1
 python-docx==1.2.0
 python-dotenv==1.2.2
 reportlab==5.0.0
+requests==2.34.2
 typing_extensions==4.15.0
 Werkzeug==3.1.8

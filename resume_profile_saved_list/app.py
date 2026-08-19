@@ -2122,8 +2122,20 @@ def find_sections(lines):
         content = "\n".join(bucket_lines).strip()
         if not content:
             return
-        if sections.get(section):
-            sections[section] = sections[section] + "\n" + content
+        existing = sections.get(section)
+        if existing:
+            # Guard against a verbatim-duplicate block re-appending under the
+            # same heading — e.g. a source document whose entire body was
+            # pasted in more than once, which otherwise multiplies every
+            # section's content once per repeat. A genuinely new block (the
+            # SUMMARY+OBJECTIVE case this append exists for) is never a
+            # substring of what's already collected, so this only ever
+            # suppresses true repeats.
+            if content in existing or existing in content:
+                if len(content) > len(existing):
+                    sections[section] = content
+                return
+            sections[section] = existing + "\n" + content
         else:
             sections[section] = content
 
@@ -3791,6 +3803,8 @@ _OLLAMA_TEXT_TIMEOUT = int(
     os.environ.get("OLLAMA_TEXT_TIMEOUT", "60")
 )
 
+_OLLAMA_KEEP_ALIVE = os.environ.get("OLLAMA_KEEP_ALIVE", "30m")
+
 _OLLAMA_BUDGET_SECS = int(
     os.environ.get("OLLAMA_BUDGET_SECS", "10")
 )
@@ -3861,6 +3875,7 @@ def _ollama_chat(prompt, *, as_json, num_predict, num_ctx=8192, timeout=None):
         "messages": [{"role": "user", "content": prompt}],
         "stream": False,
         "options": {"temperature": 0, "num_predict": num_predict, "num_ctx": num_ctx},
+        "keep_alive": _OLLAMA_KEEP_ALIVE,
     }
     if as_json:
         body["format"] = "json"
@@ -4730,7 +4745,7 @@ def parse_resume_with_llm_text(path):
         "Professional Summary & Skill set", "Technical & Other Proficiency",
         # Title-case headings (Arun-style resumes)
         "Professional Summary", "Work Experience", "Relevant Project Experience",
-        "Key Skills", "Technical Skills",
+        "Key Skills", "Technical Skills", "CORE SKILLS", "Core Skills",
         "Tools & Applications", "Tools and Applications",
         # Per-role bullet lists — common in Indian IT/validation CVs that repeat a
         # "Project Details" + "Role and Responsibilities" pair once per employer.
@@ -4782,7 +4797,7 @@ def parse_resume_with_llm_text(path):
                  "ROLES AND RESPONSIBILITIES", "ROLE AND RESPONSIBILITIES",
                  "KEY RESPONSIBILITIES", "RESPONSIBILITIES"):
             return "experience"
-        if u in ("SKILLS", "TECHNICAL SKILLS", "KEY SKILLS", "CORE COMPETENCIES",
+        if u in ("SKILLS", "TECHNICAL SKILLS", "KEY SKILLS", "CORE SKILLS", "CORE COMPETENCIES",
                  "AREAS OF EXPERTISE", "AREA OF EXPERTISE",
                  "TECHNICAL SKILLS & TOOLS", "TECHNICAL SKILLS AND TOOLS",
                  "TECHNICAL & OTHER PROFICIENCY", "TECHNICAL EXPERTISE",
@@ -4886,6 +4901,27 @@ def parse_resume_with_llm_text(path):
             headings.append((pos, hd))
         else:
             logger.debug(f"Skipped '{hd}' at {pos}: single-word mixed-case with no blank line before")
+
+    # A summary-family heading written as "Professional Summary: <text>" — label
+    # and content on the SAME line — never matches `_section_heading_re` above
+    # (it requires the heading to be immediately followed by end-of-line). Left
+    # unrecognized, it isn't a boundary at all, so whatever section precedes it
+    # keeps reading straight through it and into the content that follows —
+    # e.g. a resume whose body repeats more than once bleeds the next repeat's
+    # entire summary paragraph into the previous repeat's last real section.
+    # This only needs to mark WHERE such a label starts, not capture its own
+    # content (that's already handled by the base regex parser/find_sections),
+    # so it's tagged with a sentinel `_heading_field` never maps to a field —
+    # boundary only, never overwrites `result["summary"]`.
+    for m in re.finditer(
+        r'(?:^|(?<=\n))\s*(?:Professional Summary|Profile Summary|Career Summary|'
+        r'Executive Summary|Career Objective|Objective|About Me|About|Summary)'
+        r'\s*:\s*\S',
+        raw_text, re.IGNORECASE,
+    ):
+        headings.append((m.start(), "\x00BOUNDARY\x00"))
+    headings.sort(key=lambda t: t[0])
+
     logger.info(f"Validated headings: {[h for _, h in headings[:12]]}")
 
     _qual_exp_date_re = re.compile(
@@ -5056,12 +5092,24 @@ def parse_resume_with_llm_text(path):
                     _ambiguous_field_source.discard(field)
                     logger.info(f"Verbatim '{field}' ({len(text)} chars) from '{heading}' (replaced ambiguous guess)")
             elif text:
-                # Same field, another confident occurrence — append rather than
-                # overwrite (would silently lose earlier content) or drop (would
-                # silently lose this content), since resumes commonly repeat a
-                # section like this once per job/client rather than only once total.
-                verbatim[field] = verbatim[field] + "\n" + text
-                logger.info(f"Verbatim '{field}' +{len(text)} chars appended from '{heading}'")
+                existing = verbatim[field]
+                # Guard against a verbatim-duplicate block — e.g. a source
+                # document whose entire body was pasted in more than once —
+                # re-appending under the same field and multiplying it further.
+                # A genuinely new per-job/per-client occurrence (the case this
+                # append exists for) is never a substring of what's already
+                # collected, so this only ever suppresses true repeats.
+                if text in existing or existing in text:
+                    if len(text) > len(existing):
+                        verbatim[field] = text
+                    logger.info(f"Verbatim '{field}' duplicate {len(text)} chars from '{heading}' skipped")
+                else:
+                    # Same field, another confident occurrence — append rather than
+                    # overwrite (would silently lose earlier content) or drop (would
+                    # silently lose this content), since resumes commonly repeat a
+                    # section like this once per job/client rather than only once total.
+                    verbatim[field] = existing + "\n" + text
+                    logger.info(f"Verbatim '{field}' +{len(text)} chars appended from '{heading}'")
             continue
         if text:
             verbatim[field] = text
