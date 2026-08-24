@@ -426,6 +426,157 @@ function saveComments() {
 }
 </script>
 
+<!-- Interview Transcript Fitment Check -->
+<section class="card" style="padding: 24px 28px;">
+    <div class="section-header" style="margin-bottom: 20px;">
+        <div class="section-icon" style="background:#fef3c7;color:#92400e;">&#127908;</div>
+        <h2>Interview Transcript &amp; Fitment Check</h2>
+        <span class="section-note">AI-assisted fitment against a JD</span>
+    </div>
+
+    {% if can_write('interview_transcript') %}
+    <form method="POST" action="{{ url_for('upload_interview_transcript', resume_id=resume.id) }}"
+          enctype="multipart/form-data"
+          style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;margin-bottom:20px;">
+        <div class="field-group" style="min-width:240px;flex:1;">
+            <label for="transcript_jd_id">Job Description to check fitment against</label>
+            <select id="transcript_jd_id" name="jd_id" class="form-select" required>
+                <option value="">— Select a JD —</option>
+                {% for jd in open_jds %}
+                <option value="{{ jd.id }}">{{ jd.title }}{% if jd.category %} ({{ jd.category }}){% endif %}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="field-group" style="min-width:240px;">
+            <label for="transcript_file">Transcript file (.docx or .txt)</label>
+            <input type="file" id="transcript_file" name="transcript_file" accept=".docx,.txt" required
+                   class="form-select" style="padding:6px 10px;">
+        </div>
+        <button type="submit" class="button" style="background:#f59e0b;">&#128228; Upload &amp; Check Fitment</button>
+    </form>
+    {% endif %}
+
+    {% if transcripts %}
+    <div id="transcriptList" style="display:flex;flex-direction:column;gap:14px;">
+        {% for t in transcripts %}
+        <div class="card" id="transcript-row-{{ t.id }}"
+             style="padding:16px 18px;border:1px solid var(--border-1, #e5e7eb);">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;">
+                <div>
+                    <p style="margin:0;font-weight:700;font-size:0.92rem;">{{ t.original_filename }}</p>
+                    <p class="muted" style="margin:2px 0 0;font-size:0.8rem;">
+                        Against: <strong>{{ t.jd_title or '—' }}</strong>
+                        &nbsp;·&nbsp; Uploaded {{ t.uploaded_at.strftime('%Y-%m-%d %H:%M') if t.uploaded_at else '' }}
+                    </p>
+                </div>
+                <div style="display:flex;gap:8px;align-items:center;">
+                    <span id="fitment-badge-{{ t.id }}"
+                          class="match-card-authenticity is-visible {{ 'authenticity-genuine' if t.fitment_status in ('Strong Fit', 'Good Fit') else 'authenticity-verify' }}"
+                          style="{% if not t.is_ai_judged %}display:none;{% endif %}">
+                        {{ t.fitment_status or '' }}
+                    </span>
+                    <span id="fitment-pending-{{ t.id }}" class="muted" style="font-size:0.8rem;{% if t.is_ai_judged %}display:none;{% endif %}">
+                        &#9203; Analyzing fitment…
+                    </span>
+                    <a class="button secondary" style="padding:5px 11px;font-size:0.8rem;"
+                       href="{{ url_for('download_interview_transcript', transcript_id=t.id) }}">Download</a>
+                    {% if can_write('interview_transcript') %}
+                    <form method="POST" action="{{ url_for('delete_interview_transcript', transcript_id=t.id) }}"
+                          class="app-confirm-form" data-confirm-message="Delete this interview transcript? This cannot be undone."
+                          style="display:inline;">
+                        <button type="submit" class="button danger" style="padding:5px 11px;font-size:0.8rem;">Delete</button>
+                    </form>
+                    {% endif %}
+                </div>
+            </div>
+            <div id="fitment-detail-{{ t.id }}" style="margin-top:10px;{% if not t.is_ai_judged %}display:none;{% endif %}">
+                <p style="margin:0 0 6px;font-size:0.85rem;">{{ t.fitment_summary or '' }}</p>
+                {% if t.strengths %}
+                <p style="margin:0 0 4px;font-size:0.8rem;"><strong>Strengths:</strong>
+                    {{ t.strengths.replace('\n', ', ') }}</p>
+                {% endif %}
+                {% if t.concerns %}
+                <p style="margin:0;font-size:0.8rem;color:#92400e;"><strong>Concerns:</strong> {{ t.concerns }}</p>
+                {% endif %}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <p class="muted" style="font-size:0.85rem;margin:0;">No interview transcripts uploaded yet for this candidate.</p>
+    {% endif %}
+</section>
+
+<script>
+(function () {
+    var PENDING_IDS = [
+        {% for t in transcripts %}{% if not t.is_ai_judged %}{{ t.id }},{% endif %}{% endfor %}
+    ];
+    if (!PENDING_IDS.length) return;
+
+    var POLL_INTERVAL_MS = 4000;
+    var MAX_WAIT_MS = 360000;
+    var startedAt = Date.now();
+
+    function esc(s) {
+        return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+            return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c];
+        });
+    }
+
+    function applyResult(id, d) {
+        var badge = document.getElementById('fitment-badge-' + id);
+        var pending = document.getElementById('fitment-pending-' + id);
+        var detail = document.getElementById('fitment-detail-' + id);
+        if (badge) {
+            badge.textContent = d.fitment_status || '';
+            badge.className = 'match-card-authenticity is-visible ' +
+                ((d.fitment_status === 'Strong Fit' || d.fitment_status === 'Good Fit')
+                    ? 'authenticity-genuine' : 'authenticity-verify');
+            badge.style.display = '';
+        }
+        if (pending) pending.style.display = 'none';
+        if (detail) {
+            var html = '<p style="margin:0 0 6px;font-size:0.85rem;">' + esc(d.fitment_summary) + '</p>';
+            if (d.strengths && d.strengths.length) {
+                html += '<p style="margin:0 0 4px;font-size:0.8rem;"><strong>Strengths:</strong> ' +
+                    esc(d.strengths.join(', ')) + '</p>';
+            }
+            if (d.concerns) {
+                html += '<p style="margin:0;font-size:0.8rem;color:#92400e;"><strong>Concerns:</strong> ' +
+                    esc(d.concerns) + '</p>';
+            }
+            detail.innerHTML = html;
+            detail.style.display = '';
+        }
+    }
+
+    function pollOnce() {
+        if (!PENDING_IDS.length) return;
+        var elapsedMs = Date.now() - startedAt;
+        var checks = PENDING_IDS.map(function (id) {
+            return fetch('/api/interview-transcript/' + id + '/status', {credentials: 'same-origin'})
+                .then(function (r) { return r.json(); })
+                .then(function (data) { return {id: id, data: data}; })
+                .catch(function () { return {id: id, data: null}; });
+        });
+        Promise.all(checks).then(function (results) {
+            results.forEach(function (res) {
+                if (res.data && res.data.ready) {
+                    applyResult(res.id, res.data);
+                    PENDING_IDS = PENDING_IDS.filter(function (i) { return i !== res.id; });
+                }
+            });
+            if (!PENDING_IDS.length) return;
+            if (elapsedMs >= MAX_WAIT_MS) return;
+            setTimeout(pollOnce, POLL_INTERVAL_MS);
+        });
+    }
+
+    pollOnce();
+})();
+</script>
+
 <!-- Content Sections -->
 <section class="card profile-body">
     {% if resume.summary %}

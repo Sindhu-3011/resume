@@ -203,6 +203,11 @@ SECTION_ALIASES = {
     "skills": [
         "skills", "skill set", "skillset", "skills summary",
         "technical skills", "core skills", "key skills",
+        # "techincal" is a common real-world typo (adjacent-letter transposition
+        # of "technical") — seen live on an actual candidate resume, where the
+        # misspelling made this heading invisible to exact-match recognition
+        # and let the entire skills block bleed into Professional Summary.
+        "techincal skills",
         "professional skills", "functional skills",
         "competencies", "core competencies", "key competencies",
         "professional competencies", "technical competencies",
@@ -2565,6 +2570,17 @@ def _extract_title_from_para(text):
     'Highly skilled ... Validation and Compliance Lead with 7 years of experience...'
     → 'Validation and Compliance Lead'
     """
+    # When a section heading (e.g. "ABOUT", "SUMMARY") sits directly in front
+    # of the intro sentence with no blank line separating them in the
+    # extracted text, Pattern 1's trailing-capitalized-words capture below
+    # would otherwise glue the heading word onto the front of the title
+    # (e.g. "ABOUT\nBiotechnology Engineer" instead of just "Biotechnology
+    # Engineer") — \s+ matches the newline between them just like a space.
+    # Strip a leading heading line before running either pattern.
+    _first_line, _nl, _rest = text.partition('\n')
+    if _nl and canonical_section_name(_first_line.strip()):
+        text = _rest
+
     # Pattern 1: <Title Phrase> with N year(s)
     m = re.search(r'\s+with\s+(?:over\s+)?\d+\+?\s*years?\b', text[:700], re.I)
     if m:
@@ -3723,12 +3739,24 @@ def parse_resume_text(text, name_hint=None):
         title_clean = parsed["title"].strip()
         title_clean = re.split(r"[,|/\\–—]", title_clean)[0].strip()
         title_clean = re.sub(r"[\(\[].*$", "", title_clean).strip()
-        title_clean = re.sub(
+        # Strip repeatedly, not once — a resume that stacks two heading
+        # fragments right in front of the actual title (e.g. "PROFILE" then
+        # "SUMMARY" on their own lines, both swept up by the title-capture
+        # regex above) would otherwise only have the first one removed,
+        # since a ^-anchored re.sub can only match the literal start of the
+        # string a single time, leaving the second heading word stuck on
+        # the front (e.g. "SUMMARY Regulatory Complaint Analyst").
+        _title_prefix_re = re.compile(
             r"^(summary|professional\s+summary|profile|career\s+profile|"
             r"professional\s+profile|objective|career\s+objective|overview|"
             r"about\s+me?|executive\s+summary)\s+",
-            "", title_clean, flags=re.I,
-        ).strip()
+            re.I,
+        )
+        while True:
+            _stripped = _title_prefix_re.sub("", title_clean).strip()
+            if _stripped == title_clean:
+                break
+            title_clean = _stripped
         title_clean = re.sub(
             r"^(experienced|skilled|dedicated|results.driven|dynamic|seasoned|"
             r"highly experienced|passionate|motivated|proactive|hands.on)\s+",
@@ -4715,13 +4743,14 @@ def parse_resume_with_llm_text(path):
         "PROFESSIONAL EXPERIENCE", "WORK EXPERIENCE", "EMPLOYMENT HISTORY",
         "PROFESSIONAL SUMMARY", "PROFILE SUMMARY", "APPLICATIONS SUMMARY",
         "EXECUTIVE SUMMARY", "CAREER OBJECTIVE", "PROFESSIONAL PROFILE", "PROFILE",
-        "AREAS OF EXPERTISE", "TECHNICAL SKILLS", "CORE COMPETENCIES", "KEY SKILLS",
+        "AREAS OF EXPERTISE", "TECHNICAL SKILLS", "TECHINCAL SKILLS", "CORE COMPETENCIES", "KEY SKILLS",
         "ACADEMIC BACKGROUND", "ACADEMIC QUALIFICATIONS",
         "EDUCATIONAL QUALIFICATION", "EDUCATIONAL QUALIFICATIONS",
         "SUMMARY", "EXPERIENCE", "EMPLOYMENT", "SKILLS", "EDUCATION",
         "QUALIFICATIONS", "CERTIFICATIONS", "PROJECTS", "ACHIEVEMENTS",
         "AWARDS", "REFERENCES",
         "TOOLS & APPLICATIONS", "TOOLS AND APPLICATIONS", "TOOLS",
+        "TOOLS & TECHNOLOGIES", "TOOLS AND TECHNOLOGIES", "EXPERTISE",
         "EARLY CAREER EXPERIENCE",
         "EDUCATION & CERTIFICATIONS", "EDUCATION AND CERTIFICATIONS",
         "TECHNICAL SKILLS & TOOLS", "TECHNICAL SKILLS AND TOOLS",
@@ -4730,6 +4759,7 @@ def parse_resume_with_llm_text(path):
         "Relevant Project/Organizational Details",
         "Project/Organizational Details",
         "PROFESSIONAL CERTIFICATIONS", "PROFESSIONAL CERTIFICATION",
+        "CERTIFICATES", "CERTIFICATE",
         "AWARDS & RECOGNITION", "AWARDS AND RECOGNITION",
         "LICENSES AND CERTIFICATIONS", "LICENSES & CERTIFICATIONS",
         "CERTIFICATES AND LICENSES", "CERTIFICATES & LICENSES",
@@ -4797,10 +4827,11 @@ def parse_resume_with_llm_text(path):
                  "ROLES AND RESPONSIBILITIES", "ROLE AND RESPONSIBILITIES",
                  "KEY RESPONSIBILITIES", "RESPONSIBILITIES"):
             return "experience"
-        if u in ("SKILLS", "TECHNICAL SKILLS", "KEY SKILLS", "CORE SKILLS", "CORE COMPETENCIES",
-                 "AREAS OF EXPERTISE", "AREA OF EXPERTISE",
+        if u in ("SKILLS", "TECHNICAL SKILLS", "TECHINCAL SKILLS", "KEY SKILLS", "CORE SKILLS", "CORE COMPETENCIES",
+                 "AREAS OF EXPERTISE", "AREA OF EXPERTISE", "EXPERTISE",
                  "TECHNICAL SKILLS & TOOLS", "TECHNICAL SKILLS AND TOOLS",
                  "TECHNICAL & OTHER PROFICIENCY", "TECHNICAL EXPERTISE",
+                 "TOOLS & TECHNOLOGIES", "TOOLS AND TECHNOLOGIES",
                  "APPLICATIONS SUMMARY"):
             # "Applications Summary" lists tools/applications (e.g. "LIMS", "JIRA",
             # "Veeva Vault") despite the word "Summary" in its name — it belongs
@@ -6639,9 +6670,21 @@ def profile_detail(resume_id):
 
         top_matches = _rank_top_jd_matches(conn, resume_dict, jds)
 
+        # Interview Transcript Fitment Check — fully additive, see the
+        # "Interview Transcript Fitment Check" section for the table/routes.
+        ensure_interview_transcripts_table(conn)
+        transcripts = conn.execute(
+            "SELECT t.*, j.title AS jd_title FROM interview_transcripts t "
+            "LEFT JOIN job_description j ON j.id = t.jd_id "
+            "WHERE t.resume_id = %s ORDER BY t.uploaded_at DESC",
+            (resume_id,),
+        ).fetchall()
+
         return render_template("profile.html", resume=resume, top_matches=top_matches,
                                l1_comments=resume_dict.get("l1_comments") or "",
-                               l2_comments=resume_dict.get("l2_comments") or "")
+                               l2_comments=resume_dict.get("l2_comments") or "",
+                               open_jds=[dict(j) for j in jds],
+                               transcripts=[dict(t) for t in transcripts])
 
 
 @app.route("/profile/<int:resume_id>/export-top-matches")
@@ -12622,6 +12665,309 @@ def _migrate_interview_question_labels():
 _migrate_interview_question_labels()
 
 
+# ── Interview Transcript Fitment Check (per-candidate, under Profile) ───────
+# Fully additive: its own table, its own upload folder, its own routes, its
+# own section in profile.html. Never touches resume parsing, JD matching,
+# ai_match_cache, or any existing Profile/Resume field.
+
+TRANSCRIPT_UPLOAD_FOLDER = UPLOAD_FOLDER / "interview_transcripts"
+TRANSCRIPT_UPLOAD_FOLDER.mkdir(exist_ok=True)
+# Deliberately narrower than the resume ALLOWED_EXTENSIONS set — an interview
+# transcript is a plain document, not a resume, so PDF isn't offered here.
+_TRANSCRIPT_ALLOWED_EXTENSIONS = {"docx", "txt"}
+_FITMENT_STATUSES = ("Strong Fit", "Good Fit", "Partial Fit", "Weak Fit")
+
+
+def ensure_interview_transcripts_table(conn):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS interview_transcripts (
+            id                SERIAL PRIMARY KEY,
+            resume_id         INTEGER NOT NULL REFERENCES resume(id) ON DELETE CASCADE,
+            jd_id             INTEGER REFERENCES job_description(id) ON DELETE SET NULL,
+            original_filename TEXT NOT NULL,
+            stored_filename   TEXT NOT NULL,
+            transcript_text   TEXT,
+            fitment_status    TEXT,
+            fitment_summary   TEXT,
+            strengths         TEXT,
+            concerns          TEXT,
+            confidence        INTEGER,
+            is_ai_judged      BOOLEAN NOT NULL DEFAULT FALSE,
+            uploaded_by       INTEGER REFERENCES app_user(id),
+            uploaded_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            analyzed_at       TIMESTAMPTZ
+        )
+        """
+    )
+
+
+def _extract_transcript_text(path, ext):
+    """Plain-text extraction for an interview transcript — .docx reuses the
+    existing resume DOCX reader (it just wants the text, not resume fields);
+    .txt is read directly. No PDF/OCR path — transcripts here are always
+    a typed document, never a scanned image.
+    """
+    if ext == "docx":
+        return extract_text_from_docx(path)
+    return Path(path).read_text(encoding="utf-8", errors="replace")
+
+
+def _coerce_fitment_result(raw):
+    """Validate/coerce the raw Ollama response into a plain result dict, or
+    None if the response is unusable — same graceful-degradation contract
+    as _coerce_interview_questions/_llm_judge_match: a malformed response
+    is treated as "the model didn't give us anything useful," never raised.
+    """
+    if not isinstance(raw, dict):
+        return None
+    fitment = str(raw.get("fitment") or "").strip().title()
+    if fitment not in _FITMENT_STATUSES:
+        return None
+    return {
+        "fitment": fitment,
+        "summary": str(raw.get("summary") or "").strip()[:600],
+        "strengths": _coerce_str_list(raw.get("strengths"), 6),
+        "concerns": str(raw.get("concerns") or "").strip()[:400],
+        "confidence": _clamp_pct(raw.get("confidence"), default=None),
+    }
+
+
+def _llm_judge_interview_fitment(transcript_text, jd_dict):
+    """Asks the local Ollama model to judge how well an interview transcript
+    demonstrates fitment for a JD — same one-call, bare-JSON-placeholder
+    prompt shape already proven reliable for this model in
+    _llm_judge_match/_generate_interview_questions_for_category (a concrete,
+    fully-filled example gets parroted back verbatim regardless of input;
+    a bare "<int>"/"<string>" placeholder doesn't).
+
+    Truncates the transcript to ~6000 chars (roughly the same per-field cap
+    already used for resume/JD text elsewhere) so a long transcript doesn't
+    blow the context budget or push CPU-bound generation time out of the
+    timeout — long enough to cover a full interview's substance, not a
+    guarantee of reading every word of a multi-hour transcript verbatim.
+
+    Returns None (never raises) if Ollama is unreachable, times out, or
+    returns something unusable — caller leaves the transcript row
+    un-judged rather than showing a fabricated verdict.
+    """
+    jd_text = _build_jd_text_for_questions(jd_dict)
+    transcript_excerpt = (transcript_text or "").strip()[:6000]
+    prompt = (
+        "You are an experienced HR interview panelist. Read the interview TRANSCRIPT "
+        "below and judge how well the CANDIDATE's own answers demonstrate fitment for "
+        "this JOB DESCRIPTION. Judge only what the candidate actually said — do not "
+        "credit skills or experience that aren't evidenced in their answers, and do not "
+        "penalize for interviewer questions, small talk, or transcription artifacts.\n\n"
+        f"JOB DESCRIPTION:\n{jd_text}\n\n"
+        f"INTERVIEW TRANSCRIPT:\n{transcript_excerpt}\n\n"
+        "Respond with ONLY a single JSON object, no other text before or after it, in "
+        "EXACTLY this shape:\n"
+        '{"fitment": "<Strong Fit|Good Fit|Partial Fit|Weak Fit>", '
+        '"summary": "<2-4 sentences explaining the verdict, grounded in specific things '
+        'the candidate said>", '
+        '"strengths": ["<short phrase>", ...up to 6], '
+        '"concerns": "<1-2 sentences on the biggest gaps or red flags found in the '
+        'transcript, or empty string if none>", '
+        '"confidence": <int 0-100, how confident you are given how much of the '
+        "transcript actually addressed JD-relevant topics>}"
+    )
+    try:
+        raw = _ollama_chat(prompt, as_json=True, num_predict=500, num_ctx=8192, timeout=180)
+    except Exception as e:
+        logger.warning(f"Interview fitment judge call failed: {e}", exc_info=True)
+        return None
+    result = _coerce_fitment_result(raw)
+    if result is None:
+        logger.warning(f"Interview fitment judge returned unusable response: {str(raw)[:200]}")
+    return result
+
+
+# Background analysis — mirrors trigger_background_ai_assessment /
+# _background_ai_assessment_worker's fire-and-forget-then-poll pattern, so
+# the upload request itself never blocks on a real LLM call.
+_transcript_analysis_in_flight = set()
+_transcript_analysis_in_flight_lock = threading.Lock()
+
+
+def _background_transcript_analysis_worker(transcript_id):
+    try:
+        with db_conn() as conn:
+            ensure_interview_transcripts_table(conn)
+            row = conn.execute(
+                "SELECT * FROM interview_transcripts WHERE id = %s", (transcript_id,)
+            ).fetchone()
+            if not row or not row["jd_id"]:
+                return
+            jd = conn.execute(
+                "SELECT * FROM job_description WHERE id = %s", (row["jd_id"],)
+            ).fetchone()
+            if not jd:
+                return
+            result = _llm_judge_interview_fitment(row["transcript_text"], dict(jd))
+            if result:
+                conn.execute(
+                    """
+                    UPDATE interview_transcripts
+                    SET fitment_status = %s, fitment_summary = %s, strengths = %s,
+                        concerns = %s, confidence = %s, is_ai_judged = TRUE, analyzed_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (result["fitment"], result["summary"], "\n".join(result["strengths"]),
+                     result["concerns"], result["confidence"], transcript_id),
+                )
+    except Exception:
+        logger.exception(f"Interview transcript analysis failed → transcript_id={transcript_id}")
+    finally:
+        with _transcript_analysis_in_flight_lock:
+            _transcript_analysis_in_flight.discard(transcript_id)
+
+
+def trigger_background_transcript_analysis(transcript_id):
+    with _transcript_analysis_in_flight_lock:
+        if transcript_id in _transcript_analysis_in_flight:
+            return
+        _transcript_analysis_in_flight.add(transcript_id)
+    threading.Thread(
+        target=_background_transcript_analysis_worker, args=(transcript_id,), daemon=True
+    ).start()
+
+
+@app.route("/profile/<int:resume_id>/interview-transcript/upload", methods=["POST"])
+def upload_interview_transcript(resume_id):
+    if not _require_permission("interview_transcript"):
+        abort(403)
+    with db_conn() as conn:
+        ensure_interview_transcripts_table(conn)
+        resume = conn.execute(
+            "SELECT id, full_name FROM resume WHERE id = %s", (resume_id,)
+        ).fetchone()
+        if not resume:
+            flash("Profile not found.", "error")
+            return redirect(url_for("profile_list"))
+
+        jd_id_raw = (request.form.get("jd_id") or "").strip()
+        if not jd_id_raw.isdigit():
+            flash("Please select a Job Description to check fitment against.", "error")
+            return redirect(url_for("profile_detail", resume_id=resume_id))
+        jd_id = int(jd_id_raw)
+        if not conn.execute("SELECT id FROM job_description WHERE id = %s", (jd_id,)).fetchone():
+            flash("Selected Job Description not found.", "error")
+            return redirect(url_for("profile_detail", resume_id=resume_id))
+
+        uploaded = request.files.get("transcript_file")
+        if not uploaded or not uploaded.filename:
+            flash("Please choose a transcript file to upload.", "error")
+            return redirect(url_for("profile_detail", resume_id=resume_id))
+
+        original_name = uploaded.filename
+        safe_name = secure_filename(original_name)
+        ext = safe_name.rsplit(".", 1)[-1].lower() if "." in safe_name else ""
+        if ext not in _TRANSCRIPT_ALLOWED_EXTENSIONS:
+            flash("Only .docx and .txt transcript files are supported.", "error")
+            return redirect(url_for("profile_detail", resume_id=resume_id))
+
+        stored_name = f"{uuid.uuid4().hex}.{ext}"
+        dest = TRANSCRIPT_UPLOAD_FOLDER / stored_name
+        uploaded.save(str(dest))
+
+        try:
+            transcript_text = _extract_transcript_text(dest, ext)
+        except Exception as e:
+            dest.unlink(missing_ok=True)
+            flash(f"Could not read the transcript file: {e}", "error")
+            return redirect(url_for("profile_detail", resume_id=resume_id))
+
+        if not transcript_text.strip():
+            dest.unlink(missing_ok=True)
+            flash("The uploaded transcript appears to be empty.", "error")
+            return redirect(url_for("profile_detail", resume_id=resume_id))
+
+        new_row = conn.execute(
+            """
+            INSERT INTO interview_transcripts
+                (resume_id, jd_id, original_filename, stored_filename, transcript_text, uploaded_by)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING id
+            """,
+            (resume_id, jd_id, original_name, stored_name, transcript_text, session.get("user_id")),
+        ).fetchone()
+        transcript_id = new_row["id"]
+        full_name = resume["full_name"]
+
+    trigger_background_transcript_analysis(transcript_id)
+    log_audit("Profile", "Upload Interview Transcript", record_id=resume_id,
+              record_label=full_name, details=original_name)
+    flash("Transcript uploaded — analyzing fitment against the selected JD.", "success")
+    return redirect(url_for("profile_detail", resume_id=resume_id))
+
+
+@app.route("/api/interview-transcript/<int:transcript_id>/status")
+def interview_transcript_status(transcript_id):
+    if not _require_permission("interview_transcript", write=False):
+        abort(403)
+    with db_conn() as conn:
+        ensure_interview_transcripts_table(conn)
+        row = conn.execute(
+            "SELECT is_ai_judged, fitment_status, fitment_summary, strengths, concerns, confidence "
+            "FROM interview_transcripts WHERE id = %s", (transcript_id,)
+        ).fetchone()
+    if not row:
+        return jsonify({"ready": False, "error": "Not found"}), 404
+    if not row["is_ai_judged"]:
+        return jsonify({"ready": False})
+    return jsonify({
+        "ready": True,
+        "fitment_status": row["fitment_status"],
+        "fitment_summary": row["fitment_summary"],
+        "strengths": row["strengths"].split("\n") if row["strengths"] else [],
+        "concerns": row["concerns"],
+        "confidence": row["confidence"],
+    })
+
+
+@app.route("/interview-transcript/<int:transcript_id>/delete", methods=["POST"])
+def delete_interview_transcript(transcript_id):
+    if not _require_permission("interview_transcript"):
+        abort(403)
+    with db_conn() as conn:
+        ensure_interview_transcripts_table(conn)
+        row = conn.execute(
+            "SELECT * FROM interview_transcripts WHERE id = %s", (transcript_id,)
+        ).fetchone()
+        if not row:
+            flash("Transcript not found.", "error")
+            return redirect(url_for("profile_list"))
+        resume_id = row["resume_id"]
+        conn.execute("DELETE FROM interview_transcripts WHERE id = %s", (transcript_id,))
+
+    stored_path = TRANSCRIPT_UPLOAD_FOLDER / row["stored_filename"]
+    if stored_path.exists():
+        stored_path.unlink()
+    log_audit("Profile", "Delete Interview Transcript", record_id=resume_id,
+              record_label=row["original_filename"])
+    flash("Transcript deleted.", "success")
+    return redirect(url_for("profile_detail", resume_id=resume_id))
+
+
+@app.route("/interview-transcript/<int:transcript_id>/download")
+def download_interview_transcript(transcript_id):
+    if not _require_permission("interview_transcript", write=False):
+        abort(403)
+    with db_conn() as conn:
+        ensure_interview_transcripts_table(conn)
+        row = conn.execute(
+            "SELECT stored_filename, original_filename FROM interview_transcripts WHERE id = %s",
+            (transcript_id,),
+        ).fetchone()
+    if not row:
+        return "Transcript not found", 404
+    return send_from_directory(
+        str(TRANSCRIPT_UPLOAD_FOLDER), row["stored_filename"],
+        as_attachment=True, download_name=row["original_filename"],
+    )
+
+
 # ── Requirement Management Routes ────────────────────────────────────────────
 
 @app.route("/requirement-management")
@@ -13388,6 +13734,13 @@ ROLE_PERMISSIONS = {
     # request (2026-08-14): Interviewer and Viewer/Auditor should not see or
     # use Compare Resume. Same access pattern as write_profile/schedule_interview.
     "compare_resume": {
+        "admin": "full", "recruiter": "full", "hiring_manager": "full",
+        "interviewer": "none", "viewer_auditor": "none",
+    },
+    # Upload/view/delete an interview transcript and its AI fitment check —
+    # same access pattern as compare_resume/write_profile (an HR-facing
+    # candidate assessment tool, not something Interviewer/Viewer needs).
+    "interview_transcript": {
         "admin": "full", "recruiter": "full", "hiring_manager": "full",
         "interviewer": "none", "viewer_auditor": "none",
     },
