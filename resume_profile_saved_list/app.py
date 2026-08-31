@@ -272,6 +272,10 @@ SECTION_ALIASES = {
         # abbreviated forms: "Prof. Experience" → "prof experience"
         "prof experience", "prof work experience",
         "work exp", "professional exp",
+        # Per-skill "role-based" summary blocks (common in QA/testing resumes) —
+        # not tied to a specific employer/date, so they belong with the candidate's
+        # work history rather than Certifications/Education.
+        "automation testing summary", "manual testing summary", "scrum master summary",
     ],
 
     # ── Internships ───────────────────────────────────────────────────────────
@@ -1551,7 +1555,8 @@ def extract_text_from_pdf(path):
                         r'(?m)^\s*(?:name|full\s*name)\s*[:\-]', text, re.I
                     ))
                     if not _has_name:
-                        for _ol in ocr_text.splitlines():
+                        _ocr_lines = ocr_text.splitlines()
+                        for _oi, _ol in enumerate(_ocr_lines):
                             _ol = _ol.strip()
                             if not _ol:
                                 continue
@@ -1563,8 +1568,21 @@ def extract_text_from_pdf(path):
                                 continue
                             if _looks_like_name(_ol):
                                 _ocr_name = _ol
-                                contact_lines.append(f"Name: {_ol}")
-                                logger.info(f"OCR name extracted: {_ol}")
+                                # A name that wraps onto a second line in a narrow
+                                # header image (e.g. "Saravana Kumar" / "Sathiamoorthy")
+                                # otherwise loses the second line — merge it in when
+                                # the very next non-empty OCR line is also name-like.
+                                for _nl in _ocr_lines[_oi + 1:]:
+                                    _nl = _nl.strip()
+                                    if not _nl:
+                                        continue
+                                    if _looks_like_name(_nl):
+                                        _merged = f"{_ol} {_nl}".strip()
+                                        if len(_merged.split()) <= 6 and _looks_like_name(_merged):
+                                            _ocr_name = _merged
+                                    break
+                                contact_lines.append(f"Name: {_ocr_name}")
+                                logger.info(f"OCR name extracted: {_ocr_name}")
                                 break
                     # Reconstruct email local part using name when OCR split it on
                     # underscore/dot or dropped a leading character.
@@ -2677,6 +2695,9 @@ _ROLE_MAPPING = [
     # Validation (after CSV/CQV)
     ({"validation"},                       {"lead", "compliance", "senior", "head", "manager"}, "Validation Lead"),
     ({"validation"},                       set(),                                               "Validation Engineer"),
+    # AI Test Lead (checked before plain "Test" so an AI-testing title doesn't
+    # fall through to the generic Test Lead/Engineer rules below)
+    ({"ai", "test"},                       {"lead", "senior", "head", "manager"},               "AI Test Lead"),
     # Test / QA
     ({"test"},                             {"lead", "senior", "manager", "head"},               "Test Lead"),
     ({"qa"},                               {"lead", "senior", "manager", "head"},               "Test Lead"),
@@ -2755,13 +2776,15 @@ def _extract_name_from_pdf_fonts(path):
     except Exception:
         return ""
 
-    candidates = []  # (score, font_size, text)
+    candidates = []  # (score, font_size, text, line_idx, y0)
     max_size = 0.0
+    line_idx = -1
 
     for block in dict_data.get("blocks", []):
         if block.get("type") != 0:
             continue
         for line in block.get("lines", []):
+            line_idx += 1
             y0 = line.get("bbox", [0, 0, 0, 9999])[1]
             if y0 > top_zone:
                 continue
@@ -2792,8 +2815,18 @@ def _extract_name_from_pdf_fonts(path):
                 for n in range(min(5, len(words)), 0, -1):
                     candidate = " ".join(words[:n])
                     if _looks_like_name(candidate):
-                        score = (bold and underline) * 4 + bold * 2
-                        candidates.append((score, line_max_size, candidate))
+                        # Bold/underline is only a tie-breaker (max 3 points) — it
+                        # must never outweigh actually being the largest text on
+                        # the page. Real-world case: a resume styled its job-title
+                        # line bold+underlined at 10.8pt while the actual name sat
+                        # right above it, unstyled but at 24pt — under the old
+                        # weighting (bold+underline worth 6, "large font" worth
+                        # only 1) the smaller bold+underlined title line won and
+                        # its "Automation Test" fragment (the closest name-shaped
+                        # prefix, since "...Lead" fails the name check) got
+                        # returned as the person's name.
+                        score = (bold and underline) * 2 + bold * 1
+                        candidates.append((score, line_max_size, candidate, line_idx, y0))
                         _found = True
                         break
                 if _found:
@@ -2802,13 +2835,40 @@ def _extract_name_from_pdf_fonts(path):
     if not candidates:
         return ""
 
-    # Add large-font bonus now that global max_size is known
+    # Large-font bonus dominates the score — being among the largest text on the
+    # page is a far more reliable "this is the name" signal across resume
+    # templates than any particular bold/underline styling choice.
     scored = [
-        (score + (1 if size >= max_size * 0.85 else 0), size, text)
-        for score, size, text in candidates
+        (score + (10 if size >= max_size * 0.85 else 0), size, text, idx, y0)
+        for score, size, text, idx, y0 in candidates
     ]
     scored.sort(key=lambda x: (-x[0], -x[1]))
-    return scored[0][2][:80]
+    best_score, best_size, best_text, best_idx, best_y0 = scored[0]
+
+    # A name that wraps onto a second line in a narrow header column (common in
+    # two-column/sidebar templates, e.g. "Saravana Kumar" / "Sathiamoorthy")
+    # otherwise loses the second line entirely — it's an equally strong candidate
+    # in its own right, so the tie-break above just picks whichever came first.
+    # Merge it back in when the very next "line" is styled the same way (comparable
+    # score and font size) AND sits genuinely below it on the page (a real second
+    # line of text, not a same-line run PyMuPDF split into a separate line entry —
+    # some resume-builder exports emit one <text> run per word/segment even on a
+    # single visual line, which previously fused unrelated fragments like
+    # "Automation" + "Test" from a job-title line into a fake merged "name").
+    for score, size, text, idx, y0 in scored:
+        if idx != best_idx + 1:
+            continue
+        if score < best_score - 3 or abs(size - best_size) > best_size * 0.15:
+            break
+        y_gap = y0 - best_y0
+        if y_gap < best_size * 0.5 or y_gap > best_size * 2.5:
+            break
+        merged = f"{best_text} {text}".strip()
+        if len(merged.split()) <= 6 and _looks_like_name(merged):
+            return merged[:80]
+        break
+
+    return best_text[:80]
 
 
 _SIDEBAR_CONTACT_HEAD = re.compile(
@@ -4759,7 +4819,7 @@ def parse_resume_with_llm_text(path):
         "Relevant Project/Organizational Details",
         "Project/Organizational Details",
         "PROFESSIONAL CERTIFICATIONS", "PROFESSIONAL CERTIFICATION",
-        "CERTIFICATES", "CERTIFICATE",
+        "CERTIFICATES", "CERTIFICATE", "CERTIFICATION",
         "AWARDS & RECOGNITION", "AWARDS AND RECOGNITION",
         "LICENSES AND CERTIFICATIONS", "LICENSES & CERTIFICATIONS",
         "CERTIFICATES AND LICENSES", "CERTIFICATES & LICENSES",
@@ -4803,6 +4863,13 @@ def parse_resume_with_llm_text(path):
         "COMPLETED PROJECTS", "PROJECTS DONE",
         "CERTIFICATES COURSES", "CERTIFICATE COURSES",
         "CERTIFICATES AND COURSES", "COURSES AND CERTIFICATES", "COURSES",
+        # Per-skill "role-based" summary blocks — common in QA/testing resumes
+        # that recap the candidate's automation/manual/scrum-master experience
+        # under separate headings rather than one combined Professional Summary.
+        # Not recognizing these means they aren't a boundary at all, so whatever
+        # section happens to precede them (often Certifications) silently reads
+        # straight through into their content.
+        "AUTOMATION TESTING SUMMARY", "MANUAL TESTING SUMMARY", "SCRUM MASTER SUMMARY",
     ]
     _section_heading_re = re.compile(
         r'(?:^|(?<=\n))\s*('
@@ -4874,6 +4941,12 @@ def parse_resume_with_llm_text(path):
             return "projects"
         if u in ("REFERENCES",):
             return "references"
+        if u in ("AUTOMATION TESTING SUMMARY", "MANUAL TESTING SUMMARY", "SCRUM MASTER SUMMARY"):
+            # Not one of the 6 core resume fields — folded into "experience" as a
+            # trailing "Work summary" block near the end of this function, since
+            # this content describes the candidate's work by skill/role rather
+            # than by employer and doesn't belong in Certifications or Education.
+            return "role_summary"
         return None
 
     # Validate headings: must be ALL CAPS (letter characters only).
@@ -5012,7 +5085,15 @@ def parse_resume_with_llm_text(path):
 
         if heading.upper() in _ROLES_RESP_HEADINGS and i > 0:
             _prev_heading = headings[i - 1][1]
-            if _prev_heading.upper() in _PROJECT_DETAILS_HEADINGS:
+            # Also trust a plain "Projects"-family heading immediately above (not
+            # just the "Project Details" table-header variants) — e.g. a Projects
+            # section listing several clients, where only the first one spells out
+            # its own "RESPONSIBILITIES" sub-heading and the rest are bare bullets.
+            # Without this, that sub-heading defaults to "experience" and steals
+            # everything up to the next real heading — including the later,
+            # unlabeled client blocks — out of Projects entirely.
+            if (_prev_heading.upper() in _PROJECT_DETAILS_HEADINGS
+                    or _heading_field(_prev_heading) == "projects"):
                 field = "projects"
                 logger.info(
                     "'%s' routed to 'projects' — immediately follows '%s' "
@@ -5786,10 +5867,18 @@ def parse_resume_with_llm_text(path):
             'Return ONLY JSON: {"skills":["s1","s2",...]} or {"skills":[]}.\n\nRESUME:\n',
             raw_text[:3000], True, 400, 1024,
         ),
-        "education": (
-            "Extract the education section verbatim from this resume.\n\nRESUME:\n",
-            raw_text, False, 300, 1024,
-        ),
+        # NOTE: deliberately no "education" entry here. This fallback only ever
+        # fires when the deterministic verbatim/heading-based pass found no
+        # Education section at all — i.e. exactly the case where a blank field
+        # is the CORRECT answer. Asking the model to "extract education" from a
+        # resume with none reliably produces a hallucinated substitute (seen in
+        # practice: a candidate's work-experience/testing bullets returned as
+        # "education" verbatim, including a plausible-looking invented degree
+        # when asked directly) rather than an honest "not found" — a keyword
+        # filter on the response can't reliably tell a real extraction from a
+        # hallucinated one that happens to mention "degree"/"bachelor" as
+        # generic filler. Leaving the field blank matches this function's own
+        # "no invented content" contract and is always correct in this case.
     }
 
     import time as _time
@@ -6179,6 +6268,32 @@ def parse_resume_with_llm_text(path):
                 "Summary replaced with pymupdf block paragraph (%d → %d chars)",
                 len(_cur_summary), len(_blk_summary),
             )
+
+    # Role-based skill summaries ("Automation Testing Summary", "Manual Testing
+    # Summary", "Scrum Master Summary", etc.) aren't tied to a specific employer
+    # or date, so they don't belong in Education/Certifications where unrecognized
+    # headings like these would otherwise just be read as more body text of
+    # whatever section precedes them. Fold them into Work Experience instead, as
+    # a trailing "Work summary" block placed after the dated job entries.
+    _role_summary_text = (result.pop("role_summary", "") or "").strip()
+    if _role_summary_text:
+        if result.get("experience", "").strip():
+            result["experience"] = result["experience"].rstrip() + "\n\nWork summary\n" + _role_summary_text
+        else:
+            result["experience"] = "Work summary\n" + _role_summary_text
+        logger.info("Folded %d chars of role-based summary into Experience as 'Work summary'", len(_role_summary_text))
+
+    # Achievements are a Certifications sub-topic in this app's field model (there
+    # is no standalone Achievements field in the UI) — merge them in explicitly
+    # rather than letting them ride along as a stray, never-displayed "achievements"
+    # key. Guarded against duplication in case an earlier step already merged it.
+    _achievements_text = (result.pop("achievements", "") or "").strip()
+    if _achievements_text and _achievements_text not in result.get("certifications", ""):
+        if result.get("certifications", "").strip():
+            result["certifications"] = result["certifications"].rstrip() + "\n" + _achievements_text
+        else:
+            result["certifications"] = _achievements_text
+        logger.info("Merged %d chars of Achievements into Certifications", len(_achievements_text))
 
     return result, "llm_text"
 
@@ -8320,14 +8435,15 @@ REGULATORY_ROLES = [
 
 VALIDATION_ROLES = [
     "CSV Analyst", "CSV Lead", "Validation Engineer", "Validation Lead",
-    "CQV Engineer", "CQV Lead", "Automation Engineer", "Automation Lead",
-    "Tosca Engineer", "Tosca Lead", "Test Engineer", "Test Lead",
+    "CQV Engineer", "CQV Lead", "Automation Engineer",
 ]
 
 IT_ROLES = [
     "Software Developer", "Full Stack Developer", "Frontend Developer",
     "Backend Developer", "DevOps Engineer", "Cloud Engineer", "Data Analyst",
     "Data Engineer", "Business Analyst", "QA Engineer", "Automation Tester",
+    "AI Test Lead", "Automation Lead", "Tosca Engineer", "Tosca Lead",
+    "Test Engineer", "Test Lead",
     "Project Manager", "Scrum Master", "UI/UX Designer", "Solution Architect",
     "Cybersecurity Engineer", "Database Administrator", "AI/ML Engineer",
     "SAP Consultant", "Salesforce Developer",
@@ -9841,6 +9957,54 @@ PREDEFINED_JDS = [
             "Technical Writing\nMultilingual\nTranslation\nCross-functional Collaboration"
         ),
         "keywords": "labeling, label design, IVD, medical device, IVDR, regulatory, QMS, Adobe InDesign, documentation",
+    },
+    # ── AI Test Lead JD ───────────────────────────────────────────────────────
+    {
+        "title": "AI Test Lead",
+        "role": "AI Test Lead",
+        "category": "IT Roles",
+        "responsibilities": (
+            "Lead end-to-end testing activities for AI/ML and Generative AI applications\n"
+            "Define test strategy, test plans, test scenarios, and quality standards for AI solutions\n"
+            "Design and implement automated testing frameworks for web, API, and AI-based applications\n"
+            "Test LLM, RAG, prompt-based applications, chatbots, and AI agents\n"
+            "Validate AI responses for accuracy, relevance, consistency, toxicity, bias, hallucination, and reliability\n"
+            "Develop test datasets and evaluation methodologies for AI/GenAI applications\n"
+            "Perform API, functional, regression, integration, and end-to-end testing\n"
+            "Collaborate with developers, data scientists, product owners, and business stakeholders\n"
+            "Identify and troubleshoot defects and quality issues across application and AI components\n"
+            "Integrate automated tests into CI/CD pipelines\n"
+            "Mentor QA engineers and provide technical leadership to the testing team\n"
+            "Establish quality metrics, reporting, and continuous improvement practices\n"
+            "Ensure testing standards and best practices are followed across projects"
+        ),
+        "requirements": (
+            "7+ years of experience in Software Testing / QA / Test Automation (Remote position)\n"
+            "Hands-on experience in AI/GenAI/LLM testing\n"
+            "Strong experience with Selenium, Playwright, Cypress, or similar automation tools\n"
+            "Strong programming skills in Python or Java\n"
+            "Experience in API testing using REST, Postman, Rest Assured, or similar tools\n"
+            "Understanding of LLM, RAG, prompt engineering, AI agents, and Generative AI applications\n"
+            "Experience with AI evaluation concepts such as hallucination, relevance, accuracy, toxicity, bias, and response quality\n"
+            "Exposure to AI testing/evaluation tools such as DeepEval, Promptfoo, OpenAI Evals, or equivalent\n"
+            "Good understanding of SQL and database testing\n"
+            "Experience with Git and CI/CD tools such as Jenkins, GitHub Actions, or Azure DevOps\n"
+            "Strong knowledge of SDLC, STLC, Agile/Scrum, defect management, and test management processes\n"
+            "Bachelor's degree in Computer Science, Information Technology, Engineering, or a related field\n"
+            "Good to have: LangChain/LangGraph testing, vector databases and RAG architectures, AWS/Azure/GCP exposure, "
+            "AI security testing and responsible AI principles, performance and security testing, prior QA team leadership"
+        ),
+        "skills": (
+            "AI Testing\nGenerative AI\nLLM\nRAG\nPrompt Engineering\nAI Agents\nChatbot Testing\n"
+            "Selenium\nPlaywright\nCypress\nPython\nJava\nAPI Testing\nREST\nPostman\nRest Assured\n"
+            "Hallucination Detection\nBias Detection\nToxicity Testing\nAI Evaluation\n"
+            "DeepEval\nPromptfoo\nOpenAI Evals\nSQL\nDatabase Testing\nGit\nCI/CD\n"
+            "Jenkins\nGitHub Actions\nAzure DevOps\nSDLC\nSTLC\nAgile\nScrum\n"
+            "Defect Management\nTest Management\nLangChain\nLangGraph\nVector Databases\n"
+            "AWS\nAzure\nGCP\nAI Security Testing\nResponsible AI\nPerformance Testing\n"
+            "Security Testing\nTest Leadership\nTest Automation Framework"
+        ),
+        "keywords": "AI Test Lead, AI testing, GenAI, LLM, RAG, test automation, Selenium, Playwright, Python, API testing, CI/CD, QA leadership",
     },
 ]
 

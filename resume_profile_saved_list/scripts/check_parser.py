@@ -385,6 +385,93 @@ def _assert_sidebar_personal_bleed(parsed):
     return problems
 
 
+def _unlabeled_projects_pdf(path):
+    """A bare 'Projects' heading (not the 'Project Details' table-header
+    variant) listing several clients, where only the FIRST client spells out
+    its own 'RESPONSIBILITIES' sub-heading and the rest are bare bullets with
+    no heading at all — real-world case: Saravana Kumar Sathiamoorthy's resume.
+    'RESPONSIBILITIES' defaults to 'experience' (it's also a legitimate per-job
+    Experience sub-heading elsewhere), and previously only flipped to
+    'projects' when immediately preceded by a 'Project Details'-family
+    heading — a plain 'Projects' heading didn't count, so the sub-heading (and
+    everything after it, up to the next real heading) got stolen into
+    Experience while Projects was left truncated to just the first client's
+    name/duration line. Also covers per-skill role-based summary headings
+    (common in QA/testing resumes) that must fold into Experience as a
+    trailing "Work summary" block instead of bleeding into Certifications, and
+    Achievements merging into Certifications alongside real certificates."""
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.platypus import Paragraph
+    ss = getSampleStyleSheet()
+    h, n = ss["Heading2"], ss["BodyText"]
+    story = [
+        # Name wraps across two lines in a narrow header column — both lines
+        # score identically (same bold Title style), so the font-based name
+        # extractor must merge them instead of only keeping the first.
+        Paragraph("Jordan", ss["Title"]),
+        Paragraph("Casey", ss["Title"]),
+        Paragraph("Automation Test Lead", n),
+        # Email + phone in the text layer so this stays on the fast PyMuPDF
+        # font-based name path, matching the real resume — without them, missing
+        # contact info would trigger the (slow) EasyOCR fallback path instead.
+        Paragraph("jordan.casey@example.com (+1) 5551234567", n),
+        Paragraph("Work Experience", h),
+        Paragraph("Aug 2010 - Present", n),
+        Paragraph("Automation Test Lead, Atos", n),
+        Paragraph("Led testing efforts for 14 years, driving efficiency gains.", n),
+        Paragraph("Projects", h),
+        Paragraph("45 Months", n),
+        Paragraph("Stellantis", n),
+        Paragraph("RESPONSIBILITIES", n),
+        Paragraph("Building QE Assist, a GenAI-powered testing tool.", n),
+        Paragraph("58 Months", n),
+        Paragraph("Fedex", n),
+        Paragraph("Plan with Scrum teams on sprint planning.", n),
+        Paragraph("Certification", h),
+        Paragraph("ISTQB Foundation Level Tester", n),
+        Paragraph("Certified Scrum Master", n),
+        Paragraph("AUTOMATION TESTING SUMMARY", h),
+        Paragraph("Design, develop and maintain automated test scripts.", n),
+        Paragraph("MANUAL TESTING SUMMARY", h),
+        Paragraph("Well versed with all stages of SDLC and STLC.", n),
+        Paragraph("SCRUM MASTER SUMMARY", h),
+        Paragraph("Scrum Master for multiple teams, present KPIs.", n),
+        Paragraph("ACHIEVEMENTS", h),
+        Paragraph("Received Individual Value Award for Q1.", n),
+    ]
+    _make_pdf(path, story)
+
+
+def _assert_unlabeled_projects(parsed):
+    problems = []
+    full_name = str(parsed.get("full_name") or "")
+    if full_name != "Jordan Casey":
+        problems.append("two-line wrapped name was not merged into 'full_name': %r" % full_name)
+    experience = str(parsed.get("experience") or "")
+    projects = str(parsed.get("projects") or "")
+    certifications = str(parsed.get("certifications") or "")
+    if "Fedex" not in projects or "Plan with Scrum teams" not in projects:
+        problems.append("unlabeled second client block leaked out of 'projects': %r" % projects)
+    if "Stellantis" not in projects or "Building QE Assist" not in projects:
+        problems.append("first client's RESPONSIBILITIES content was not routed to 'projects': %r" % projects)
+    if "Fedex" in experience or "Building QE Assist" in experience:
+        problems.append("project content leaked into 'experience': %r" % experience)
+    if "Certification" in projects or "ISTQB" in projects:
+        problems.append("a bare 'Certification' heading was not recognized as a boundary — "
+                         "Certification content leaked into 'projects': %r" % projects)
+    if "Atos" not in experience:
+        problems.append("genuine Work Experience content was lost: %r" % experience)
+    if "Work summary" not in experience or "Scrum Master for multiple teams" not in experience:
+        problems.append("role-based summary headings were not folded into Experience as 'Work summary': %r" % experience)
+    if "AUTOMATION TESTING SUMMARY" in certifications or "SDLC" in certifications:
+        problems.append("role-based summary content leaked into 'certifications': %r" % certifications)
+    if "ISTQB" not in certifications:
+        problems.append("genuine Certification content was lost: %r" % certifications)
+    if "Individual Value Award" not in certifications:
+        problems.append("Achievements were not merged into 'certifications': %r" % certifications)
+    return problems
+
+
 def _stub_out_ai(app):
     """Neutralize every LLM call so the check is fast and offline. We test the
     deterministic pipeline + crash-safety, not the model."""
@@ -438,6 +525,13 @@ def check_parsing_runtime():
          # fused "WEBSITES, PORTFOLIOS <url>" and wrapped "PERSONAL"/"INFORMATION"
          # sidebar lines must never leak into Skills
          ["skills", "education"], _assert_sidebar_personal_bleed),
+        ("unlabeled-projects", os.path.join(tmp, "unlabeled_projects.pdf"), _unlabeled_projects_pdf,
+         # a bare "Projects" heading with only its first client labeled
+         # "RESPONSIBILITIES" must not leak later unlabeled clients into
+         # Experience; a two-line wrapped name must be merged; role-based
+         # summary headings fold into Experience as "Work summary";
+         # Achievements merge into Certifications
+         ["full_name", "experience", "projects", "certifications"], _assert_unlabeled_projects),
     ]
     for label, path, builder, required, custom in cases:
         try:
@@ -731,6 +825,52 @@ def check_skill_fragment_helper():
         clean2, rescued2 = rescue(clean_only)
         if clean2 != clean_only or rescued2:
             _fail("skill-sidebar rescue wrongly altered clean experience: %r / %r" % (clean2, rescued2))
+
+    # Font-based name extraction must merge a genuinely wrapped two-line name
+    # (different Y position, same style) but must NOT merge same-line text-run
+    # fragments some resume-builder PDF exports emit as separate PyMuPDF "line"
+    # entries at the same Y (e.g. a job-title line split into "Automation" +
+    # "Test" runs) — that previously produced a fake merged "name" like
+    # "Automation Test" pulled straight out of the job title, not the person's
+    # actual name.
+    name_fn = getattr(app, "_extract_name_from_pdf_fonts", None)
+    if name_fn is None:
+        _fail("_extract_name_from_pdf_fonts helper is missing")
+    else:
+        from reportlab.pdfgen import canvas as _canvas
+        same_line_path = os.path.join(tempfile.mkdtemp(prefix="parser_guard_"), "same_line.pdf")
+        c = _canvas.Canvas(same_line_path)
+        c.setFont("Helvetica-Bold", 18)
+        c.drawString(72, 760, "Riley")
+        c.drawString(72, 732, "Morgan")
+        # Two separate drawString calls at the IDENTICAL y — simulates a PDF
+        # exporter emitting one text run per word on a single visual line.
+        c.setFont("Helvetica", 10)
+        c.drawString(72, 704, "Automation")
+        c.drawString(140, 704, "Test")
+        c.drawString(72, 690, "Lead")
+        c.save()
+        got_name = name_fn(same_line_path)
+        if got_name != "Riley Morgan":
+            _fail("font-based name extraction gave %r, expected the wrapped two-line "
+                  "name 'Riley Morgan' merged correctly" % got_name)
+
+        # Real-world case: Saravana Kumar Sathiamoorthy's resume styled the job
+        # title bold at 10.8pt while the actual name sat above it, unstyled, at
+        # 24pt. Being the largest text on the page must win over a smaller
+        # bold line — otherwise the job title's name-shaped prefix ("Automation
+        # Test", since "...Lead" fails the name check) gets returned instead.
+        bold_title_path = os.path.join(tempfile.mkdtemp(prefix="parser_guard_"), "bold_title.pdf")
+        c2 = _canvas.Canvas(bold_title_path)
+        c2.setFont("Helvetica", 24)
+        c2.drawString(72, 760, "Jamie Rivera")
+        c2.setFont("Helvetica-Bold", 11)
+        c2.drawString(72, 720, "Automation Test Lead")
+        c2.save()
+        got_name2 = name_fn(bold_title_path)
+        if got_name2 != "Jamie Rivera":
+            _fail("font-based name extraction gave %r — a smaller bold job-title "
+                  "line outscored the actual (larger, unstyled) name" % got_name2)
 
     if not FAILURES:
         print("  OK: skills + experience + heading-tail + keyword helpers all correct")
