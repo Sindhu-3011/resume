@@ -8431,6 +8431,12 @@ REGULATORY_ROLES = [
     "IFU Team Lead",
     "Product Registration Specialist",
     "Labeling Specialist",
+    "Complaints Handling",
+]
+
+QUALITY_ROLES = [
+    "Supplier Quality Associate",
+    "Supplier Quality Analyst",
 ]
 
 VALIDATION_ROLES = [
@@ -8453,6 +8459,7 @@ ALL_JD_ROLES = {
     "Regulatory Affairs": REGULATORY_ROLES,
     "Validation Roles": VALIDATION_ROLES,
     "IT Roles": IT_ROLES,
+    "Quality": QUALITY_ROLES,
 }
 
 # ── New: Raw Upload Folder ────────────────────────────────────────────────────
