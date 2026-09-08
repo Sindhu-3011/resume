@@ -37,15 +37,26 @@
                 {% endfor %}
             </optgroup>
             {% endfor %}
+            {% if jd and jd.role and jd.role not in (all_roles.values() | sum(start=[])) %}
+            <optgroup label="Other">
+                <option value="{{ jd.role }}" selected>{{ jd.role }}</option>
+            </optgroup>
+            {% endif %}
         </select>
+        {% if can_write('manage_role_taxonomy') %}
+        <p class="small"><a href="{{ url_for('role_management', scope='jd') }}" target="_blank" rel="noopener">+ Add a new role or category</a></p>
+        {% endif %}
     </div>
 
     <div>
         <label for="category">Category <span style="color:#c0182c;">*</span></label>
         <select id="category" name="category" class="form-select" required>
-            <option value="Validation Roles" {% if not jd or jd.category == 'Validation Roles' %}selected{% endif %}>Validation Roles</option>
-            <option value="IT Roles" {% if jd and jd.category == 'IT Roles' %}selected{% endif %}>IT Roles</option>
-            <option value="General" {% if jd and jd.category == 'General' %}selected{% endif %}>General</option>
+            {% for group in all_roles.keys() %}
+            <option value="{{ group }}" {% if (jd and jd.category == group) or (not jd and loop.first) %}selected{% endif %}>{{ group }}</option>
+            {% endfor %}
+            {% if jd and jd.category and jd.category not in all_roles.keys() %}
+            <option value="{{ jd.category }}" selected>{{ jd.category }}</option>
+            {% endif %}
         </select>
     </div>
 

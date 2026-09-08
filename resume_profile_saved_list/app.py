@@ -21,7 +21,7 @@ import secrets
 import smtplib
 from email.mime.text import MIMEText
 import uuid
-from collections import Counter
+from collections import Counter, OrderedDict
 import zipfile
 import json
 import logging
@@ -6599,7 +6599,10 @@ def edit_resume(resume_id=None):
 
     # The "Bulk Upload" tab only applies to the Add Profile (new) flow, not editing.
     raw_files, jds = ([], []) if resume_id else _get_raw_files_and_jds()
-    return render_template("edit.html", resume=resume, raw_files=raw_files, jds=jds)
+    return render_template(
+        "edit.html", resume=resume, raw_files=raw_files, jds=jds,
+        profile_role_groups=get_role_taxonomy("profile"),
+    )
 
 
 @app.route("/profile")
@@ -8462,6 +8465,229 @@ ALL_JD_ROLES = {
     "Quality": QUALITY_ROLES,
 }
 
+# ── Role/Group Taxonomy (DB-backed, editable via /roles/manage) ─────────────
+# Adding every new role or category used to mean a code change + a server
+# restart (the exact friction reported live: several role/category asks in a
+# row each needed a restart before showing up). This table is now the single
+# source of truth for both the JD form's "Role (links to Groups)" + "Category"
+# dropdowns (scope="jd") and the profile editor's "Select a role group"
+# dropdown (scope="profile") — new groups/roles are added and removed through
+# the Manage Roles page, not by editing this file.
+#
+# ALL_JD_ROLES above and _PROFILE_ROLE_TAXONOMY_SEED below are kept only as
+# the ONE-TIME seed content for a scope's first-ever use (mirroring seed_jds'
+# "only seed when genuinely empty" pattern) — after that, edits made through
+# the UI are what's authoritative, not these Python literals.
+
+_PROFILE_ROLE_TAXONOMY_SEED = {
+    "Regulatory Affairs": [
+        "Technical Writer", "Technical Writer Lead", "Technical Writing II",
+        "Technical Writing II (Analytical instruments)", "Design Control Consultant",
+        "Instructions For Use expert", "IFU Technical Writer", "IFU Team Lead",
+        "Labelling expert", "Post Market Surveillance", "Product Registration Specialist",
+        "Product Registration Analyst", "Regulatory Affairs Manager",
+        "Regulatory Affairs Specialist", "Complaints Handling",
+    ],
+    "PI (Product Information) & Labelling": [
+        "PI & Labelling Manager", "PI & Labelling Lead", "Product Information Specialist",
+        "Medical Writer (PI-focused)", "Labelling Specialist",
+        "Quality Assurance Reviewer (Labelling QA)", "Translation Specialist",
+        "Labelling Analyst",
+    ],
+    "Market Access & RegDesk": [
+        "Market Access / RegDesk Manager", "Regulatory Operations Associate",
+        "Regulatory Intelligence Specialist", "Registration Specialist",
+        "Compliance Specialist", "Market Access Analyst",
+    ],
+    "Complaints Handling": [
+        "Complaints Handling Manager", "Complaints Team Lead",
+        "Complaints Compliance Specialist", "Complaints Specialist",
+        "Complaints Handling Analyst",
+    ],
+    "QARA Data Analytics & AI": [
+        "AI & Data Analytics Lead (QARA)", "AI Governance & Compliance Officer",
+        "Regulatory Technology Specialist", "Quality Data Engineer",
+        "QARA Business Analyst",
+    ],
+    "Doc Control": [
+        "Document Control Manager", "Senior Document Control Specialist",
+        "Technical Documentation Coordinator", "Document Associate",
+        "Training & Compliance Analyst",
+    ],
+    "Supplier Quality": [
+        "Supplier Quality Associate", "Supplier Quality Analyst",
+    ],
+    "Validation Roles": [
+        "CSV Analyst", "CSV Lead", "Validation Engineer", "Validation Lead",
+        "CQV Engineer", "CQV Lead", "Automation Engineer", "Automation Lead",
+        "Tosca Engineer", "Tosca Lead", "Test Engineer", "Test Lead",
+    ],
+    "IT Technology": [
+        "IT Manager", "Network Engineer", "IT Support Specialist", "Cloud Engineer",
+        "Software Developer", "Cybersecurity Engineer", "Data Engineer",
+        "Testing Engineer", "Information Security Analyst", "Full Stack Developer",
+        "Frontend Developer", "Backend Developer", "DevOps Engineer", "Data Analyst",
+        "Business Analyst", "QA Engineer", "Automation Tester", "AI Test Lead",
+        "Project Manager", "Scrum Master", "UI/UX Designer", "Solution Architect",
+        "Database Administrator", "AI/ML Engineer", "SAP Consultant",
+        "Salesforce Developer",
+    ],
+}
+
+_ROLE_TAXONOMY_SCOPE_SEED = {
+    "jd": ALL_JD_ROLES,
+    "profile": _PROFILE_ROLE_TAXONOMY_SEED,
+}
+
+
+def ensure_role_taxonomy_table(conn):
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS role_taxonomy (
+            id          SERIAL PRIMARY KEY,
+            scope       VARCHAR(20) NOT NULL,
+            category    VARCHAR(120) NOT NULL,
+            role_name   VARCHAR(200) NOT NULL,
+            sort_order  INTEGER NOT NULL DEFAULT 0,
+            created_at  TIMESTAMP DEFAULT NOW(),
+            UNIQUE (scope, category, role_name)
+        )
+    """)
+
+
+def _seed_role_taxonomy_scope(conn, scope):
+    """Populate one scope's starter roles/categories on its first-ever use
+    only (table genuinely has zero rows for this scope) — re-checking
+    role-by-role would silently undo a user's own deletions on the very next
+    page load, the same bug seed_jds() was written to avoid."""
+    (count_row,) = conn.execute(
+        "SELECT COUNT(*) AS n FROM role_taxonomy WHERE scope = %s", (scope,)
+    ).fetchall()
+    if count_row["n"] > 0:
+        return
+    seed = _ROLE_TAXONOMY_SCOPE_SEED.get(scope, {})
+    order = 0
+    for category, roles in seed.items():
+        for role_name in roles:
+            conn.execute(
+                """
+                INSERT INTO role_taxonomy (scope, category, role_name, sort_order)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (scope, category, role_name) DO NOTHING
+                """,
+                (scope, category, role_name, order),
+            )
+            order += 1
+
+
+def get_role_taxonomy(scope):
+    """Returns {category: [role_name, ...]} for the given scope ("jd" or
+    "profile"), ordered by each category's first-added role and each role's
+    own insertion order — new categories/roles added via the Manage Roles
+    page simply appear at the end, matching how they were added."""
+    with db_conn() as conn:
+        ensure_role_taxonomy_table(conn)
+        _seed_role_taxonomy_scope(conn, scope)
+        rows = conn.execute(
+            "SELECT category, role_name FROM role_taxonomy WHERE scope = %s "
+            "ORDER BY sort_order, id",
+            (scope,),
+        ).fetchall()
+    grouped = OrderedDict()
+    for row in rows:
+        grouped.setdefault(row["category"], []).append(row["role_name"])
+    return grouped
+
+
+def _can_manage_role_taxonomy():
+    """Explicit follow-up ask: only admin + hiring_manager may add, edit, or
+    delete a role/category — recruiter (who can otherwise write a JD or a
+    profile) is deliberately excluded here, since this picklist is shared
+    across every recruiter's forms, not scoped to one JD/profile."""
+    return _permission_level("manage_role_taxonomy") == "full"
+
+
+@app.route("/roles/manage")
+def role_management():
+    if not _can_manage_role_taxonomy():
+        abort(403)
+    scope = request.args.get("scope", "jd")
+    if scope not in ("jd", "profile"):
+        scope = "jd"
+    taxonomy = get_role_taxonomy(scope)
+    with db_conn() as conn:
+        ensure_role_taxonomy_table(conn)
+        rows = conn.execute(
+            "SELECT id, category, role_name FROM role_taxonomy WHERE scope = %s "
+            "ORDER BY sort_order, id",
+            (scope,),
+        ).fetchall()
+    role_ids = {(r["category"], r["role_name"]): r["id"] for r in rows}
+    return render_template(
+        "role_management.html", scope=scope, taxonomy=taxonomy, role_ids=role_ids,
+    )
+
+
+@app.route("/roles/add", methods=["POST"])
+def role_add():
+    if not _can_manage_role_taxonomy():
+        abort(403)
+    scope = request.form.get("scope", "jd")
+    if scope not in ("jd", "profile"):
+        scope = "jd"
+    category = (request.form.get("new_category") or request.form.get("category") or "").strip()
+    role_name = (request.form.get("role_name") or "").strip()
+    if not category or not role_name:
+        flash("Please provide both a category and a role name.", "error")
+        return redirect(url_for("role_management", scope=scope))
+    with db_conn() as conn:
+        ensure_role_taxonomy_table(conn)
+        (next_order,) = conn.execute(
+            "SELECT COALESCE(MAX(sort_order), 0) + 1 AS n FROM role_taxonomy WHERE scope = %s",
+            (scope,),
+        ).fetchall()
+        existing = conn.execute(
+            "SELECT id FROM role_taxonomy WHERE scope = %s AND category = %s AND LOWER(role_name) = LOWER(%s)",
+            (scope, category, role_name),
+        ).fetchone()
+        if existing:
+            flash(f'"{role_name}" already exists under "{category}".', "error")
+            return redirect(url_for("role_management", scope=scope))
+        conn.execute(
+            """
+            INSERT INTO role_taxonomy (scope, category, role_name, sort_order)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (scope, category, role_name, next_order["n"]),
+        )
+    log_audit("Role Management", "Add", record_label=f"{scope}: {category} / {role_name}")
+    flash(f'Added "{role_name}" under "{category}".', "success")
+    return redirect(url_for("role_management", scope=scope))
+
+
+@app.route("/roles/delete", methods=["POST"])
+def role_delete():
+    if not _can_manage_role_taxonomy():
+        abort(403)
+    scope = request.form.get("scope", "jd")
+    if scope not in ("jd", "profile"):
+        scope = "jd"
+    role_id = request.form.get("id", type=int)
+    if role_id is None:
+        abort(400)
+    with db_conn() as conn:
+        ensure_role_taxonomy_table(conn)
+        row = conn.execute(
+            "SELECT category, role_name FROM role_taxonomy WHERE id = %s AND scope = %s",
+            (role_id, scope),
+        ).fetchone()
+        if row:
+            conn.execute("DELETE FROM role_taxonomy WHERE id = %s", (role_id,))
+    if row:
+        log_audit("Role Management", "Delete", record_label=f"{scope}: {row['category']} / {row['role_name']}")
+        flash(f'Removed "{row["role_name"]}".', "success")
+    return redirect(url_for("role_management", scope=scope))
+
+
 # ── New: Raw Upload Folder ────────────────────────────────────────────────────
 
 RAW_UPLOAD_FOLDER = UPLOAD_FOLDER / "raw"
@@ -9293,7 +9519,7 @@ def groups(role=None):
             ).fetchall()
     return render_template(
         "groups.html",
-        all_roles=ALL_JD_ROLES,
+        all_roles=get_role_taxonomy("jd"),
         selected_role=role,
         profiles=list(profiles),
     )
@@ -11538,7 +11764,7 @@ def jd_add():
         error = _validate_jd_required_fields(data)
         if error:
             flash(error, "error")
-            return render_template("jd_form.html", jd=None, all_roles=ALL_JD_ROLES,
+            return render_template("jd_form.html", jd=None, all_roles=get_role_taxonomy("jd"),
                                    statuses=POSITION_STATUSES, default_status=DEFAULT_POSITION_STATUS), 400
 
         # Duplicate-JD warning — this app's JD model has no "Department" field,
@@ -11555,7 +11781,7 @@ def jd_add():
             if dup:
                 flash(f"A JD titled \"{dup['title']}\" already exists in the {data['category']} category.",
                       "error")
-                return render_template("jd_form.html", jd=data, all_roles=ALL_JD_ROLES,
+                return render_template("jd_form.html", jd=data, all_roles=get_role_taxonomy("jd"),
                                        statuses=POSITION_STATUSES, default_status=DEFAULT_POSITION_STATUS,
                                        duplicate_warning=True)
 
@@ -11579,7 +11805,7 @@ def jd_add():
         log_audit("JD Management", "Add", record_id=new_jd_id, record_label=data["title"])
         flash(f"Job Description '{data['title']}' added as a Draft. Submit it for approval when ready.", "success")
         return redirect(url_for("jd_detail", jd_id=new_jd_id))
-    return render_template("jd_form.html", jd=None, all_roles=ALL_JD_ROLES,
+    return render_template("jd_form.html", jd=None, all_roles=get_role_taxonomy("jd"),
                            statuses=POSITION_STATUSES, default_status=DEFAULT_POSITION_STATUS)
 
 
@@ -11792,7 +12018,7 @@ def jd_edit(jd_id):
             error = _validate_jd_required_fields(data)
             if error:
                 flash(error, "error")
-                return render_template("jd_form.html", jd=data, all_roles=ALL_JD_ROLES,
+                return render_template("jd_form.html", jd=data, all_roles=get_role_taxonomy("jd"),
                                        statuses=POSITION_STATUSES, default_status=DEFAULT_POSITION_STATUS), 400
             current = conn.execute(
                 "SELECT * FROM job_description WHERE id = %s", (jd_id,)
@@ -11818,7 +12044,7 @@ def jd_edit(jd_id):
         ).fetchone()
         if not jd:
             return "Job Description not found", 404
-    return render_template("jd_form.html", jd=dict(jd), all_roles=ALL_JD_ROLES,
+    return render_template("jd_form.html", jd=dict(jd), all_roles=get_role_taxonomy("jd"),
                            statuses=POSITION_STATUSES, default_status=DEFAULT_POSITION_STATUS)
 
 
@@ -13913,6 +14139,15 @@ ROLE_PERMISSIONS = {
     # candidate assessment tool, not something Interviewer/Viewer needs).
     "interview_transcript": {
         "admin": "full", "recruiter": "full", "hiring_manager": "full",
+        "interviewer": "none", "viewer_auditor": "none",
+    },
+    # Add/edit/delete a role or category in the JD-form and profile-editor
+    # role dropdowns. Explicit follow-up ask: unlike write_jd/write_profile
+    # (which Recruiter also has), this is admin + hiring_manager only —
+    # same pairing as delete_jd/approve_jd, since it changes a shared
+    # picklist every recruiter's forms depend on, not just one JD/profile.
+    "manage_role_taxonomy": {
+        "admin": "full", "recruiter": "none", "hiring_manager": "full",
         "interviewer": "none", "viewer_auditor": "none",
     },
 }

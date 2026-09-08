@@ -81,109 +81,17 @@
         <div class="groups-field-wrap">
             <select id="groups_select" class="form-select groups-select">
                 <option value="">— Select a role group —</option>
-                <optgroup label="Regulatory Affairs">
-                    <option value="Technical Writer">Technical Writer</option>
-                    <option value="Technical Writer Lead">Technical Writer Lead</option>
-                    <option value="Technical Writing II">Technical Writing II</option>
-                    <option value="Technical Writing II (Analytical instruments)">Technical Writing II (Analytical instruments)</option>
-                    <option value="Design Control Consultant">Design Control Consultant</option>
-                    <option value="Instructions For Use expert">Instructions For Use expert</option>
-                    <option value="IFU Technical Writer">IFU Technical Writer</option>
-                    <option value="IFU Team Lead">IFU Team Lead</option>
-                    <option value="Labelling expert">Labelling expert</option>
-                    <option value="Post Market Surveillance">Post Market Surveillance</option>
-                    <option value="Product Registration Specialist">Product Registration Specialist</option>
-                    <option value="Product Registration Analyst">Product Registration Analyst</option>
-                    <option value="Regulatory Affairs Manager">Regulatory Affairs Manager</option>
-                    <option value="Regulatory Affairs Specialist">Regulatory Affairs Specialist</option>
-                    <option value="Complaints Handling">Complaints Handling</option>
+                {% for category, roles in profile_role_groups.items() %}
+                <optgroup label="{{ category }}">
+                    {% for r in roles %}
+                    <option value="{{ r }}">{{ r }}</option>
+                    {% endfor %}
                 </optgroup>
-                <optgroup label="PI (Product Information) &amp; Labelling">
-                    <option value="PI &amp; Labelling Manager">PI &amp; Labelling Manager</option>
-                    <option value="PI &amp; Labelling Lead">PI &amp; Labelling Lead</option>
-                    <option value="Product Information Specialist">Product Information Specialist</option>
-                    <option value="Medical Writer (PI-focused)">Medical Writer (PI-focused)</option>
-                    <option value="Labelling Specialist">Labelling Specialist</option>
-                    <option value="Quality Assurance Reviewer (Labelling QA)">Quality Assurance Reviewer (Labelling QA)</option>
-                    <option value="Translation Specialist">Translation Specialist</option>
-                    <option value="Labelling Analyst">Labelling Analyst</option>
-                </optgroup>
-                <optgroup label="Market Access &amp; RegDesk">
-                    <option value="Market Access / RegDesk Manager">Market Access / RegDesk Manager</option>
-                    <option value="Regulatory Operations Associate">Regulatory Operations Associate</option>
-                    <option value="Regulatory Intelligence Specialist">Regulatory Intelligence Specialist</option>
-                    <option value="Registration Specialist">Registration Specialist</option>
-                    <option value="Compliance Specialist">Compliance Specialist</option>
-                    <option value="Market Access Analyst">Market Access Analyst</option>
-                </optgroup>
-                <optgroup label="Complaints Handling">
-                    <option value="Complaints Handling Manager">Complaints Handling Manager</option>
-                    <option value="Complaints Team Lead">Complaints Team Lead</option>
-                    <option value="Complaints Compliance Specialist">Complaints Compliance Specialist</option>
-                    <option value="Complaints Specialist">Complaints Specialist</option>
-                    <option value="Complaints Handling Analyst">Complaints Handling Analyst</option>
-                </optgroup>
-                <optgroup label="QARA Data Analytics &amp; AI">
-                    <option value="AI &amp; Data Analytics Lead (QARA)">AI &amp; Data Analytics Lead (QARA)</option>
-                    <option value="AI Governance &amp; Compliance Officer">AI Governance &amp; Compliance Officer</option>
-                    <option value="Regulatory Technology Specialist">Regulatory Technology Specialist</option>
-                    <option value="Quality Data Engineer">Quality Data Engineer</option>
-                    <option value="QARA Business Analyst">QARA Business Analyst</option>
-                </optgroup>
-                <optgroup label="Doc Control">
-                    <option value="Document Control Manager">Document Control Manager</option>
-                    <option value="Senior Document Control Specialist">Senior Document Control Specialist</option>
-                    <option value="Technical Documentation Coordinator">Technical Documentation Coordinator</option>
-                    <option value="Document Associate">Document Associate</option>
-                    <option value="Training &amp; Compliance Analyst">Training &amp; Compliance Analyst</option>
-                </optgroup>
-                <optgroup label="Supplier Quality">
-                    <option value="Supplier Quality Associate">Supplier Quality Associate</option>
-                    <option value="Supplier Quality Analyst">Supplier Quality Analyst</option>
-                </optgroup>
-                <optgroup label="Validation Roles">
-                    <option value="CSV Analyst">CSV Analyst</option>
-                    <option value="CSV Lead">CSV Lead</option>
-                    <option value="Validation Engineer">Validation Engineer</option>
-                    <option value="Validation Lead">Validation Lead</option>
-                    <option value="CQV Engineer">CQV Engineer</option>
-                    <option value="CQV Lead">CQV Lead</option>
-                    <option value="Automation Engineer">Automation Engineer</option>
-                    <option value="Automation Lead">Automation Lead</option>
-                    <option value="Tosca Engineer">Tosca Engineer</option>
-                    <option value="Tosca Lead">Tosca Lead</option>
-                    <option value="Test Engineer">Test Engineer</option>
-                    <option value="Test Lead">Test Lead</option>
-                </optgroup>
-                <optgroup label="IT Technology">
-                    <option value="IT Manager">IT Manager</option>
-                    <option value="Network Engineer">Network Engineer</option>
-                    <option value="IT Support Specialist">IT Support Specialist</option>
-                    <option value="Cloud Engineer">Cloud Engineer</option>
-                    <option value="Software Developer">Software Developer</option>
-                    <option value="Cybersecurity Engineer">Cybersecurity Engineer</option>
-                    <option value="Data Engineer">Data Engineer</option>
-                    <option value="Testing Engineer">Testing Engineer</option>
-                    <option value="Information Security Analyst">Information Security Analyst</option>
-                    <option value="Full Stack Developer">Full Stack Developer</option>
-                    <option value="Frontend Developer">Frontend Developer</option>
-                    <option value="Backend Developer">Backend Developer</option>
-                    <option value="DevOps Engineer">DevOps Engineer</option>
-                    <option value="Data Analyst">Data Analyst</option>
-                    <option value="Business Analyst">Business Analyst</option>
-                    <option value="QA Engineer">QA Engineer</option>
-                    <option value="Automation Tester">Automation Tester</option>
-                    <option value="AI Test Lead">AI Test Lead</option>
-                    <option value="Project Manager">Project Manager</option>
-                    <option value="Scrum Master">Scrum Master</option>
-                    <option value="UI/UX Designer">UI/UX Designer</option>
-                    <option value="Solution Architect">Solution Architect</option>
-                    <option value="Database Administrator">Database Administrator</option>
-                    <option value="AI/ML Engineer">AI/ML Engineer</option>
-                    <option value="SAP Consultant">SAP Consultant</option>
-                    <option value="Salesforce Developer">Salesforce Developer</option>
-                </optgroup>
+                {% endfor %}
             </select>
+            {% if can_write('manage_role_taxonomy') %}
+            <p class="form-hint"><a href="{{ url_for('role_management', scope='profile') }}" target="_blank" rel="noopener">+ Add a new role or group</a></p>
+            {% endif %}
             <p id="groups_error" class="field-error-msg" style="display:none;">&#9888; Please select a Group before saving the profile.</p>
         </div>
     </div>

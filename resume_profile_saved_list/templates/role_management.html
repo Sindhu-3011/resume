@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}Manage Roles | Resume Profile{% endblock %}
+{% block content %}
+
+<section class="hero card">
+    <div>
+        <p class="eyebrow">Role &amp; Group Management</p>
+        <h1>Manage Roles</h1>
+        <p class="muted">Add or remove the roles and categories/groups used by the
+            {% if scope == 'jd' %}JD Management "Role" and "Category" dropdowns{% else %}Add Profile "Select a role group" dropdown{% endif %}
+            — no code changes or restarts needed.</p>
+    </div>
+    <div style="display:flex;gap:10px;">
+        <a class="button {{ 'secondary' if scope != 'jd' }}" href="{{ url_for('role_management', scope='jd') }}">JD Roles</a>
+        <a class="button {{ 'secondary' if scope != 'profile' }}" href="{{ url_for('role_management', scope='profile') }}">Profile Role Groups</a>
+    </div>
+</section>
+
+<div class="card">
+    <h2 style="margin-top:0;">Add a role</h2>
+    <form method="post" action="{{ url_for('role_add') }}" class="form-grid">
+        <input type="hidden" name="scope" value="{{ scope }}">
+        <div>
+            <label for="category">Existing category</label>
+            <select id="category" name="category" class="form-select">
+                <option value="">— none, use new category below —</option>
+                {% for category in taxonomy.keys() %}
+                <option value="{{ category }}">{{ category }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div>
+            <label for="new_category">…or a new category name</label>
+            <input id="new_category" name="new_category" placeholder="e.g. Complaints Handling">
+        </div>
+        <div class="full">
+            <label for="role_name">Role name <span style="color:#c0182c;">*</span></label>
+            <input id="role_name" name="role_name" required placeholder="e.g. Compliance Analyst">
+        </div>
+        <div class="full actions">
+            <button class="button" type="submit">Add Role</button>
+        </div>
+    </form>
+</div>
+
+<div class="card">
+    <h2 style="margin-top:0;">Current roles</h2>
+    {% if not taxonomy %}
+    <p class="muted">No roles yet — add one above.</p>
+    {% endif %}
+    {% for category, roles in taxonomy.items() %}
+    <div style="margin-bottom:22px;">
+        <p style="font-weight:700;margin-bottom:8px;">{{ category }} <span class="muted" style="font-weight:400;">({{ roles | length }} role{{ 's' if roles | length != 1 }})</span></p>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;">
+            {% for r in roles %}
+            <span style="display:inline-flex;align-items:center;gap:6px;background:#f1f5f9;border-radius:999px;padding:6px 8px 6px 14px;font-size:0.88rem;">
+                {{ r }}
+                <form method="post" action="{{ url_for('role_delete') }}" style="display:inline;"
+                      onsubmit="return confirm('Remove &quot;{{ r }}&quot; from {{ category }}?');">
+                    <input type="hidden" name="scope" value="{{ scope }}">
+                    <input type="hidden" name="id" value="{{ role_ids.get((category, r), '') }}">
+                    <button type="submit" title="Remove"
+                            style="border:none;background:none;color:#94a3b8;cursor:pointer;font-size:1rem;line-height:1;padding:0 4px;">&times;</button>
+                </form>
+            </span>
+            {% endfor %}
+        </div>
+    </div>
+    {% endfor %}
+</div>
+
+{% endblock %}
