@@ -3,67 +3,113 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Sign In | Resume Profile</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=15">
+    <title>Sign In | TalentEdge AI</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=52">
 </head>
 <body class="login-page">
-    <div class="login-shell">
+    <div class="login-viewport">
+        <div class="login-canvas">
+            <div class="login-shell">
 
-        <div class="login-brand-panel">
-            <div class="login-logo">
-                <span class="sidebar-logo-icon">&#128196;</span>
-                <span>Resume Profile</span>
-            </div>
-            <h1 class="login-brand-title">Hire faster, with clarity.</h1>
-            <p class="login-brand-sub">AI-assisted resume parsing, a live hiring pipeline, and requirement tracking — all in one place.</p>
-            <ul class="login-brand-points">
-                <li><span class="login-brand-icon">&#9989;</span> Automatic resume parsing &amp; dedupe</li>
-                <li><span class="login-brand-icon">&#128202;</span> Real-time hiring dashboard</li>
-                <li><span class="login-brand-icon">&#128188;</span> Client requirement tracking</li>
-            </ul>
-        </div>
-
-        <div class="login-form-panel">
-            <div class="login-card card">
-                <h2 class="login-card-title">Welcome back</h2>
-                <p class="muted" style="margin-bottom:24px;">Sign in to continue to your dashboard.</p>
-
-                {% with messages = get_flashed_messages(with_categories=true) %}
-                    {% if messages %}
-                        <section class="flash-wrap" aria-live="polite">
-                            {% for category, message in messages %}
-                                <div class="flash {{ category }}">{{ message }}</div>
-                            {% endfor %}
-                        </section>
-                    {% endif %}
-                {% endwith %}
-
-                <form method="post">
-                    <input type="hidden" name="next" value="{{ next or '' }}">
-                    <div>
-                        <label for="username">Username</label>
-                        <div class="login-input-wrap">
-                            <span class="login-input-icon">&#128100;</span>
-                            <input id="username" name="username" type="text" required autofocus autocomplete="username">
-                        </div>
+                <div class="login-brand-panel">
+                    <div class="login-logo">
+                        <span class="login-logo-mark">&#9650;</span>
+                        <span>
+                            <span class="login-logo-name">TalentEdge AI</span>
+                            <span class="login-logo-tagline">Precision Talent Matching</span>
+                        </span>
                     </div>
-                    <div style="margin-top:18px;">
-                        <label for="password">Password</label>
-                        <div class="login-input-wrap">
-                            <span class="login-input-icon">&#128274;</span>
-                            <input id="password" name="password" type="password" required autocomplete="current-password" style="padding-right:42px;">
-                            <button type="button" id="togglePassword" class="login-input-toggle" aria-label="Show password">&#128065;</button>
-                        </div>
+
+                    <span class="login-eyebrow">AI-Powered Recruitment</span>
+                    <h1 class="login-brand-title">Hire Faster.<br><span class="hl">Hire Smarter.</span></h1>
+                    <p class="login-brand-sub">AI-powered resume screening that helps recruiters identify the best candidates in minutes.</p>
+
+                    <ul class="login-feature-list">
+                        <li class="login-feature-item">
+                            <span class="login-feature-icon a">&#128269;</span>
+                            <span>
+                                <span class="login-feature-text">Intelligent Resume Screening</span>
+                                <span class="login-feature-desc">Automatically analyze and rank candidate profiles.</span>
+                            </span>
+                        </li>
+                        <li class="login-feature-item">
+                            <span class="login-feature-icon b">&#128101;</span>
+                            <span>
+                                <span class="login-feature-text">Skills &amp; Job Match Analysis</span>
+                                <span class="login-feature-desc">Identify top-fit candidates based on role requirements.</span>
+                            </span>
+                        </li>
+                        <li class="login-feature-item">
+                            <span class="login-feature-icon c">&#9889;</span>
+                            <span>
+                                <span class="login-feature-text">Faster Hiring Decisions</span>
+                                <span class="login-feature-desc">Save time with AI-driven candidate insights.</span>
+                            </span>
+                        </li>
+                    </ul>
+
+                    <p class="login-footer-tag">People + AI + A Brighter Tomorrow</p>
+
+                    <div class="login-hero" aria-hidden="true">
+                        <img src="{{ url_for('static', filename='img/hero-illustration.png') }}?v=2" alt="">
                     </div>
-                    <p style="margin-top:10px; text-align:right;">
-                        <a href="{{ url_for('forgot_password') }}" class="muted" style="font-size:0.85rem;">Forgot Password?</a>
-                    </p>
-                    <button class="button" type="submit" style="width:100%; margin-top:16px;">Sign In</button>
-                </form>
+                </div>
+
+                <div class="login-form-panel">
+                    <div class="login-card card">
+                        <div class="login-card-logo">
+                            <span class="login-logo-mark">&#9650;</span>
+                            <span class="login-card-logo-text">
+                                <span class="login-logo-name">TalentEdge AI</span>
+                                <span class="login-logo-tagline">Precision Talent Matching</span>
+                            </span>
+                        </div>
+                        <h2 class="login-card-title">Sign In</h2>
+                        <p class="muted" style="margin-bottom:10px;">Sign in to access your account.</p>
+
+                        {% with messages = get_flashed_messages(with_categories=true) %}
+                            {% if messages %}
+                                <section class="flash-wrap" aria-live="polite">
+                                    {% for category, message in messages %}
+                                        <div class="flash {{ category }}">{{ message }}</div>
+                                    {% endfor %}
+                                </section>
+                            {% endif %}
+                        {% endwith %}
+
+                        <form method="post">
+                            <input type="hidden" name="next" value="{{ next or '' }}">
+                            <div>
+                                <label for="username">Username</label>
+                                <div class="login-input-wrap">
+                                    <span class="login-input-icon">&#128100;</span>
+                                    <input id="username" name="username" type="text" required autofocus autocomplete="username">
+                                </div>
+                            </div>
+                            <div style="margin-top:8px;">
+                                <label for="password">Password</label>
+                                <div class="login-input-wrap">
+                                    <span class="login-input-icon">&#128274;</span>
+                                    <input id="password" name="password" type="password" required autocomplete="current-password" style="padding-right:42px;">
+                                    <button type="button" id="togglePassword" class="login-input-toggle" aria-label="Show password">&#128065;</button>
+                                </div>
+                            </div>
+                            <div class="login-remember-row">
+                                <label class="login-remember-label" title="Not yet functional — sessions still follow the standard inactivity timeout regardless of this box.">
+                                    <input type="checkbox" name="remember_me">
+                                    Remember me
+                                </label>
+                            </div>
+                            <button class="button login-submit-btn" type="submit" style="width:100%; margin-top:8px;">Sign In &#8594;</button>
+                        </form>
+                    </div>
+                    <p class="login-copyright">&copy; 2026 TalentEdge AI. All rights reserved.</p>
+                </div>
+
             </div>
         </div>
-
     </div>
+    <script src="{{ url_for('static', filename='login-fit.js') }}?v=4"></script>
     <script>
         (function () {
             var toggle = document.getElementById('togglePassword');

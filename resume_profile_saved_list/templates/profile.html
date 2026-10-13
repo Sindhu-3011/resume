@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}{{ resume.full_name or 'View Profile' }} | Resume Profile{% endblock %}
+{% block title %}{{ resume.full_name or 'View Profile' }} | TalentEdge AI{% endblock %}
 {% block content %}
 
 <!-- Profile Header Card -->
@@ -34,7 +34,7 @@
         {% if can_write('compare_resume') %}
         <a class="button" style="background:#7c3aed;" href="{{ url_for('compare_select_jd', resume_id=resume.id) }}">&#128202; Compare Resume</a>
         {% endif %}
-        <a class="button" style="background:#10b981;" href="{{ url_for('download_resume_pdf', resume_id=resume.id) }}">📄 Download</a>
+        <a class="button" href="{{ url_for('download_resume_pdf', resume_id=resume.id) }}">📄 Download</a>
         {% if can_write('delete_profile') %}
         <form method="post" action="{{ url_for('delete_resume', resume_id=resume.id) }}" style="display:inline" onsubmit="return confirm('Delete this profile? This cannot be undone.')">
             <button type="submit" class="button danger">Delete</button>
@@ -54,7 +54,7 @@
                 <h2 style="margin:0;font-size:1.2rem;font-weight:800;color:var(--tx-1);">Top 3 Matching Roles</h2>
             </div>
         </div>
-        <a class="button" style="background:#10b981;padding:8px 16px;font-size:0.83rem;border-radius:8px;" href="{{ url_for('export_rich_profile_pdf', resume_id=resume.id) }}">📄 Export PDF</a>
+        <a class="button" style="padding:8px 16px;font-size:0.83rem;border-radius:8px;" href="{{ url_for('export_rich_profile_pdf', resume_id=resume.id) }}">📄 Export PDF</a>
     </div>
     <p class="muted" style="margin:-10px 0 18px;font-size:0.78rem;">
         <span id="matches-progress">Fit shown instantly from skill/requirement matching. Cards not yet AI-verified are quietly upgraded to the same AI Holistic Assessment score shown on "View Full Comparison" — cached after the first check, so revisits are instant.</span>

@@ -1,15 +1,21 @@
 /* ═══════════════════════════════════════════════════════════════════════
-   Resume Profile  ·  UI v2.0  ·  Modern Design System
+   TalentEdge AI  ·  UI v6.0  ·  Dark Blue / Navy (premium AI SaaS)
    ═══════════════════════════════════════════════════════════════════════ */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Caveat:wght@600;700&display=swap');
 
 /* ── Custom Properties ──────────────────────────────────────────────── */
 :root {
-    /* Brand */
-    --clr-primary:       #4f46e5;
-    --clr-primary-hover: #4338ca;
-    --clr-primary-light: #e0e7ff;
-    --clr-accent:        #7c3aed;
-    --clr-accent-light:  #ede9fe;
+    /* Brand — dark blue → medium blue, used across buttons, sidebar, accents */
+    --clr-primary:       #1e40af;
+    --clr-primary-hover: #1e3a8a;
+    --clr-primary-light: #dbeafe;
+    --clr-accent:        #3b82f6;
+    --clr-accent-light:  #dbeafe;
+    --clr-teal:          #1e40af;
+    --clr-teal-light:    #dbeafe;
+    --grad-brand:        linear-gradient(135deg, #1e3a8a 0%, #1e40af 55%, #3b82f6 100%);
+    --grad-brand-soft:   linear-gradient(135deg, rgba(30,58,138,0.12), rgba(59,130,246,0.12));
 
     /* Semantic */
     --clr-success:       #059669;
@@ -18,44 +24,45 @@
     --clr-danger-l:      #fee2e2;
     --clr-warning:       #d97706;
     --clr-warning-l:     #fef3c7;
-    --clr-info:          #0284c7;
+    --clr-info:          #0ea5e9;
     --clr-info-l:        #e0f2fe;
 
-    /* Surfaces */
-    --bg:                #f1f5f9;
+    /* Surfaces — bright light-gray/blue, not warm cream */
+    --bg:                #f8fafc;
     --surface:           #ffffff;
-    --surface-raised:    #f8fafc;
-    --hover-bg:          #f0f4ff;
+    --surface-raised:    #f0f5fb;
+    --hover-bg:          #eaf1fb;
 
-    /* Sidebar */
-    --sb-bg:             #0f172a;
-    --sb-hover:          rgba(255,255,255,0.07);
-    --sb-active-bg:      rgba(79,70,229,0.22);
-    --sb-text:           #94a3b8;
+    /* Sidebar — deep navy gradient instead of forest green */
+    --sb-bg:             #071a32;
+    --sb-bg-grad:        linear-gradient(195deg, #050f1c 0%, #0b2338 55%, #103b4f 100%);
+    --sb-hover:          rgba(255,255,255,0.08);
+    --sb-active-bg:      rgba(30,64,175,0.22);
+    --sb-text:           #9fb8c9;
     --sb-text-active:    #ffffff;
-    --sb-border:         rgba(255,255,255,0.07);
+    --sb-border:         rgba(255,255,255,0.08);
     --sb-w:              248px;
 
     /* Text */
-    --tx:                #0f172a;
-    --tx-2:              #1e293b;
-    --tx-muted:          #475569;
-    --tx-light:          #64748b;
+    --tx:                #071a32;
+    --tx-2:              #0f2740;
+    --tx-muted:          #51677a;
+    --tx-light:          #7a8fa0;
 
-    /* Borders & shadows */
-    --border:            #e2e8f0;
-    --border-s:          #cbd5e1;
-    --shadow-xs:         0 1px 2px rgba(0,0,0,0.05);
-    --shadow-sm:         0 2px 8px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
-    --shadow:            0 4px 20px rgba(0,0,0,0.08);
-    --shadow-lg:         0 12px 40px rgba(0,0,0,0.13);
+    /* Borders & shadows — soft brand-tinted shadows instead of flat black */
+    --border:            #e3e8ee;
+    --border-s:          #cfd8e0;
+    --shadow-xs:         0 1px 3px rgba(30,58,138,0.06);
+    --shadow-sm:         0 3px 10px rgba(30,58,138,0.08), 0 1px 2px rgba(7,26,50,0.04);
+    --shadow:            0 6px 24px rgba(30,58,138,0.12);
+    --shadow-lg:         0 16px 44px rgba(30,58,138,0.18);
 
-    /* Radii */
-    --r-xs:  4px;
-    --r-sm:  8px;
-    --r:     12px;
-    --r-lg:  16px;
-    --r-xl:  20px;
+    /* Radii — a little rounder for a friendlier feel */
+    --r-xs:  6px;
+    --r-sm:  10px;
+    --r:     14px;
+    --r-lg:  18px;
+    --r-xl:  24px;
 
     /* Layout */
     --header-h: 60px;
@@ -68,11 +75,11 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 html { font-size: 17px; scroll-behavior: smooth; }
 body {
-    font-family: 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif;
+    font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif;
     font-size: 1rem;
     line-height: 1.7;
     color: var(--tx);
-    background: var(--bg);
+    background: var(--bg) linear-gradient(180deg, #ffffff 0%, #eef3fb 55%, #f8fafc 100%) fixed;
     -webkit-font-smoothing: antialiased;
 }
 a { color: var(--clr-primary); text-decoration: none; transition: color var(--ease); }
@@ -91,7 +98,7 @@ p  { margin: 0; }
    ═══════════════════════════════════════════════════════════════════════ */
 .sidebar {
     width: var(--sb-w);
-    background: var(--sb-bg);
+    background: var(--sb-bg-grad);
     display: flex;
     flex-direction: column;
     position: fixed;
@@ -101,6 +108,7 @@ p  { margin: 0; }
     transition: width var(--ease), transform var(--ease);
     overflow: hidden;
     user-select: none;
+    box-shadow: 4px 0 24px rgba(15,23,42,0.18);
 }
 
 /* Logo */
@@ -120,7 +128,7 @@ p  { margin: 0; }
     display: flex; align-items: center; justify-content: center;
     font-size: 1.05rem;
     flex-shrink: 0;
-    box-shadow: 0 3px 10px rgba(79,70,229,0.45);
+    box-shadow: 0 3px 10px rgba(30,58,138,0.45);
 }
 .sidebar-logo-text {
     font-size: 1rem;
@@ -173,14 +181,16 @@ p  { margin: 0; }
     background: var(--sb-active-bg);
     color: var(--sb-text-active);
     font-weight: 600;
+    box-shadow: inset 0 0 0 1px rgba(38,198,165,0.35);
 }
 .nav-item.active::before {
     content: '';
     position: absolute;
     left: 0; top: 22%; height: 56%;
     width: 3px;
-    background: #818cf8;
+    background: linear-gradient(180deg, #3b82f6, #1e40af);
     border-radius: 0 3px 3px 0;
+    box-shadow: 0 0 8px rgba(38,198,165,0.7);
 }
 .nav-icon { font-size: 1rem; width: 20px; text-align: center; flex-shrink: 0; }
 .nav-label { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -310,7 +320,7 @@ body.sidebar-collapsed .main-area { margin-left: 60px; }
     justify-content: space-between;
     gap: 20px;
     flex-wrap: wrap;
-    background: linear-gradient(135deg, #ffffff 0%, #f0f4ff 100%);
+    background: linear-gradient(135deg, #ffffff 0%, var(--clr-primary-light) 100%);
     border-left: 4px solid var(--clr-primary);
     padding: 22px 28px;
 }
@@ -344,14 +354,15 @@ body.sidebar-collapsed .main-area { margin-left: 60px; }
     transition: all var(--ease);
     white-space: nowrap;
     line-height: 1;
-    background: var(--clr-primary);
+    background: var(--grad-brand);
     color: #fff;
-    box-shadow: 0 2px 6px rgba(79,70,229,0.2);
+    box-shadow: 0 2px 10px rgba(30,58,138,0.3);
 }
 .button:hover {
-    background: var(--clr-primary-hover); color: #fff;
+    filter: brightness(1.08);
+    color: #fff;
     text-decoration: none;
-    box-shadow: 0 5px 16px rgba(79,70,229,0.3);
+    box-shadow: 0 6px 18px rgba(30,58,138,0.4);
     transform: translateY(-1px);
 }
 .button:active { transform: translateY(0); box-shadow: none; }
@@ -410,7 +421,7 @@ textarea, select {
 }
 input:focus, textarea:focus, select:focus {
     border-color: var(--clr-primary);
-    box-shadow: 0 0 0 3px rgba(79,70,229,0.12);
+    box-shadow: 0 0 0 3px rgba(30,58,138,0.12);
 }
 input::placeholder, textarea::placeholder { color: var(--tx-light); }
 textarea { resize: vertical; min-height: 110px; }
@@ -513,10 +524,10 @@ label {
     padding: 13px 32px !important;
     font-size: 1.1rem !important;
     font-weight: 700 !important;
-    box-shadow: 0 4px 16px rgba(79,70,229,0.3) !important;
+    box-shadow: 0 4px 16px rgba(30,58,138,0.3) !important;
     letter-spacing: 0.01em;
 }
-.btn-save:hover { box-shadow: 0 8px 24px rgba(79,70,229,0.4) !important; }
+.btn-save:hover { box-shadow: 0 8px 24px rgba(30,58,138,0.4) !important; }
 
 @media (max-width: 700px) {
     .field-grid { grid-template-columns: 1fr; }
@@ -574,8 +585,8 @@ select.field-error { border-color: var(--clr-danger) !important; box-shadow: 0 0
    PROFILE HEADER CARD
    ═══════════════════════════════════════════════════════════════════════ */
 .profile-header-card {
-    background: linear-gradient(135deg, #fafbff 0%, #f0f4ff 100%);
-    border: 1px solid #dde6f5;
+    background: linear-gradient(135deg, #fffdf9 0%, var(--clr-primary-light) 100%);
+    border: 1px solid var(--border);
     display: flex; flex-direction: column; gap: 18px;
     padding-bottom: 22px;
 }
@@ -589,7 +600,7 @@ select.field-error { border-color: var(--clr-danger) !important; box-shadow: 0 0
     font-size: 1.9rem; font-weight: 800;
     display: flex; align-items: center; justify-content: center;
     flex-shrink: 0;
-    box-shadow: 0 4px 16px rgba(79,70,229,0.32);
+    box-shadow: 0 4px 16px rgba(30,58,138,0.32);
 }
 
 .profile-info-row h1 {
@@ -810,7 +821,7 @@ select.field-error { border-color: var(--clr-danger) !important; box-shadow: 0 0
    ═══════════════════════════════════════════════════════════════════════ */
 .groups-search-wrap { position: relative; }
 .groups-search-input { width: 100%; padding: 11px 16px 11px 44px; border: 1.5px solid var(--border); border-radius: var(--r-sm); font-size: 1rem; background: #fff; transition: border-color var(--ease); }
-.groups-search-input:focus { border-color: var(--clr-primary); box-shadow: 0 0 0 3px rgba(79,70,229,0.12); outline: none; }
+.groups-search-input:focus { border-color: var(--clr-primary); box-shadow: 0 0 0 3px rgba(30,58,138,0.12); outline: none; }
 .groups-search-icon { position: absolute; left: 14px; top: 50%; transform: translateY(-50%); color: var(--tx-muted); font-size: 1rem; pointer-events: none; }
 .role-suggestions { position: absolute; top: 100%; left: 0; right: 0; background: var(--surface); border: 1.5px solid var(--border); border-top: none; border-radius: 0 0 var(--r-sm) var(--r-sm); box-shadow: var(--shadow); max-height: 260px; overflow-y: auto; z-index: 50; display: none; }
 .suggestion-item { padding: 10px 16px; cursor: pointer; font-size: 1rem; }
@@ -827,7 +838,7 @@ select.field-error { border-color: var(--clr-danger) !important; box-shadow: 0 0
     transition: all var(--ease);
 }
 .groups-role-chip:hover { background: var(--clr-primary-light); border-color: var(--clr-primary); color: var(--clr-primary-hover); text-decoration: none; }
-.groups-role-chip.active { background: var(--clr-primary); color: #fff; border-color: var(--clr-primary); box-shadow: 0 3px 10px rgba(79,70,229,0.28); }
+.groups-role-chip.active { background: var(--clr-primary); color: #fff; border-color: var(--clr-primary); box-shadow: 0 3px 10px rgba(30,58,138,0.28); }
 
 /* ═══════════════════════════════════════════════════════════════════════
    JD MANAGEMENT
@@ -841,7 +852,7 @@ select.field-error { border-color: var(--clr-danger) !important; box-shadow: 0 0
     cursor: pointer; transition: all var(--ease);
 }
 .ap-tab:hover { background: var(--surface-raised); color: var(--tx); }
-.ap-tab.active { background: var(--clr-primary); color: #fff; border-color: var(--clr-primary); box-shadow: 0 2px 6px rgba(79,70,229,0.2); }
+.ap-tab.active { background: var(--clr-primary); color: #fff; border-color: var(--clr-primary); box-shadow: 0 2px 6px rgba(30,58,138,0.2); }
 
 .jdm-tabs { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
 .jdm-tab {
@@ -851,7 +862,7 @@ select.field-error { border-color: var(--clr-danger) !important; box-shadow: 0 0
     cursor: pointer; transition: all var(--ease);
 }
 .jdm-tab:hover { background: var(--surface-raised); color: var(--tx); }
-.jdm-tab.active { background: var(--clr-primary); color: #fff; border-color: var(--clr-primary); box-shadow: 0 2px 6px rgba(79,70,229,0.2); }
+.jdm-tab.active { background: var(--clr-primary); color: #fff; border-color: var(--clr-primary); box-shadow: 0 2px 6px rgba(30,58,138,0.2); }
 .jdm-tab-badge { background: rgba(255,255,255,0.25); border-radius: 999px; padding: 1px 7px; font-size: 1.05rem; margin-left: 4px; }
 .jdm-tab:not(.active) .jdm-tab-badge { background: var(--bg); color: var(--tx-muted); }
 
@@ -924,7 +935,7 @@ select.field-error { border-color: var(--clr-danger) !important; box-shadow: 0 0
     text-decoration: none; color: inherit; background: var(--surface);
     transition: all var(--ease);
 }
-.csel-card:hover { background: var(--hover-bg); border-color: var(--clr-primary); box-shadow: 0 4px 14px rgba(79,70,229,0.1); text-decoration: none; }
+.csel-card:hover { background: var(--hover-bg); border-color: var(--clr-primary); box-shadow: 0 4px 14px rgba(30,58,138,0.1); text-decoration: none; }
 .csel-card-icon { font-size: 1.3rem; flex-shrink: 0; }
 .csel-card-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .csel-card-title { font-size: 1rem; font-weight: 600; color: var(--tx); display: block; }
@@ -979,7 +990,7 @@ select.field-error { border-color: var(--clr-danger) !important; box-shadow: 0 0
     border-radius: 999px;
     font-size: 0.97rem;
     font-weight: 600;
-    border: 1px solid rgba(79,70,229,0.18);
+    border: 1px solid rgba(30,58,138,0.18);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
@@ -1156,7 +1167,7 @@ select.field-error { border-color: var(--clr-danger) !important; box-shadow: 0 0
     transition: opacity var(--ease), transform var(--ease);
 }
 .status-badge:hover { opacity: 0.82; transform: scale(1.05); }
-.status-new         { background: var(--clr-info-l);    color: var(--clr-info);    border: 1px solid rgba(2,132,199,0.2); }
+.status-new         { background: var(--clr-info-l);    color: var(--clr-info);    border: 1px solid rgba(14,165,233,0.2); }
 .status-reviewed    { background: var(--clr-warning-l); color: var(--clr-warning); border: 1px solid rgba(217,119,6,0.2); }
 .status-shortlisted { background: var(--clr-success-l); color: var(--clr-success); border: 1px solid rgba(5,150,105,0.2); }
 
@@ -1391,82 +1402,290 @@ select.field-error { border-color: var(--clr-danger) !important; box-shadow: 0 0
     .navbar-account { padding-left: 10px; }
 }
 
+/* Fixed 1366x1024 design canvas — this page is built pixel-for-pixel to a
+   reference mockup at that exact resolution, not as a fluid/responsive
+   layout. static/login-fit.js scales .login-canvas uniformly (never
+   reflowing it) to fit whatever window the browser actually has, so the
+   composition is always 100% identical in proportion, just smaller on a
+   short/narrow screen — never redesigned, never scrollable. */
 body.login-page {
-    background: var(--bg);
-    min-height: 100vh;
+    background: #eef2fb;
+    height: 100vh;
     margin: 0;
+    overflow: hidden;
+}
+.login-viewport {
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    background: #eef2fb;
+}
+.login-canvas {
+    width: 1536px;
+    height: 1024px;
+    flex-shrink: 0;
+    transform-origin: center top;
+    box-shadow: 0 0 60px rgba(7,26,50,0.1);
 }
 .login-shell {
-    min-height: 100vh;
+    position: relative;
+    width: 100%;
+    height: 100%;
     display: flex;
+    overflow: hidden;
 }
 .login-logo {
     display: flex;
     align-items: center;
-    gap: 12px;
-    font-size: 1.15rem;
-    font-weight: 700;
-    margin-bottom: 48px;
+    gap: 16px;
+    margin-bottom: 26px;
 }
-
-/* Left branding panel */
-.login-brand-panel {
-    flex: 1.1;
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    background:
-        radial-gradient(circle at 15% 20%, rgba(124,58,237,0.35), transparent 45%),
-        linear-gradient(160deg, var(--sb-bg) 0%, #1e1b4b 100%);
+.login-logo-mark {
+    width: 56px; height: 56px;
+    border-radius: 14px;
+    background: var(--grad-brand);
+    display: flex; align-items: center; justify-content: center;
     color: #fff;
-    padding: 56px 64px;
+    font-size: 1.5rem;
+    flex-shrink: 0;
+    box-shadow: 0 8px 20px rgba(30,58,138,0.4);
 }
-.login-logo .sidebar-logo-icon { box-shadow: 0 8px 24px rgba(79,70,229,0.45); }
+.login-logo-name { display: block; font-size: 1.55rem; font-weight: 800; color: var(--tx); line-height: 1.25; letter-spacing: -0.01em; }
+.login-logo-tagline { display: block; font-size: 0.82rem; font-weight: 600; color: var(--clr-primary); letter-spacing: 0.02em; }
+
+/* Left branding panel — 68% of the 1536px canvas (≈1044px), bright
+   white-to-mint gradient with glowing teal blobs and a faded real
+   workspace photo. Top-anchored (not vertically centered) to match the
+   reference exactly: logo at a fixed 80/58 offset, everything else
+   flowing down from it in normal document flow. The AI showcase is
+   pulled out of that flow and absolutely positioned beside the text
+   column — in the reference it's a second column, not a stacked block.
+   Vertical rhythm here is kept deliberately tight: static/login-fit.js
+   uses "cover" scaling, which crops the canvas's bottom edge on windows
+   wider-than-1.5:1 (most real browser windows), so anything pushed too
+   far down — the 3rd feature card especially — risks going invisible on
+   an unmaximized window. Don't loosen this spacing without checking that
+   on a ~1280x650 viewport. */
+.login-brand-panel {
+    position: relative;
+    width: 68%;
+    flex-shrink: 0;
+    overflow: hidden;
+    background: linear-gradient(135deg, #ffffff 0%, #eaf1fb 55%, #dbeafe 100%);
+    color: var(--tx);
+    padding: 42px 40px 40px 80px;
+    box-sizing: border-box;
+}
+.login-brand-panel::before,
+.login-brand-panel::after {
+    content: '';
+    position: absolute;
+    border-radius: 50%;
+    filter: blur(70px);
+    opacity: 0.5;
+    pointer-events: none;
+    animation: loginBlobDrift 16s ease-in-out infinite;
+}
+.login-brand-panel::before {
+    width: 420px; height: 420px;
+    background: #93b4f0;
+    top: -120px; right: -100px;
+}
+.login-brand-panel::after {
+    width: 380px; height: 380px;
+    background: #b8cdf5;
+    bottom: -120px; left: -100px;
+    animation-delay: -8s;
+}
+@keyframes loginBlobDrift {
+    0%, 100% { transform: translate(0, 0) scale(1); }
+    50%      { transform: translate(18px, 14px) scale(1.06); }
+}
+.login-brand-panel > * { position: relative; z-index: 1; }
+.login-eyebrow {
+    display: inline-block;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--clr-primary);
+    margin-bottom: 8px;
+}
 .login-brand-title {
-    font-size: 2.3rem;
+    font-size: 56px;
     font-weight: 800;
-    line-height: 1.25;
-    max-width: 460px;
-    margin-bottom: 16px;
+    line-height: 0.95;
+    letter-spacing: -0.015em;
+    max-width: 560px;
+    margin-bottom: 14px;
+    color: var(--tx);
+}
+.login-brand-title .hl {
+    background: linear-gradient(90deg, #1e40af, #1e3a8a);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
 }
 .login-brand-sub {
-    color: rgba(226,232,240,0.75);
-    font-size: 1.08rem;
-    line-height: 1.6;
-    max-width: 420px;
-    margin-bottom: 36px;
-}
-.login-brand-points { list-style: none; display: flex; flex-direction: column; gap: 16px; }
-.login-brand-points li {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    font-size: 1rem;
-    font-weight: 500;
-    color: #e2e8f0;
-}
-.login-brand-icon {
-    width: 34px; height: 34px;
-    border-radius: 10px;
-    background: rgba(255,255,255,0.08);
-    display: flex; align-items: center; justify-content: center;
-    font-size: 1rem;
-    flex-shrink: 0;
+    color: var(--tx-muted);
+    font-size: 17px;
+    line-height: 1.45;
+    width: 340px;
+    margin-bottom: 18px;
 }
 
-/* Right form panel */
+/* Hero illustration — a single unified image (the AI-matching graphic and
+   the desk/plant/laptop scene are literally one continuous crop from the
+   reference, not two stacked images), so there's no seam, no card frame,
+   no boundary between them. Includes the laptop's full bleed down to the
+   source reference's own bottom edge — intentional in the original
+   design. Deliberately scaled down from this box's earlier, larger size
+   (440px wide) to 380px: the "cover"-scale canvas transform (see the note
+   on .login-brand-panel) crops the canvas's bottom edge on any real
+   browser window proportionally wider than the 1536:1024 design, and the
+   larger size pushed the laptop past that crop point on ordinary
+   windows. This smaller size, recentered in the space right of the
+   headline and nudged down from the very top, keeps the whole image —
+   laptop included — inside that crop budget. The image's own aspect
+   ratio (480:859) drives the box height, so it's never stretched. */
+.login-hero {
+    position: absolute;
+    left: 555px;
+    top: 90px;
+    width: 380px;
+    aspect-ratio: 480 / 859;
+    z-index: 1;
+    /* The image carries its own baked-in background, which can never pixel-
+       match this panel's CSS gradient exactly — so instead of trying to
+       match colors, fade the top/left/right edges to transparent (not the
+       bottom — the laptop is meant to bleed off there, not fade out).
+       That's what actually removes the visible rectangle: the panel's own
+       background just shows through at the margins, regardless of exact
+       color. */
+    -webkit-mask-image:
+        linear-gradient(to bottom, transparent 0%, #000 6%, #000 100%),
+        linear-gradient(to right, transparent 0%, #000 6%, #000 94%, transparent 100%);
+    -webkit-mask-composite: source-in;
+    mask-image:
+        linear-gradient(to bottom, transparent 0%, #000 6%, #000 100%),
+        linear-gradient(to right, transparent 0%, #000 6%, #000 94%, transparent 100%);
+    mask-composite: intersect;
+}
+.login-hero img { width: 100%; height: 100%; object-fit: contain; object-position: bottom center; display: block; }
+
+/* Feature list — fixed 280x70 cards per spec, not stretched full-width. */
+.login-feature-list {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 11px;
+    margin-top: 0;
+}
+.login-feature-item {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    width: 266px;
+    height: 56px;
+    box-sizing: border-box;
+    padding: 0 9px;
+    border-radius: var(--r-lg);
+    background: rgba(255,255,255,0.6);
+    box-shadow: var(--shadow-xs);
+    transition: transform var(--ease), box-shadow var(--ease);
+}
+.login-feature-item:hover { transform: translateY(-2px); box-shadow: var(--shadow-sm); }
+.login-feature-icon {
+    width: 32px; height: 32px;
+    border-radius: 9px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.92rem;
+    flex-shrink: 0;
+    box-shadow: var(--shadow-xs);
+}
+.login-feature-icon.a { background: var(--clr-primary-light); }
+.login-feature-icon.b { background: var(--clr-accent-light); }
+.login-feature-icon.c { background: #dbeafe; }
+.login-feature-text { display: block; font-size: 0.72rem; font-weight: 700; color: var(--tx-2); white-space: nowrap; }
+.login-feature-desc { display: block; font-size: 0.68rem; color: var(--tx-muted); margin-top: 1px; line-height: 1.25; }
+
+.login-footer-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 14px;
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--tx-light);
+}
+.login-footer-tag::before {
+    content: '';
+    width: 28px; height: 2px;
+    background: var(--grad-brand);
+    border-radius: 2px;
+}
+
+.login-copyright {
+    position: absolute;
+    left: 50%;
+    top: 655px;
+    transform: translateX(calc(-50% - 20px));
+    width: 420px;
+    text-align: center;
+    font-size: 0.78rem;
+    color: var(--tx-light);
+}
+
+/* Right form panel — 32% of the canvas. The card is absolutely positioned
+   (not flex-centered) at the exact 420x515 box, 120px from the top and
+   shifted slightly left of center, per the reference. */
 .login-form-panel {
-    flex: 1;
+    position: relative;
+    width: 32%;
+    flex-shrink: 0;
+    background: linear-gradient(160deg, #ffffff 0%, #eef3fb 100%);
+}
+.login-card {
+    position: absolute;
+    left: 50%;
+    top: 120px;
+    transform: translateX(calc(-50% - 20px));
+    width: 420px;
+    height: 515px;
+    box-sizing: border-box;
+    padding: 24px 36px;
+    border-radius: 20px;
+    background: rgba(255,255,255,0.85);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    box-shadow: var(--shadow-lg);
+    border: 1px solid rgba(255,255,255,0.7);
+    overflow: hidden;
+    animation: loginCardIn 0.5s cubic-bezier(.2,.8,.2,1) both;
+}
+@keyframes loginCardIn {
+    from { opacity: 0; transform: translateX(calc(-50% - 20px)) translateY(14px); }
+    to   { opacity: 1; transform: translateX(calc(-50% - 20px)) translateY(0); }
+}
+.login-card-logo {
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 40px 24px;
-    background: var(--bg);
+    gap: 10px;
+    margin-bottom: 10px;
 }
-.login-card { width: 100%; max-width: 380px; padding: 40px 36px; }
-.login-card-title { font-size: 1.6rem; font-weight: 800; color: var(--tx); }
+.login-card-logo .login-logo-mark { width: 34px; height: 34px; font-size: 0.95rem; border-radius: 10px; }
+.login-card-logo-text { text-align: left; }
+.login-card-logo-text .login-logo-name { font-size: 1.02rem; }
+.login-card-logo-text .login-logo-tagline { font-size: 0.64rem; }
+.login-card-title { font-size: 1.4rem; font-weight: 800; color: var(--tx); }
 .login-input-wrap { position: relative; }
-.login-input-wrap input { padding-left: 42px; }
+.login-input-wrap input { padding-left: 42px; padding-top: 9px; padding-bottom: 9px; border-radius: var(--r); }
 .login-input-icon {
     position: absolute;
     left: 14px; top: 50%;
@@ -1486,13 +1705,29 @@ body.login-page {
     line-height: 1;
 }
 .login-input-toggle:hover { opacity: 0.85; }
+.login-submit-btn { padding-top: 10px; padding-bottom: 10px; font-size: 0.95rem; border-radius: var(--r); }
 
-@media (max-width: 860px) {
-    .login-shell { flex-direction: column; }
-    .login-brand-panel { padding: 40px 32px; flex: none; }
-    .login-brand-sub, .login-brand-points { display: none; }
-    .login-form-panel { flex: 1; }
+/* Remember me + Forgot Password row — the checkbox is decorative today
+   (no session-persistence backend wired up); see its title tooltip. */
+.login-remember-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: 8px;
 }
+.login-remember-label {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 0.88rem;
+    font-weight: 500;
+    color: var(--tx-muted);
+    cursor: default;
+    text-transform: none;
+    letter-spacing: normal;
+    margin-bottom: 0;
+}
+.login-remember-label input[type="checkbox"] { width: auto; margin: 0; accent-color: var(--clr-primary); }
 
 /* ── AI Training module (new — additive only) ─────────────────────────── */
 .training-chat-log {

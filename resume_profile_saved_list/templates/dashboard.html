@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Hiring Dashboard | Resume Profile{% endblock %}
+{% block title %}Hiring Dashboard | TalentEdge AI{% endblock %}
 {% block content %}
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
@@ -527,6 +527,11 @@
                                     {% for ist in interview_statuses %}
                                     <option value="{{ ist }}" {% if c.interview_status == ist %}selected{% endif %}>{{ ist }}</option>
                                     {% endfor %}
+                                    <optgroup label="Onboarding Inprogress">
+                                        {% for ob in onboarding_statuses %}
+                                        <option value="{{ ob }}" {% if c.interview_status == ob %}selected{% endif %}>{{ ob }}</option>
+                                        {% endfor %}
+                                    </optgroup>
                                 </select>
                             </td>
                             <td><a class="button secondary" style="padding:4px 10px;font-size:0.82rem;" href="{{ url_for('profile_detail', resume_id=c.id) }}">View</a></td>
@@ -645,11 +650,16 @@
             }
 
             var _istOptions = {{ interview_statuses | tojson }};
+            var _obOptions = {{ onboarding_statuses | tojson }};
 
             function _istSelect(id, current) {
                 var opts = _istOptions.map(function (o) {
                     return '<option value="' + _esc(o) + '"' + (o === current ? ' selected' : '') + '>' + _esc(o) + '</option>';
                 }).join('');
+                var obOpts = _obOptions.map(function (o) {
+                    return '<option value="' + _esc(o) + '"' + (o === current ? ' selected' : '') + '>' + _esc(o) + '</option>';
+                }).join('');
+                opts += '<optgroup label="Onboarding Inprogress">' + obOpts + '</optgroup>';
                 return '<select class="ist-select" data-id="' + id + '" onchange="setInterviewStatus(this)" title="Set interview status">' + opts + '</select>';
             }
 

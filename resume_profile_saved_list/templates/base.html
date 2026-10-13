@@ -3,8 +3,8 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>{% block title %}Resume Profile{% endblock %}</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=16">
+    <title>{% block title %}TalentEdge AI{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=52">
     <script src="{{ url_for('static', filename='verdict.js') }}?v=1" defer></script>
     <script src="{{ url_for('static', filename='confirm-dialog.js') }}?v=1" defer></script>
     {% if current_username %}
@@ -24,7 +24,7 @@
     <aside class="sidebar" id="sidebar">
         <div class="sidebar-logo">
             <span class="sidebar-logo-icon">&#128196;</span>
-            <span class="sidebar-logo-text">Resume<br>Profile</span>
+            <span class="sidebar-logo-text">TalentEdge<br>AI</span>
         </div>
 
         <nav class="sidebar-nav">
@@ -87,7 +87,7 @@
         </nav>
 
         <div class="sidebar-footer">
-            <span class="sidebar-version">Resume Profile v1.0</span>
+            <span class="sidebar-version">TalentEdge AI v1.0</span>
         </div>
     </aside>
 
@@ -96,7 +96,7 @@
         <header class="site-header">
             <nav class="navbar">
                 <button class="sidebar-toggle" id="sidebar-toggle" type="button" aria-label="Toggle sidebar">&#9776;</button>
-                <a class="brand" href="{{ url_for('dashboard') }}">&#128196; Resume Profile</a>
+                <a class="brand" href="{{ url_for('dashboard') }}">&#128196; TalentEdge AI</a>
                 <button class="menu-toggle" type="button" aria-label="Toggle menu" onclick="document.body.classList.toggle('menu-open')">&#9776;</button>
                 <div class="menu">
                     <a href="{{ url_for('dashboard') }}">&#128202; Dashboard</a>
