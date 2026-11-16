@@ -100,6 +100,23 @@ SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
 SMTP_FROM_EMAIL = os.environ.get("SMTP_FROM_EMAIL", "no-reply@resumeprofile.local")
 SMTP_USE_TLS = os.environ.get("SMTP_USE_TLS", "true").lower() == "true"
 
+# Microsoft Graph (Teams meeting + Outlook calendar invite for scheduled
+# interviews) — same "blank means skip, don't fail" pattern as SMTP above. No
+# Azure AD app registration exists yet; see AZURE_SETUP.md for the exact
+# Azure Portal steps (app registration, application-type Graph permissions
+# OnlineMeetings.ReadWrite.All + Calendars.ReadWrite with admin consent,
+# client secret) to get real values for these. Until AZURE_TENANT_ID is set,
+# every Graph call short-circuits and the interview is still saved normally
+# with invite_status = 'Skipped (not configured)'.
+AZURE_TENANT_ID = os.environ.get("AZURE_TENANT_ID", "")
+AZURE_CLIENT_ID = os.environ.get("AZURE_CLIENT_ID", "")
+AZURE_CLIENT_SECRET = os.environ.get("AZURE_CLIENT_SECRET", "")
+# The mailbox that "owns" every generated Teams meeting under this app-only
+# (client-credentials) auth flow — e.g. interviews@yourcompany.com. Must be a
+# real, licensed mailbox in the tenant; Graph creates the meeting/event as
+# this user, not as whichever recruiter clicked "Schedule Interview".
+TEAMS_ORGANIZER_UPN = os.environ.get("TEAMS_ORGANIZER_UPN", "")
+
 # Account lockout — locks an account after this many consecutive failed
 # logins (reset to 0 by any successful login). No auto-expiry: an Admin
 # must manually unlock via User Management (see user_unlock()).
@@ -272,6 +289,11 @@ SECTION_ALIASES = {
         # not tied to a specific employer/date, so they belong with the candidate's
         # work history rather than Certifications/Education.
         "automation testing summary", "manual testing summary", "scrum master summary",
+        # "Career Path" narrates the candidate's job progression over time —
+        # the same content as a Work Experience heading, just named
+        # differently. "careerpath" (no space) covers the common run-together
+        # spelling, since canonical_section_name only splits on non-letters.
+        "career path", "careerpath", "career progression", "career journey",
     ],
 
     # ── Internships ───────────────────────────────────────────────────────────
@@ -300,6 +322,13 @@ SECTION_ALIASES = {
         "educational background", "academic credentials",
         "educational qualifications", "educational qualification", "academic details",
         "educational details", "academic qualifications",
+        # A combined heading some resumes use for one block that holds both
+        # degrees and certifications together (no sub-labels splitting the
+        # two) — mapped to education since degree entries are usually most of
+        # the content; see _split_education_and_certifications for the
+        # content-level pass that pulls certification-shaped lines back out.
+        "academic qualifications certifications", "qualifications certifications",
+        "education and certifications", "education certifications",
         "education details", "qualification details",
         "academic history", "academic information",
         "educational information", "scholastic details",
@@ -375,6 +404,24 @@ SECTION_ALIASES = {
         "professional license",
     ],
 
+    # ── Regulations & Standards ──────────────────────────────────────────────
+    # A knowledge-domain list (EU MDR, FDA 21CFR, ISO/ASTM standards etc.) —
+    # not a degree and not a single personal credential, but the same family
+    # of compliance/credential content as Certifications. "regulations" alone
+    # covers a sidebar heading wrapped onto two lines ("REGULATIONS &\n
+    # STANDARDS"), since only the first line needs to match for the heading
+    # to be recognized.
+    # Deliberately narrow: "regulatory standards" / "compliance standards" /
+    # "regulatory compliance standards" were tried here too but had to be
+    # dropped — confirmed live, a real resume's Skills section has a plain
+    # in-list sub-label "Regulatory Compliance & Standards:" introducing a
+    # group of skill bullets (not a section heading at all), and that
+    # phrase matched one of those broader aliases, fragmenting Skills.
+    "regulations_standards": [
+        "regulations", "regulations standards", "standards regulations",
+        "standards and regulations", "regulations and standards",
+    ],
+
     # ── Projects ──────────────────────────────────────────────────────────────
     "projects": [
         "project", "projects", "key projects", "project experience", "assignments",
@@ -415,6 +462,14 @@ SECTION_ALIASES = {
         "performance highlights", "significant achievements",
         "academic achievements",
         "notable contributions",
+        # "Honours & Awards" / "Honors and Awards" — same content family as
+        # Achievements/Awards, just a combined heading. "honours awards" (no
+        # "and") covers "HONOURS&AWARDS", since canonical_section_name turns
+        # "&" into a space, not the word "and".
+        "honours and awards", "honors and awards",
+        "honours awards", "honors awards",
+        "awards and honours", "awards and honors",
+        "awards honours", "awards honors",
     ],
 
     # ── Awards ────────────────────────────────────────────────────────────────
@@ -433,7 +488,7 @@ SECTION_ALIASES = {
     # ── Publications ──────────────────────────────────────────────────────────
     "publications": [
         "publications", "publication", "published works",
-        "published papers", "papers",
+        "published papers", "papers", "paper publication", "paper publications",
         "journal publications", "journal articles",
         "articles", "research publications",
         "peer reviewed publications", "peer reviewed articles",
@@ -623,16 +678,39 @@ _SECTION_FOLD = {
     "internships":       "experience",
     "training":          "certifications",
     "licenses":          "certifications",
+    "regulations_standards": "certifications",
+    # Achievements/Key Achievements describes accomplishments in a role or
+    # project, not a credential — the current-in-experience/projects guard in
+    # find_sections merges it into whichever of those is already open instead
+    # of letting it become its own section. But when NEITHER is open (e.g. a
+    # resume with no recognizable Experience/Projects heading at all, so
+    # "Achievements" opens straight from Summary) that guard can't fire, and
+    # this is where that content lands — folding it to None here silently
+    # discarded it entirely, confirmed live on a real resume where Achievements
+    # plus everything un-headed after it (Education, Certifications) just
+    # vanished. Certifications is the next-best home, same as before this
+    # whole redesign.
     "achievements":      "certifications",
     "awards":            "certifications",
-    "publications":      "projects",
+    # Publications (papers, journal articles, patents aside) read as another
+    # accomplishment/credential, same family as Achievements/Awards above —
+    # not a hands-on "Project" the candidate built. Confirmed on a real
+    # resume where a "Paper Publication" heading has no project-like
+    # structure at all (no client/system/deliverable), so folding it into
+    # Projects fabricated an entry that isn't really a project.
+    "publications":      "certifications",
     "research":          "experience",
     "patents":           "certifications",
     "conferences":       "certifications",
     "volunteer":         "experience",
     "leadership":        "experience",
     "extracurricular":   None,
-    "languages":         "skills",
+    # Deliberately None, not "skills" — a candidate listing "English, Tamil"
+    # under a Languages heading must never be folded into Skills (matching
+    # how the AI path already behaves: _heading_field() has no LANGUAGES
+    # mapping there either). Captured then silently dropped, same as
+    # "interests"/"references" below.
+    "languages":         None,
     "interests":         None,
     "references":        None,
     "contact":           None,
@@ -773,6 +851,157 @@ def _ocr_contact_strip(path):
     except Exception as e:
         logger.debug(f"OCR contact strip failed: {e}")
         return ""
+
+
+_SKILLS_REGION_STOP_HEADINGS = frozenset([
+    "EXPERIENCE", "WORK EXPERIENCE", "PROFESSIONAL EXPERIENCE", "EMPLOYMENT HISTORY",
+    "EDUCATION", "PROJECTS", "PROJECT DETAILS", "CERTIFICATIONS", "ACHIEVEMENTS",
+    "SUMMARY", "PROFESSIONAL SUMMARY", "OBJECTIVE", "REFERENCES",
+])
+
+
+def _ocr_recover_skills_region(path):
+    """Recover Skills-section content rendered as filled vector-path outlines
+    instead of real text characters.
+
+    Some "skill chip"/badge resume templates export each skill box with its
+    text converted to drawn curves rather than real glyphs — the box renders
+    perfectly visibly, but get_text() finds zero characters there because
+    there is no character data at all, only shapes (confirmed live: a real
+    resume had 3 skill boxes, and get_drawings() showed ~35 tiny filled
+    rects in the 2nd and 3rd boxes' exact screen position while
+    get_text("words") found nothing there — no font/encoding fallback can
+    recover text that was never stored as text). OCR of the rendered pixels
+    is the only way to read it.
+
+    Only pays the OCR cost when the telltale signature is present (vector
+    fill shapes with zero real words in that span) — a normal Skills
+    section with real text returns immediately with no OCR call.
+
+    Returns a list of recovered skill paragraph strings (reading-order
+    grouped, so a wrapped line stays one entry), or [] if nothing to
+    recover / on any error.
+    """
+    try:
+        import pymupdf as fitz
+        doc = fitz.open(str(path))
+        page = doc[0]
+        blocks = [b for b in page.get_text("blocks") if b[6] == 0]
+        blocks.sort(key=lambda b: (round(b[1]), b[0]))
+        skills_idx = None
+        for idx, b in enumerate(blocks):
+            if b[4].strip().upper().rstrip(": \n") == "SKILLS":
+                skills_idx = idx
+                break
+        if skills_idx is None:
+            doc.close()
+            return []
+        y0 = blocks[skills_idx][3]
+        y1 = page.rect.height
+        for b in blocks[skills_idx + 1:]:
+            _txt = b[4].strip()
+            _first_line = _txt.splitlines()[0].strip().upper() if _txt else ""
+            if _first_line in _SKILLS_REGION_STOP_HEADINGS:
+                y1 = b[1]
+                break
+        if y1 - y0 < 10:
+            doc.close()
+            return []
+
+        region_drawings = [
+            d for d in page.get_drawings()
+            if d.get("fill") and y0 <= d["rect"].y0 < y1
+        ]
+        if len(region_drawings) < 8:
+            doc.close()
+            return []
+
+        # A real skill box's text covers only PART of this span in general
+        # (e.g. the first box is ordinary text, a later one is vector-
+        # outlined) — so bailing out just because SOME real words exist
+        # anywhere in the region would miss a hidden box sitting right next
+        # to a normal one. Instead, find the sub-ranges that have drawn
+        # shapes but no real word anywhere near them, and OCR only those.
+        words_in_region = [w for w in page.get_text("words") if y0 <= w[1] < y1]
+        word_ranges = sorted((max(w[1], y0), min(w[3], y1)) for w in words_in_region)
+        covered = []
+        for lo, hi in word_ranges:
+            if covered and lo <= covered[-1][1] + 8:
+                covered[-1] = (covered[-1][0], max(covered[-1][1], hi))
+            else:
+                covered.append((lo, hi))
+        gaps = []
+        cursor = y0
+        for lo, hi in covered:
+            if lo - cursor > 15:
+                gaps.append((cursor, lo))
+            cursor = max(cursor, hi)
+        if y1 - cursor > 15:
+            gaps.append((cursor, y1))
+        gaps = [
+            (max(y0, g0 - 3), min(y1, g1 + 3)) for g0, g1 in gaps
+            if any(g0 <= d["rect"].y0 < g1 for d in region_drawings)
+        ]
+        if not gaps:
+            doc.close()
+            return []
+
+        import numpy as np
+        results = []
+        for g0, g1 in gaps:
+            clip = fitz.Rect(0, g0, page.rect.width, g1)
+            mat = fitz.Matrix(200 / 72, 200 / 72)
+            pix = page.get_pixmap(matrix=mat, clip=clip, colorspace=fitz.csRGB)
+            img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+            reader = _get_ocr_reader()
+            for bbox, text, conf in reader.readtext(img):
+                if conf > 0.3 and text.strip():
+                    # Shift back into a shared coordinate space so results
+                    # from different gaps still sort/group correctly — bbox
+                    # is in this gap's own cropped-image pixel space, so the
+                    # offset must be scaled to the same 200-DPI pixel units.
+                    shifted = [(p[0], p[1] + g0 * (200 / 72)) for p in bbox]
+                    results.append((shifted, text, conf))
+        doc.close()
+        # Group detections into reading-order paragraphs: a small vertical
+        # gap between consecutive detections means "same wrapped line/box",
+        # a larger gap means a new skill box. Sorted by (row, then column)
+        # so two detections on the same visual line join left-to-right.
+        results.sort(key=lambda r: (round(min(p[1] for p in r[0]) / 10), min(p[0] for p in r[0])))
+        groups, cur, cur_bottom = [], [], None
+        for bbox, text, _conf in results:
+            y_top = min(p[1] for p in bbox)
+            y_bot = max(p[1] for p in bbox)
+            if cur and (y_top - cur_bottom) > 30:
+                groups.append(" ".join(cur))
+                cur = []
+            cur.append(text.strip())
+            cur_bottom = y_bot if cur_bottom is None else max(cur_bottom, y_bot)
+        if cur:
+            groups.append(" ".join(cur))
+        logger.info("OCR-recovered %d skill paragraph(s) from vector-outlined text", len(groups))
+        return groups
+    except Exception as exc:
+        logger.debug(f"_ocr_recover_skills_region failed: {exc}")
+        return []
+
+
+def _merge_ocr_recovered_skills(parsed, path):
+    """Append Skills content from _ocr_recover_skills_region that isn't
+    already present — normal text extraction already found some skill
+    boxes but not others, so only the genuinely missing paragraphs get
+    added (matched by their first ~25 chars against the existing text)."""
+    if not str(path).lower().endswith(".pdf"):
+        return parsed
+    recovered = _ocr_recover_skills_region(path)
+    if not recovered:
+        return parsed
+    existing = (parsed.get("skills") or "").lower()
+    new_lines = [p for p in (r.strip() for r in recovered) if p and p.lower()[:25] not in existing]
+    if new_lines:
+        parsed["skills"] = ((parsed.get("skills") or "").rstrip() + "\n" + "\n".join(new_lines)).strip()
+        logger.info("Merged %d OCR-recovered skill paragraph(s) into Skills", len(new_lines))
+    return parsed
 
 
 def _detect_two_col_split(page):
@@ -956,8 +1185,20 @@ def _pdfplumber_two_col_text(path):
     try:
         import pdfplumber
         pages_text = []
+        # Set True only when a page actually gets a real column-aware crop
+        # below — every rejection branch just falls back to the page's own
+        # ordinary extract_text(), the same text extract_resume_text() would
+        # already have (via PyMuPDF). If no page ever needed the crop (a
+        # genuinely single-column document), returning that fallback text
+        # anyway means the caller may still accept it as "two_col" over the
+        # original — and on at least one real resume, plain pdfplumber
+        # extract_text() produced WORSE, character-merged text than PyMuPDF's
+        # for an ordinary single-column page, corrupting content with no
+        # actual column-layout benefit to justify the swap. None here tells
+        # the caller plainly: no 2-column layout was found, don't substitute.
+        _any_col_split = False
         with pdfplumber.open(str(path)) as pdf:
-            for page in pdf.pages:
+            for _page_idx, page in enumerate(pdf.pages):
                 # extract_words() with no extra kwargs — compatible with all versions
                 try:
                     words = page.extract_words()
@@ -972,6 +1213,17 @@ def _pdfplumber_two_col_text(path):
                 pw = float(page.width)
                 ph = float(page.height)
                 n  = len(words)
+                # Crop bboxes must start from the page's own (x0, top), not an
+                # assumed (0, 0) — a page whose bbox has a non-zero or negative
+                # top offset (common with some PDF generators/margins) makes
+                # page.crop((0, 0, best_x, ph)) fall outside the parent page's
+                # bounding box, raising a ValueError. That's caught by the
+                # generic except below with no debug trace at all, so a page
+                # like this always silently fell back to plain extract_text()
+                # no matter how well the gutter-detection above worked —
+                # confirmed live on a real resume whose best_x/cross-count/
+                # dual-Y all passed cleanly but the crop itself still failed.
+                _px0, _ptop, _px1, _pbottom = page.bbox
 
                 # Scan x from 20 % to 65 % of page width for the column gutter
                 lo, hi = pw * 0.20, pw * 0.65
@@ -990,17 +1242,49 @@ def _pdfplumber_two_col_text(path):
                 # Raise tolerance to 10% when this looks like a sidebar layout
                 # (right column has 2x+ more words than left): centered headings
                 # in the right column can straddle a nearby gutter.
+                #
+                # On a SHORT page (under ~200 words — typically a resume's last
+                # page holding just a closing section, not its main 2-column
+                # body), the flat floor of 4 straddling words is proportionally
+                # much more damaging: confirmed live on a 129-word page where 4
+                # straddling words (passing the 6.45-word limit easily) sliced
+                # clean through the middle of several short, information-dense
+                # bullet/degree lines, corrupting an otherwise perfectly fine
+                # single-column page. A short page gets a tighter floor instead.
                 _left_est  = sum(1 for w in words if float(w.get('x1', 0)) <= best_x)
                 _right_est = sum(1 for w in words if float(w.get('x0', 0)) >= best_x)
-                _cross_limit = (max(8, n * 0.10)
-                                if _right_est > 2 * max(_left_est, 1)
-                                else max(4, n * 0.05))
+                if _right_est > 2 * max(_left_est, 1):
+                    _cross_limit = max(8, n * 0.10)
+                elif n < 200:
+                    _cross_limit = max(2, n * 0.03)
+                else:
+                    _cross_limit = max(4, n * 0.05)
                 logger.debug(
                     f"pdfplumber gutter scan: best_x={best_x:.1f} best_cross={best_cross} "
                     f"limit={_cross_limit:.1f} left_est={_left_est} right_est={_right_est}"
                 )
                 if best_x is None or best_cross > _cross_limit:
                     logger.debug("pdfplumber gutter rejected by cross-count — using extract_text()")
+                    pages_text.append(page.extract_text() or "")
+                    continue
+
+                # Reject a gutter sitting right at the edge of the scanned range
+                # (within 5% of it): confirmed live on a real resume whose densely-
+                # indented single-column paragraphs happened to have very few words
+                # starting before x=20%-of-width — not because a real column boundary
+                # was there, but simply because that's where the scan was told to
+                # start looking. The "best" (lowest-crossing) x the loop finds in
+                # that case is just the edge of its search window, not a genuine
+                # content-driven minimum, and splitting there produced a false
+                # 2-column read (systemic word-fragmentation throughout the page).
+                # A real gutter is a deliberate design choice and generally sits
+                # solidly inside the typical 20-65% range, not pinned to its boundary.
+                _scan_margin = (hi - lo) * 0.05
+                if best_x <= lo + _scan_margin or best_x >= hi - _scan_margin:
+                    logger.debug(
+                        "pdfplumber gutter at scan-range edge (x=%.1f, range %.1f-%.1f) "
+                        "— untrustworthy, using extract_text()", best_x, lo, hi
+                    )
                     pages_text.append(page.extract_text() or "")
                     continue
 
@@ -1019,6 +1303,16 @@ def _pdfplumber_two_col_text(path):
                 # Threshold is 40% (not 25%) because sidebar+main layouts with a photo
                 # at the top-left have the top half populated only on the right, while
                 # the bottom half has both columns — this legitimately raises dual-Y to ~30%.
+                #
+                # Scaled up to 60% when the gutter itself is very clean (crossing word
+                # count well under the limit): confirmed live on a real resume laid out
+                # as parallel timeline columns (Experience | Education, both populated
+                # across most of the page, row-aligned) — a genuine, cleanly-gutlered
+                # 2-column layout whose dual-Y rate legitimately reaches ~55% simply
+                # because both columns run the full page height together, not because
+                # the split is wrong. A low cross-count already is strong independent
+                # evidence the gutter position itself is correct, so this check doesn't
+                # need to be as strict in that case.
                 _y_tol = 6.0
                 _y_sides = {}
                 for w in words:
@@ -1027,44 +1321,143 @@ def _pdfplumber_two_col_text(path):
                     _y_sides[b] = [prev[0] or float(w.get('x1', 0)) <= best_x,
                                    prev[1] or float(w.get('x0', 0)) >= best_x]
                 _dual = sum(1 for v in _y_sides.values() if v[0] and v[1])
-                if _y_sides and _dual > 0.40 * len(_y_sides):
+                _dual_y_limit = 0.60 if best_cross <= _cross_limit * 0.5 else 0.40
+                if _y_sides and _dual > _dual_y_limit * len(_y_sides):
                     pages_text.append(page.extract_text() or "")
                     continue
 
                 # Crop each column and extract text in reading order
                 try:
-                    left_text  = (page.crop((0,       0, best_x, ph)).extract_text() or "").strip()
-                    right_text = (page.crop((best_x,  0, pw,     ph)).extract_text() or "").strip()
-                except Exception:
+                    left_text  = (page.crop((_px0,  _ptop, best_x, _pbottom)).extract_text() or "").strip()
+                    right_text = (page.crop((best_x, _ptop, _px1,  _pbottom)).extract_text() or "").strip()
+                except Exception as _crop_exc:
+                    logger.debug(f"pdfplumber crop failed ({_crop_exc}) — using extract_text()")
                     pages_text.append(page.extract_text() or "")
                     continue
 
-                # Post-crop sanity: character-level word splits (caused by a false gutter
-                # cutting through the middle of full-width lines) produce fragments like
-                # "agement", "ifecycle", "anagement" that start with VOWELS (because the
-                # split falls at a consonant-vowel boundary within polysyllabic words).
-                # Legitimate right-column continuation lines start with full English words
-                # which predominantly start with CONSONANTS ("medical", "marking", etc.).
-                # If ≥2 lowercase-starting right-column lines exist and ≥60% of them start
-                # with a vowel, the gutter is a false split — fall back to extract_text().
-                _right_lines = [l for l in right_text.splitlines() if l.strip()]
-                _lower_first_chars = [
-                    l.strip()[0] for l in _right_lines[:12]
-                    if l.strip() and l.strip()[0].islower()
-                ]
-                _vowel_frag_starts = sum(1 for c in _lower_first_chars if c in 'aeiou')
-                if (len(_lower_first_chars) >= 2
-                        and _vowel_frag_starts >= len(_lower_first_chars) * 0.6):
+                # Post-crop sanity: a false gutter cutting through the middle of
+                # full-width lines leaves word fragments on BOTH sides of the cut —
+                # the right column gets a remainder that often starts with a VOWEL
+                # (the split falls at a consonant-vowel syllable boundary, e.g.
+                # "agement" from "management"), and the left column gets a trailing
+                # stub of 1-4 letters at the end of its line (e.g. "man" before the
+                # cut). Legitimate 2-column lines don't show either pattern: a real
+                # right-column continuation starts with a full word (predominantly
+                # consonant-first), and a real left-column line ends at a natural
+                # word/phrase boundary.
+                #
+                # Checked on the BODY only — everything after a short header window
+                # — rather than the whole column or just its first ~12 lines, for
+                # two reasons found live on real resumes: (1) a genuinely correct
+                # split can still have a full-width name/contact/summary block at
+                # the very top of the page before the true 2-column content starts,
+                # and that header's own gutter-crossing wrap produces a few benign
+                # fragments that must not condemn the (much longer, cleanly split)
+                # body beneath it; (2) conversely, a split that's wrong for the
+                # ENTIRE body can still dilute below a whole-column fraction
+                # threshold once the page is long enough, since word-fragmentation
+                # doesn't reliably land on a vowel often enough on its own — e.g. a
+                # 30+ line body where nearly every line is a mid-word fragment but
+                # most fragments happen to start with a consonant ("gulatory" from
+                # "Regulatory", "NOLOGIES" from "TECHNOLOGIES") evaded a whole-
+                # column vowel-only check entirely. Requiring the signal within the
+                # body specifically, and combining both the leading-vowel (right)
+                # and trailing-stub (left) signals, catches this systemic case
+                # while still tolerating a one-off header artifact.
+                _HEADER_WINDOW = 10
+                _FRAG_TAIL_RE = re.compile(r'\b([a-z]{1,4})$')
+                _FRAG_EXCL_INNER = {'and', 'the', 'of', 'in', 'to', 'for', 'at', 'by', 'or', 'on',
+                                     'an', 'be', 'as', 'it', 'its', 'has', 'was', 'are', 'may'}
+
+                def _leading_vowel_frag_rate(lines):
+                    lower = [l.strip()[0] for l in lines if l.strip() and l.strip()[0].islower()]
+                    vowels = sum(1 for c in lower if c in 'aeiou')
+                    return vowels, len(lower)
+
+                def _trailing_stub_frag_rate(lines):
+                    c = 0
+                    n = 0
+                    for l in lines:
+                        ls = l.strip()
+                        if len(ls) < 15:
+                            continue
+                        n += 1
+                        m = _FRAG_TAIL_RE.search(ls)
+                        if m and m.group(1) not in _FRAG_EXCL_INNER:
+                            c += 1
+                    return c, n
+
+                # The header-window exemption only makes sense on the document's
+                # FIRST page — a name/contact/summary block only ever appears
+                # once, at the very top of page 1. Applying it unconditionally
+                # to every page let a short LATER page (e.g. a resume's closing
+                # "Key Achievements"/Education block, with no header of its own)
+                # skip past most or all of its own short body: confirmed live on
+                # an 18-line left column / 8-line right column page, where
+                # skipping a flat 10 lines left the right side with NOTHING to
+                # check and skipped straight past the worst fragments on the
+                # left — so a false split's fragment pattern went completely
+                # unchecked and a perfectly clean single-column page got
+                # shredded.
+                _page_header_skip = _HEADER_WINDOW if _page_idx == 0 else 0
+                _body_right = [l for l in right_text.splitlines() if l.strip()][_page_header_skip:]
+                _body_left = [l for l in left_text.splitlines() if l.strip()][_page_header_skip:]
+                _lead_vowel, _lead_total = _leading_vowel_frag_rate(_body_right)
+                _trail_stub, _trail_total = _trailing_stub_frag_rate(_body_left)
+                _leading_bad = _lead_total >= 4 and _lead_vowel >= _lead_total * 0.35
+                _trailing_bad = _trail_total >= 4 and _trail_stub >= _trail_total * 0.35
+                if _leading_bad or _trailing_bad:
                     logger.debug(
-                        "pdfplumber: right column has %d/%d vowel-starting lowercase lines "
-                        "— word fragments from false 2-col split, using extract_text()",
-                        _vowel_frag_starts, len(_lower_first_chars)
+                        "pdfplumber: body shows word-fragment pattern (leading %d/%d, "
+                        "trailing %d/%d) — false 2-col split, using extract_text()",
+                        _lead_vowel, _lead_total, _trail_stub, _trail_total
                     )
                     pages_text.append(page.extract_text() or "")
                     continue
 
+                # Extra guard: a false split can also land on a clean WORD
+                # boundary near the right margin instead of mid-word, so the
+                # fragment checks above (which look for mid-word cuts) miss
+                # it entirely. The telltale sign is different: each "right
+                # column" line reads like a short, grammatically intact
+                # sentence tail (e.g. "Class B product registration.") that
+                # is really the END of an ordinary single-column line, not
+                # independent content of its own. Confirmed live on a real
+                # resume where this produced clean phrase-tails, repeated
+                # across every page, bleeding into whichever section the
+                # concatenated right-column text landed in. The check: does
+                # this "right column" line appear in the page's own unsplit
+                # text immediately after other, non-newline text (i.e. as a
+                # suffix of a longer line), rather than starting its own line?
+                if right_n:
+                    try:
+                        _plain_text = page.extract_text() or ""
+                    except Exception:
+                        _plain_text = ""
+                    if _plain_text and _body_right:
+                        _tail_checked = 0
+                        _tail_matches = 0
+                        for _rl in _body_right[:12]:
+                            _rl = _rl.strip()
+                            if len(_rl) < 6:
+                                continue
+                            _tail_checked += 1
+                            _pos = _plain_text.find(_rl)
+                            if _pos > 0 and _plain_text[_pos - 1] != '\n':
+                                _tail_matches += 1
+                        if _tail_checked >= 3 and _tail_matches >= _tail_checked * 0.6:
+                            logger.debug(
+                                "pdfplumber: right-column lines look like tails of "
+                                "longer single-column lines (%d/%d) — false 2-col "
+                                "split, using extract_text()",
+                                _tail_matches, _tail_checked
+                            )
+                            pages_text.append(page.extract_text() or "")
+                            continue
+
                 logger.info(f"pdfplumber 2-col split at x={best_x:.1f} "
                             f"(left={left_n} words, right={right_n} words)")
+                _any_col_split = True
 
                 # If the left column contains only sidebar-metadata headings (personal
                 # details, hobbies, languages, extra-curricular) and no valuable resume
@@ -1131,8 +1524,8 @@ def _pdfplumber_two_col_text(path):
                         # words which can have PDF-stream ordering artefacts).
                         logger.info("Label+content layout — crop-based y-pairing")
                         try:
-                            _lw = page.crop((0,      0, best_x, ph)).extract_words() or []
-                            _rw = page.crop((best_x, 0, pw,     ph)).extract_words() or []
+                            _lw = page.crop((_px0,  _ptop, best_x, _pbottom)).extract_words() or []
+                            _rw = page.crop((best_x, _ptop, _px1,  _pbottom)).extract_words() or []
                             if not _lw or not _rw:
                                 raise ValueError("empty crop words")
 
@@ -1236,11 +1629,111 @@ def _pdfplumber_two_col_text(path):
                         else:
                             pages_text.append(left_text + "\n" + _right_clean)
 
+        if not _any_col_split:
+            logger.debug("_pdfplumber_two_col_text: no page needed a column split — reporting no 2-column layout")
+            return None
         combined = "\n".join(pages_text).strip()
+        combined = _PAGE_MARKER_RE.sub('', combined).strip()
         return combined if combined else None
     except Exception as e:
         logger.debug(f"_pdfplumber_two_col_text failed: {e}")
         return None
+
+
+def _apply_two_col_correction(path, raw_text):
+    """Try pdfplumber's column-aware extraction and use it in place of
+    raw_text if it passes quality checks, else return raw_text unchanged.
+
+    Pure text-level correction (geometric analysis only, no AI/Ollama) — a
+    scrambled 2-column layout corrupts section boundaries just as badly for
+    the fast regex parser as it does for the AI path, so this is cheap
+    enough to run for BOTH. Originally this correction only ran inside
+    parse_resume_with_llm_text (the AI/single-upload path); bulk upload's
+    _parse_pdf_quick called extract_resume_text directly and never got it at
+    all, so a genuinely 2-column resume uploaded in bulk stayed scrambled
+    (interleaved Experience/Education/Skills) no matter how well this
+    heuristic worked — confirmed live on resumes where the AI path produced
+    a clean split but bulk upload's fields came out merged regardless.
+    """
+    if not str(path).lower().endswith(".pdf"):
+        return raw_text
+    two_col = _pdfplumber_two_col_text(path)
+    if not (two_col and len(two_col.strip()) >= len(raw_text.strip()) * 0.5):
+        return raw_text
+    _tc = two_col
+
+    def _cid_to_char_tc(m):
+        n = int(m.group(1))
+        return chr(n) if 33 <= n <= 126 else ''
+    _tc = re.sub(r'\(cid:(\d+)\)', _cid_to_char_tc, _tc)
+    # Reject two_col if it has significantly more word-fragment lines than
+    # the pymupdf raw_text — this detects false column splits where the
+    # pdfplumber gutter crop cuts through full-width single-column lines,
+    # leaving partial words (e.g. "fund pa", "fee reco") at line ends.
+    _FRAG_EXCL = {'and', 'the', 'of', 'in', 'to', 'for', 'at', 'by', 'or', 'on',
+                  'an', 'be', 'as', 'it', 'its', 'has', 'was', 'are', 'may'}
+
+    # Skip the first ~10 non-empty lines when counting: a genuinely correct
+    # split can still have a full-width name/contact/summary header at the
+    # very top of the document, and THAT header's own gutter-crossing wrap
+    # produces a couple of real (but harmless) fragments — confirmed live on
+    # a real resume where exactly this pushed the count 1 over the old flat
+    # "+2" tolerance and rejected an otherwise clean, correct split. Counting
+    # from the body only, on both sides of the comparison, keeps it a fair
+    # measure of "is the split itself bad" rather than "did the one-off
+    # header wrap a little oddly."
+    _HEADER_SKIP = 10
+
+    def _frag_lines(t):
+        c = 0
+        _lines = [l for l in t.splitlines() if l.strip()][_HEADER_SKIP:]
+        for _l in _lines:
+            _ls = _l.strip()
+            if len(_ls) >= 15:
+                _m = re.search(r'\b([a-z]{1,4})$', _ls)
+                if _m and _m.group(1) not in _FRAG_EXCL:
+                    c += 1
+        return c
+    # A WHOLE line that's just 1-2 letters (with optional trailing period,
+    # e.g. "s." or "on" sitting alone) is a stronger corruption signal than
+    # a trailing fragment — it means the column crop split a word/phrase
+    # apart entirely, not just at a line's tail. `_frag_lines` alone misses
+    # this since it only inspects lines >= 15 chars. Seen in practice: a
+    # skills-sidebar column crop leaving "s.\non Selenium WebDriver" where
+    # the source read "Skilled in Selenium WebDriver" as one line.
+    _ORPHAN_FRAG_RE = re.compile(r'^[a-z]{1,2}\.?$')
+
+    def _has_orphan_fragment_lines(t):
+        return any(_ORPHAN_FRAG_RE.match(_l.strip()) for _l in t.splitlines())
+    # A column crop can also misplace a fragment from the MIDDLE of a
+    # sentence to the very END of the document — e.g. "...suspicious user
+    # activities." loses its own tail into a stray "ser activities." line
+    # appended after the resume's true last content (its Education entry).
+    # That's a genuine corruption artifact: a handful of stray orphaned
+    # words. But raw_text's own reading order is exactly what's broken for a
+    # real 2-column resume, so its "true ending" is often just wherever the
+    # SHORTER column happened to bottom out on the page — a properly
+    # reordered two_col legitimately keeps going past that point with the
+    # rest of the TALLER column (e.g. a long Skills/Domain-Expertise/
+    # Languages sidebar that runs well past the main column's last entry).
+    # That continuation can be large and must not be rejected merely for
+    # being long. Only a short, orphan-shaped tail (a few stray words, not a
+    # real block of additional lines) indicates the old corruption case.
+    _orig_tail = raw_text.strip()[-60:]
+    _tail_ok = True
+    if _orig_tail:
+        _tail_pos = _tc.find(_orig_tail)
+        if _tail_pos != -1:
+            _extra_after_tail = _tc[_tail_pos + len(_orig_tail):].strip()
+            if _extra_after_tail:
+                _extra_lines = [l for l in _extra_after_tail.splitlines() if l.strip()]
+                _extra_words = _extra_after_tail.split()
+                _tail_ok = not (len(_extra_words) <= 6 and len(_extra_lines) <= 2)
+    if (_frag_lines(_tc) <= _frag_lines(raw_text) + 2
+            and not _has_orphan_fragment_lines(_tc) and _tail_ok):
+        return _tc
+    logger.info("two_col rejected: pdfplumber false column split detected (word fragments)")
+    return raw_text
 
 
 def _chunk_lines_by_gap(lines):
@@ -1940,12 +2433,27 @@ def extract_text_from_docx(path):
         raise
 
 
+_PAGE_MARKER_RE = re.compile(
+    r'(?:^|\n)[ \t]*page[ \t]*[|:\-]?[ \t]*\d{1,3}(?:[ \t]*(?:of|/)[ \t]*\d{1,3})?[ \t]*(?=\n|$)',
+    re.I,
+)
+
+
 def extract_resume_text(path, ext):
+    """Returns extracted plain text, with page-footer markers (e.g. "Page | 1",
+    "Page 2 of 4") stripped. Applied once here so every caller — the fast
+    regex parser and the AI parser alike — never has to see this boilerplate.
+    A bare page number with no "Page" label (e.g. a lone "\n3\n") is handled
+    separately where each path already does its own number-only stripping,
+    since "Page" is the one reliable word that tells it apart from real
+    content that happens to end in a number."""
     if ext == "pdf":
-        return extract_text_from_pdf(path)
-    if ext == "docx":
-        return extract_text_from_docx(path)
-    raise ValueError("Unsupported file type")
+        text = extract_text_from_pdf(path)
+    elif ext == "docx":
+        text = extract_text_from_docx(path)
+    else:
+        raise ValueError("Unsupported file type")
+    return _PAGE_MARKER_RE.sub('', text)
 
 
 _PROJECT_TABLE_HEADER_ALIASES = frozenset({
@@ -2015,6 +2523,37 @@ def _pdfplumber_project_table_text(path):
 def normalize_lines(text):
     cleaned = text.replace("•", "•")
     return [re.sub(r"\s+", " ", line).strip(" :-\t") for line in cleaned.splitlines() if line.strip()]
+
+
+def _strip_repeated_name_header_lines(lines):
+    """Multi-page PDFs often repeat the candidate's own name as a running
+    header (sometimes with a bare page number right before it) on every
+    page after the first. Extracted as plain text this sits inline between
+    two pieces of real content with nothing marking it as a header — e.g. a
+    bullet's wrapped continuation lands right after it, or it lands inside
+    whichever section happens to be open at that page break (commonly
+    Summary, when it's the first section). Confirmed live on a real resume
+    where this leaked "1\nCandidate Name" straight into the middle of the
+    Professional Summary text.
+
+    The first non-blank line of a resume is reliably the candidate's own
+    name, so any LATER standalone line that repeats it verbatim is the
+    running header, not real content — drop it, and a bare page number
+    immediately before it too.
+    """
+    if not lines:
+        return lines
+    header = lines[0].strip()
+    if not header or len(header.split()) > 4 or len(header) > 40:
+        return lines
+    out = []
+    for i, line in enumerate(lines):
+        if i > 0 and line.strip().lower() == header.lower():
+            if out and re.match(r'^\d{1,3}$', out[-1].strip()):
+                out.pop()
+            continue
+        out.append(line)
+    return out
 
 
 def canonical_section_name(line):
@@ -2097,6 +2636,24 @@ def _looks_like_company_name(line):
         return True
 
     return False
+
+
+# A job entry's own compact "<Title> - <Company>. (<Month Year> -
+# <Month Year|Present>)" line, with no "Designation :"/"Duration :" label at
+# all. Module-level (not just local to find_sections) so other passes that
+# need to recognize "this line starts a new job entry" — e.g. the
+# achievements-block extractor below — can reuse the exact same signal.
+_JOB_DATE_RANGE_RE = re.compile(
+    r'\(?\s*'
+    r'(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s*\d{2,4}'
+    r'\s*(?:[-–—]|to)\s*'
+    r'(?:(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s*\d{2,4}'
+    r'|present|till\s*date|current)'
+    r'\s*\)?'
+    r'\s*(?:\(\s*\d+\+?\s*(?:months?|years?|yrs?)\s*\))?'
+    r'\s*$',
+    re.I,
+)
 
 
 def find_sections(lines):
@@ -2208,26 +2765,85 @@ def find_sections(lines):
                 # of dropping it outright — this is exactly the shape of a rescued line
                 # ("12. ...") picking a numbered list back up after a sidebar interruption.
                 _is_list_marker_line = bool(words) and not words[0][0].isalpha()
+                # A job entry written as a single compact line — "<Title> -
+                # <Company>. (<Month Year> - <Month Year|Present>)" — with NO
+                # "Designation :"/"Duration :" labels at all is a very common
+                # real-world format this parser otherwise has no signal for:
+                # no heading ever introduces it, so without this it just keeps
+                # flowing into whatever's already open (usually Summary,
+                # confirmed live on a real resume where this swallowed the
+                # candidate's entire job history — 7+ roles — into one
+                # Summary blob with Experience left empty). A trailing date
+                # range is a strong, distinctive signal ordinary prose/bullets
+                # essentially never end with. Scoped to current in (None,
+                # "summary") — once Experience is already open, content just
+                # continues appending normally and doesn't need this.
+                if (not _is_list_marker_line and current in (None, "summary")
+                        and len(line) <= 160 and _JOB_DATE_RANGE_RE.search(line)):
+                    section = "experience"
+                    inline_remainder = line
                 if _is_list_marker_line and current:
                     bucket.append(line)
                     continue
-                if not _is_list_marker_line:
+                if not section and not _is_list_marker_line:
                     for n in range(min(3, len(words)), 0, -1):
                         prefix_section = canonical_section_name(" ".join(words[:n]))
                         if prefix_section:
                             remainder = " ".join(words[n:]).strip()
-                            # Single-word prefix only counts as a heading when:
+                            # A prefix match (whether it's one word or an exact
+                            # multi-word alias like "training programs") only
+                            # counts as a heading when:
                             #   • it IS the entire line (no remainder), OR
                             #   • it ends with a separator like "Skills:", OR
                             #   • it is ALL-CAPS (e.g. "EXPERIENCE VALIDATION ENGINEER..." from
                             #     row-interleaved PDF extraction — heading + inline content on same line).
-                            # Title-Case words like "Experience on all ALM modules" are content.
+                            # Lowercase/Title-Case words with ordinary prose following are content —
+                            # e.g. "Experience on all ALM modules", or "training programs for
+                            # company personnel..." wrapped mid-sentence from "...regulatory
+                            # compliance training programs for company personnel, conducted
+                            # training gap analysis..." (a real resume where "training programs"
+                            # exactly matches the Training-section alias purely by coincidence,
+                            # confirmed live: it hijacked the rest of that sentence — and
+                            # everything after it, up to the next real heading — out of the
+                            # Experience/Projects entry it was actually describing). Not scoped to
+                            # n == 1: the same coincidental-match risk applies just as much to an
+                            # exact 2-or-3-word alias landing mid-sentence.
                             _word0_bare = words[0].rstrip('.,;:!?')
-                            if n == 1 and remainder and not words[0].endswith(':') and not _word0_bare.isupper():
-                                break  # "Experience on all ALM modules" → content, not heading
+                            if remainder and not words[0].endswith(':') and not _word0_bare.isupper():
+                                break  # ordinary prose, not a heading
+                            # A 2-or-3-word prefix match (e.g. "internship" matching inside
+                            # "INTERNSHIP & INDUSTRY EXPOSURE" once "&" is stripped to a space)
+                            # can leave a remainder that is itself a bare ALL-CAPS phrase —
+                            # that is never inline body content (prose), it's the rest of the
+                            # same heading wrapping past the matched alias. Swallow it into the
+                            # heading instead of emitting it as a floating content fragment.
+                            # Scoped to n >= 2 only: the n == 1 case above already has its own,
+                            # deliberately permissive ALL-CAPS allowance for row-interleaved PDF
+                            # text ("EXPERIENCE VALIDATION ENGINEER...") where the remainder IS
+                            # genuine content.
+                            if n >= 2 and remainder:
+                                _rem_words = [w for w in remainder.split() if any(c.isalpha() for c in w)]
+                                if _rem_words and all(w.rstrip('.,;:!?').isupper() for w in _rem_words):
+                                    remainder = ""
                             section = prefix_section
                             inline_remainder = remainder if remainder else None
                             break
+
+        # An "Achievements"/"Key Achievements" heading — mixed-case inline
+        # sub-label (e.g. each "PROJECT N:" block ending in its own "Key
+        # Achievements:" bullets) or a standalone ALL-CAPS section — describes
+        # accomplishments in whatever role/project is already being described,
+        # not a credential, so it's kept as part of Experience/Projects
+        # instead of opening its own section (which used to fold into
+        # Certifications; a resume can have accomplishment bullets with no
+        # real certifications at all, and showing them under "Certifications"
+        # reads as simply wrong). Checked here (after both the direct heading
+        # match AND the n-word prefix-scan fallback above) since either one
+        # independently rediscovers "achievements" from a short "Key
+        # Achievements" line.
+        if section == "achievements" and current in ("experience", "projects"):
+            section = None
+            inline_remainder = None
 
         if section:
             # Guard: a single Title-case word (e.g. "Qualifications") that immediately
@@ -2235,7 +2851,20 @@ def find_sections(lines):
             # of that line — NOT a new section heading. E.g. the bullet "…and Software\n
             # Qualifications." wraps across lines but both chunks belong to the same section.
             # ALL-CAPS words (e.g. "EDUCATION") are always genuine headings; skip the guard.
-            if (len(words_raw) == 1 and current and bucket
+            #
+            # Scoped to current == "summary" only: this ambiguity is a free-prose
+            # phenomenon (a sentence wrapping mid-word onto its own line). Itemized
+            # sections (education, skills, experience, certifications, projects)
+            # are made of short facts — degree names, institutions, years, skill
+            # phrases — that legitimately never end in terminal punctuation, so
+            # this guard used to misfire on every one of them: a real "Skills"
+            # heading right after an Education entry ending in a bare year
+            # ("...\n2016\nSkills") was swallowed as a "continuation" of "2016"
+            # instead of starting a new section, silently losing the entire
+            # Skills (and anything after it) into Education. Confirmed live on
+            # a real resume where this also ate the Profile/Summary section
+            # that followed the Skills sidebar block.
+            if (current == "summary" and len(words_raw) == 1 and bucket
                     and not words_raw[0].rstrip('.,;:!?').isupper()):
                 # Look past any trailing empty lines to the last substantive bucket line.
                 # An empty line between wrapped content (e.g. PDF page rendering gaps)
@@ -2267,6 +2896,19 @@ def find_sections(lines):
                 # inline_remainder must still be kept, not silently dropped.
                 if inline_remainder:
                     bucket.append(inline_remainder)
+                elif line.rstrip().endswith(':'):
+                    # A same-category SUB-heading label (e.g. "Software & Tools:"
+                    # introducing its own bullet list inside a Skills/Core
+                    # Competencies block) must stay as content — it happens to
+                    # canonicalize to the same field as the section it's already
+                    # inside ("software tools" is itself a Skills alias), but it's
+                    # labeling the bullets that follow, not a redundant repeat of
+                    # the section heading. Confirmed live: dropping it silently
+                    # lost the "Software & Tools:" label (and nothing else) from
+                    # an otherwise-complete Skills section. Scoped to lines ending
+                    # in ":" so a genuine bare repeat (no trailing colon) still
+                    # gets discarded as before.
+                    bucket.append(line)
                 continue
             _flush(current, bucket)
             # A throwaway section (e.g. "Hobbies" → canonical "interests") is discarded
@@ -2319,8 +2961,17 @@ def find_sections(lines):
 
 
 def parse_label_value(lines, labels):
+    """Extract a labelled field's value, stopping at a "|" — a one-line
+    contact header routinely packs several labelled fields onto a single
+    line separated by pipes ("Phone: 123 | Location: X | Email: y@z.com"),
+    and capturing to end-of-line instead of stopping at the next field's own
+    label merged the next field's whole value in too (confirmed live: a real
+    resume's Location came out as "Bengaluru, Karnataka | Email:
+    spoorthym831@gmail.com"). None of these labels' real values ever
+    legitimately contain a literal "|" themselves.
+    """
     label_pattern = "|".join(re.escape(label) for label in labels)
-    pattern = re.compile(rf"(?:^|\b)({label_pattern})\s*[:\-]\s*(.+)$", re.I)
+    pattern = re.compile(rf"(?:^|\b)({label_pattern})\s*[:\-]\s*([^|\n]+)", re.I)
     for line in lines[:30]:
         match = pattern.search(line)
         if match:
@@ -2482,6 +3133,14 @@ def _looks_like_name(line):
         return False
     words = line.split()
     if not (1 <= len(words) <= 5):
+        return False
+    # A bare 1-2 letter single "word" (e.g. a stray "L" left over from a
+    # column-crop artifact) is never a plausible full name on its own —
+    # confirmed live: this let a lone "L" fragment pass as a name and
+    # triggered a header-reordering path meant for genuine name-on-right
+    # sidebar layouts, which went on to scramble the real name/email/title
+    # for a resume that wasn't actually laid out that way.
+    if len(words) == 1 and len(re.sub(r"[-'.]", "", words[0])) <= 2:
         return False
     for w in words:
         clean = re.sub(r"[-'.]", "", w)
@@ -2999,6 +3658,325 @@ def _is_skill_sidebar_bullet_or_date_line(line):
     return bool(re.search(r"\b(19|20)\d{2}\b", line))
 
 
+_EXP_JOB_META_RE = re.compile(r'^\s*designation\s*:', re.I)
+_EXP_COURSE_META_RE = re.compile(r'^\s*institute\s*:', re.I)
+
+_EDU_DEGREE_RE = re.compile(
+    r'\b(bachelor|master|b\.?\s?tech|m\.?\s?tech|b\.?\s?e|m\.?\s?e\b|b\.?\s?sc|m\.?\s?sc|'
+    r'b\.?\s?com|m\.?\s?com|\bmba\b|\bmca\b|\bbca\b|phd|ph\.?d)\b', re.I,
+)
+_EDU_INSTITUTION_RE = re.compile(
+    r'\b(university|college|board of|higher secondary|secondary school|polytechnic)\b', re.I,
+)
+_EDU_GRADE_RE = re.compile(r'\bcgpa\b|\bgpa\b|\d+(?:\.\d+)?\s*%', re.I)
+# "Diploma" alone is ambiguous — it's both a genuine standalone academic
+# credential ("Diploma in Mechanical Engineering - Sandur Polytechnic...",
+# confirmed live sitting right under Education next to a Bachelor's entry
+# with no institution/grade of its own on the SAME scan this file already
+# does elsewhere) AND a bare training-topic label with no institution at
+# all ("DIPLOMA IN OIL AND GAS TECHNOLOGY" heading a list of NDT/testing
+# topics — confirmed live on a DIFFERENT real resume, where treating bare
+# "diploma" as unconditionally degree-shaped misclassified that whole
+# training block as Education). Only count it when an institution name
+# also appears on the same line — that's what actually distinguishes a
+# real credential entry from a training-section heading.
+_EDU_DIPLOMA_RE = re.compile(r'\bdiploma\b', re.I)
+_EXP_CERT_TRIGGER_RE = re.compile(
+    # "certified"/"certification" specifically, not bare "certificate" — a
+    # standard schooling qualification is routinely NAMED "...Certificate"
+    # (Secondary School Leaving Certificate, Higher Secondary Certificate)
+    # and must stay in Education; "certified"/"certification" describes an
+    # actual professional credential and doesn't collide with that.
+    r'\b(course|diploma|certified|certifications?|training|workshop|seminar|ndt|iso\s?\d{3,}|'
+    r'level\s+i{1,3}\b)\b', re.I,
+)
+
+
+def _is_education_line(line):
+    has_institution = bool(_EDU_INSTITUTION_RE.search(line))
+    return (
+        bool(_EDU_DEGREE_RE.search(line))
+        or (has_institution and bool(_EDU_GRADE_RE.search(line)))
+        or (has_institution and bool(_EDU_DIPLOMA_RE.search(line)))
+    )
+
+
+def _split_trailing_edu_certs_from_experience(experience_text):
+    """A resume with no Education/Certifications heading at all, but a real
+    (or inferred-from-an-unlabeled-company-name) Work Experience section, has
+    nowhere for its trailing degree/course content to go — it just keeps
+    accumulating into Experience past the last real job's own bullets, since
+    nothing ever signals the section boundary. Confirmed live: a course
+    ("PROCESS DESIGN ENGINEERING COURSE... Institute: ..."), a diploma listing
+    and three degree lines (each ending in a CGPA/percentage) all stayed
+    stuck inside Experience, pushing Education and Certifications to empty.
+
+    Finds where the LAST job entry's own content ends (anchored on its
+    "Designation :" label — the same marker that starts a job block
+    elsewhere in this parser) and classifies only the clearly degree-shaped
+    (Education) or training/course-keyword-shaped (Certifications) lines
+    found after that point. Anything else in the tail is left in Experience
+    untouched — this rescues a specific, recognizable pattern, not a general
+    reclassification of free text.
+
+    Returns (new_experience, education_text, certifications_text); the last
+    two are "" when nothing in the tail matched either pattern.
+    """
+    if not experience_text:
+        return experience_text, "", ""
+    lines = experience_text.split("\n")
+    job_idxs = [i for i, l in enumerate(lines) if _EXP_JOB_META_RE.match(l.strip())]
+    if not job_idxs:
+        return experience_text, "", ""
+    last_job_idx = job_idxs[-1]
+
+    # The cut point is simply the first line after the last job started that
+    # itself looks like a degree/course marker — NOT "wherever that job's
+    # bullet list structurally ends", since a bullet that wraps onto a second,
+    # unmarked line (e.g. "...sodium chlorite, sodium\nhypochlorite.") looks
+    # identical to a block boundary if judged by bullet-prefix alone.
+    # Searching for the marker directly skips that false boundary entirely.
+    cut_idx = next(
+        (i for i in range(last_job_idx + 1, len(lines))
+         if lines[i].strip() and (
+             _is_education_line(lines[i]) or _EXP_CERT_TRIGGER_RE.search(lines[i])
+             or _EXP_COURSE_META_RE.match(lines[i].strip())
+         )),
+        None,
+    )
+    if cut_idx is None:
+        return experience_text, "", ""
+
+    tail = lines[cut_idx:]
+
+    edu_out, cert_out = [], []
+    seen_edu = False
+    for l in tail:
+        if not l.strip():
+            continue
+        if _is_education_line(l):
+            seen_edu = True
+            edu_out.append(l)
+        elif seen_edu:
+            # A line after Education starts that isn't itself degree-shaped is
+            # usually a continuation (an institute name wrapped onto its own
+            # line) — keep it with Education rather than Certifications.
+            edu_out.append(l)
+        else:
+            cert_out.append(l)
+
+    new_experience = "\n".join(lines[:cut_idx]).rstrip()
+    return new_experience, "\n".join(edu_out).strip(), "\n".join(cert_out).strip()
+
+
+def _split_education_and_certifications(education_text):
+    """Some resumes use one combined heading for both degrees and
+    certifications (e.g. "ACADEMIC QUALIFICATIONS/CERTIFICATIONS") with no
+    sub-label splitting the two apart. Reuses the same degree-pattern and
+    training/certification-keyword signals as
+    _split_trailing_edu_certs_from_experience to pull out lines that clearly
+    read as a certification/credential and move them to Certifications,
+    leaving genuine degree entries in Education. A line matching neither
+    signal (e.g. an institution name wrapped onto its own line, continuing
+    the degree entry above it) stays in Education untouched — this rescues a
+    specific, recognizable pattern, not a general reclassification.
+
+    Returns (new_education, certifications_text); certifications_text is ""
+    when nothing in the block matched a certification pattern.
+    """
+    if not education_text:
+        return education_text, ""
+    edu_out, cert_out = [], []
+    # A line matching neither signal (e.g. a certification sentence that
+    # wrapped onto a second line with no keyword of its own, like "...&
+    # Certified Lean\nSix Sigma Green Belt") follows whichever bucket the
+    # line before it landed in, rather than defaulting to Education — a
+    # genuine continuation stays with what it's continuing.
+    last_bucket = "edu"
+    for l in education_text.split("\n"):
+        if not l.strip():
+            continue
+        if _is_education_line(l):
+            last_bucket = "edu"
+            edu_out.append(l)
+        elif _EXP_CERT_TRIGGER_RE.search(l):
+            last_bucket = "cert"
+            cert_out.append(l)
+        elif last_bucket == "cert":
+            cert_out.append(l)
+        else:
+            edu_out.append(l)
+    return "\n".join(edu_out).strip(), "\n".join(cert_out).strip()
+
+
+_DEDUPE_MIN_LINE_LEN = 40
+
+
+def _dedupe_cross_field_content(parsed):
+    """Content must belong to only one section — if a long, substantially
+    identical line (a full sentence/bullet, not just a shared word or company
+    name) appears verbatim in more than one of Summary/Experience/Projects,
+    keep it in the more specific field and strip it from the broader one.
+    Deliberately exact-line-match only (never a partial/fuzzy match) and only
+    for lines at least _DEDUPE_MIN_LINE_LEN chars — short, incidental overlaps
+    (a company name mentioned once in Summary and again as an Experience
+    heading) are normal and must not be touched; this only catches a genuine
+    whole block of text copy-pasted into more than one field.
+
+    Priority: Summary is the high-level narrative and must not repeat a
+    sentence already stated verbatim in Experience or Projects. Projects and
+    Experience are peers, but Project content must not also sit inside
+    Experience (and vice versa is left alone — a resume that narrates a
+    project entirely within one job entry, with no separate Projects section,
+    is exactly the legitimate case the Projects-from-Experience mining
+    elsewhere in this file exists for). Education and Certifications are the
+    most specific, authoritative home for a degree/credential line — if a
+    rescue heuristic elsewhere independently copies the same line into
+    Skills too (confirmed live: a second degree line, "Diploma in Mechanical
+    Engineering - Sandur Polytechnic...", ended up in both Certifications
+    and Skills via two separate heuristics that each ran without knowing
+    about the other), it must not survive there as well.
+    """
+    def _long_lines(text):
+        return {l.strip() for l in (text or "").split("\n") if len(l.strip()) >= _DEDUPE_MIN_LINE_LEN}
+
+    def _strip_lines(text, remove_set):
+        if not remove_set or not text:
+            return text
+        kept = [l for l in text.split("\n") if l.strip() not in remove_set]
+        return "\n".join(kept).strip()
+
+    # A separate rescue heuristic can copy a line across fields with its
+    # leading bullet glyph stripped or kept inconsistently (confirmed live:
+    # the same degree line landed in Skills with no bullet and in
+    # Certifications with its "●" intact) — strip it before comparing so
+    # that alone doesn't hide a genuine duplicate.
+    def _long_lines_no_bullet(text):
+        return {
+            l.strip().lstrip("•●▪◦-*").strip()
+            for l in (text or "").split("\n")
+            if len(l.strip()) >= _DEDUPE_MIN_LINE_LEN
+        }
+
+    def _strip_lines_no_bullet(text, remove_set):
+        if not remove_set or not text:
+            return text
+        kept = [
+            l for l in text.split("\n")
+            if l.strip().lstrip("•●▪◦-*").strip() not in remove_set
+        ]
+        return "\n".join(kept).strip()
+
+    exp_lines = _long_lines(parsed.get("experience"))
+    proj_lines = _long_lines(parsed.get("projects"))
+
+    overlap_with_summary = exp_lines | proj_lines
+    if overlap_with_summary and parsed.get("summary"):
+        parsed["summary"] = _strip_lines(parsed["summary"], overlap_with_summary)
+
+    if proj_lines and parsed.get("experience"):
+        parsed["experience"] = _strip_lines(parsed["experience"], proj_lines)
+
+    edu_cert_lines = _long_lines_no_bullet(parsed.get("education")) | _long_lines_no_bullet(parsed.get("certifications"))
+    if edu_cert_lines and parsed.get("skills"):
+        parsed["skills"] = _strip_lines_no_bullet(parsed["skills"], edu_cert_lines)
+
+    return parsed
+
+
+_ACHIEVEMENTS_MARKER_RE = re.compile(
+    r'^(?:(?:key\s+)?achievements'
+    r'|honou?rs?\s*(?:&|and)\s*awards'
+    r'|awards\s*(?:&|and)\s*honou?rs?)'
+    r'\s*:?\s*$',
+    re.I,
+)
+_ACHIEVEMENT_STOP_LABEL_RE = re.compile(r'^(?:responsibility|responsibilities|duration|designation)\s*:', re.I)
+
+
+def _looks_like_standalone_heading_line(line):
+    """A short ALL-CAPS line (e.g. "REPORTING") reads as a new heading, not
+    more achievement content or a wrapped continuation of the previous
+    bullet — those are always mixed/lower case. Exempts anything that is
+    itself an achievements marker (e.g. a later "KEY ACHIEVEMENTS" line),
+    which must keep accumulating rather than stop.
+    """
+    if _ACHIEVEMENTS_MARKER_RE.match(line):
+        return False
+    letters = re.sub(r'[^A-Za-z]', '', line)
+    return bool(letters) and letters.isupper() and len(line.split()) <= 4
+
+
+def _extract_achievement_bullets(text):
+    """Pull an inline "Achievements"/"Key Achievements" marker and the
+    content under it out of Experience/Projects text, so it can be shown
+    under Certifications instead. find_sections() deliberately keeps this
+    content attached to whatever job/project was open when the marker
+    appeared (switching section away from there mid-entry fragments the
+    surrounding bullets — confirmed live on a real resume). That's still
+    right for PARSING, but not for DISPLAY: accomplishments read as
+    belonging with real certifications, not glued onto the end of an
+    unrelated job entry. This runs as a separate step afterward so it can
+    relocate the content without touching how it was parsed.
+
+    Keeps consuming lines (bulleted or a wrapped continuation with no
+    bullet of its own — both are common in real resumes) until a clear
+    boundary: a recognized section heading, a "Responsibility:"/
+    "Designation:"-style label starting the next entry, or a short
+    ALL-CAPS line that reads as a new heading (e.g. "REPORTING"). An
+    earlier version stopped at ANY non-bulleted line, which on a resume
+    where bullets wrap across lines with no repeated bullet character cut
+    each wrapped bullet in half, stranding its continuation as orphaned
+    prose back in Projects.
+    """
+    if not text:
+        return text, ""
+    lines = text.split("\n")
+    kept, pulled = [], []
+    i, n = 0, len(lines)
+    while i < n:
+        line = lines[i]
+        if _ACHIEVEMENTS_MARKER_RE.match(line.strip()):
+            pulled.append(line)
+            i += 1
+            while i < n:
+                nxt_raw = lines[i]
+                nxt = nxt_raw.strip()
+                if not nxt:
+                    i += 1
+                    continue
+                if (canonical_section_name(nxt) is not None
+                        or _ACHIEVEMENT_STOP_LABEL_RE.match(nxt)
+                        or _JOB_DATE_RANGE_RE.search(nxt)
+                        or _looks_like_standalone_heading_line(nxt)):
+                    break
+                pulled.append(nxt_raw)
+                i += 1
+            continue
+        kept.append(line)
+        i += 1
+    return "\n".join(kept).strip(), "\n".join(pulled).strip()
+
+
+def _relocate_achievements_to_certifications(parsed):
+    """Apply _extract_achievement_bullets to Experience and Projects, moving
+    whatever it finds into Certifications. Skips a block that's already
+    present there (substring check) so this can safely run more than once
+    across a pipeline that also merges achievement content in from elsewhere.
+    """
+    for field in ("experience", "projects"):
+        cleaned, pulled = _extract_achievement_bullets(parsed.get(field))
+        if not pulled:
+            continue
+        parsed[field] = cleaned
+        if pulled not in parsed.get("certifications", ""):
+            if parsed.get("certifications", "").strip():
+                parsed["certifications"] = parsed["certifications"].rstrip() + "\n\n" + pulled
+            else:
+                parsed["certifications"] = pulled
+    return parsed
+
+
 def _rescue_skill_sidebar_from_experience(experience_text):
     """Sidebar resumes sometimes repeat their Skills column on later pages
     WITHOUT repeating the "SKILLS" heading, so that continuation has no marker
@@ -3067,6 +4045,7 @@ _HEADING_TAIL_WORDS = frozenset({
     "me", "completed", "compelted", "compeleted", "courses", "course",
     "details", "detail", "summary", "information", "info", "profile",
     "done", "worked", "history", "background", "expertise",
+    "standards", "regulations",
 })
 
 
@@ -3349,23 +4328,43 @@ def _drop_name_title_and_gutter_bleed(lines, full_name, title):
     return out
 
 
+_STRAY_EXP_VERB_RE = re.compile(
+    r'^(?:Led|Managed|Performed|Prepared|Conducted|Developed|Designed|Implemented|'
+    r'Executed|Coordinated|Reviewed|Monitored|Analy[sz]ed|Maintained|Ensured?|'
+    r'Responsible|Collaborated|Supported|Assisted|Trained|Resolved|Handled|'
+    r'Delivered|Achieved|Improved|Created|Built|Established|Drove|Spearheaded|'
+    r'Facilitated|Investigated|Validated|Verified|Identified|Drafted|Authored|'
+    r'Worked|Working)\b',
+    re.I,
+)
+
+
 def _looks_like_stray_experience_bullet(line):
     """True for a bulleted line that reads like a job-responsibility SENTENCE
-    ("• Reviewed and approved V&V protocols...") rather than a short Skills
-    category item ("• DHF / DMR Authorship & Review"). Used to detect Experience
-    content stranded past a Skills heading — bullet punctuation alone isn't a
-    reliable signal, since plenty of legitimate Skills sections bullet their own
-    short items.
+    ("• Reviewed and approved V&V protocols...") rather than a Skills category
+    item, however long or richly described ("• Windchill PLM: Configuration,
+    workflow creation, BOM/EBOM/MBOM management, ECR/ECN processes"). Used to
+    detect Experience content stranded past a Skills heading.
+
+    Length and trailing punctuation alone are NOT reliable signals — plenty
+    of genuine Skills bullets are both long (a detailed "Category: items,
+    items" line easily passes 60 chars) and end in a period or colon.
+    Confirmed live on two different real resumes where length/punctuation
+    alone split a legitimate Skills list in half and glued the tail onto
+    Experience. The one actually distinguishing signal is sentence
+    STRUCTURE: a stray Experience line opens with a responsibility-style
+    action verb ("Managed...", "Reviewed..."); a Skills bullet opens with a
+    category/tool/noun phrase ("Windchill PLM:", "CAD & GD&T:"). Requiring
+    the verb-start is the baseline check, with length/punctuation only used
+    to add confidence on top of it, never to override its absence.
     """
     s = line.strip()
     if not s.startswith(("•", "●", "▪", "◦")):
         return False
     body = s.lstrip("•●▪◦").strip()
-    if not body:
+    if not body or not _STRAY_EXP_VERB_RE.match(body):
         return False
-    if len(body) > 60:
-        return True
-    return body[-1:] in ".;:"
+    return len(body) > 60 or body[-1:] in ".;:"
 
 
 def parse_resume_text(text, name_hint=None):
@@ -3416,16 +4415,22 @@ def parse_resume_text(text, name_hint=None):
             if len(_handle) >= 3 and not re.match(r'^(profile|handle|id|url|link|page|account)$', _handle, re.I):
                 parsed["linkedin"] = "https://www.linkedin.com/in/" + _handle
 
-    # Remove all LinkedIn URLs and fragments from text
-    text = re.sub(r'https?://[^\s]*linkedin\.com[^\s]*', '', text, flags=re.I)
-    text = re.sub(r'www\.linkedin\.com[^\s]*', '', text, flags=re.I)
-    text = re.sub(r'linkedin\.com/in/[a-zA-Z0-9\-_%/@?=&#]*', '', text, flags=re.I)
+    # Remove all LinkedIn URLs and fragments from text. Also eat an immediately
+    # preceding inline separator ("Bengaluru, IN | linkedin.com/in/...") so the
+    # removal doesn't leave a dangling "Bengaluru, IN |" behind — that fragment
+    # no longer contains "linkedin", so it stops being recognized as a contact
+    # line and gets misread as a job-title candidate downstream (confirmed
+    # live: produced a bogus title of just the city name).
+    text = re.sub(r'[ \t|\-–—]*https?://[^\s]*linkedin\.com[^\s]*', '', text, flags=re.I)
+    text = re.sub(r'[ \t|\-–—]*www\.linkedin\.com[^\s]*', '', text, flags=re.I)
+    text = re.sub(r'[ \t|\-–—]*linkedin\.com/in/[a-zA-Z0-9\-_%/@?=&#]*', '', text, flags=re.I)
     text = re.sub(r'\?skipRedirect[^\s]*|\&skipRedirect[^\s]*|#skipRedirect[^\s]*', '', text, flags=re.I)
     # Remove standalone LinkedIn profile ID fragments (e.g., "karnam-29a6b416a/")
     text = re.sub(r'^\s*[a-z]+\-[a-z0-9]+/?$', '', text, flags=re.MULTILINE | re.I)
 
     lines = [line.strip() for line in text.split('\n')]
     lines = [line for line in lines if line]
+    lines = _strip_repeated_name_header_lines(lines)
 
     if not parsed["full_name"]:
         parsed["full_name"] = parse_label_value(lines, ["name", "full name", "candidate name"])
@@ -3542,12 +4547,30 @@ def parse_resume_text(text, name_hint=None):
         )
         _title_scan_lines = [l for l in useful_top_lines if l in lines[:_first_heading_idx]]
         _name_line = parsed.get("full_name", "")
+        # A stylized multi-line name header (e.g. "UMAIRA" / "KHAN" stacked on
+        # separate lines, joined into "UMAIRA KHAN" by the name-detection pass
+        # above) leaves each individual name line still sitting in
+        # _title_scan_lines, un-equal to the joined _name_line string. Without
+        # this, a bare name fragment like "UMAIRA" passes the title heuristic
+        # below and gets kept as the job title. Skip any line that is just one
+        # token of the already-resolved multi-word name.
+        _name_words_upper = {w.upper() for w in _name_line.split()} if _name_line else set()
         for _tl in _title_scan_lines:
             if _tl == _name_line:
+                continue
+            if len(_name_words_upper) > 1 and _tl.strip().upper() in _name_words_upper:
                 continue
             # Skip our own OCR-injected "Name:/Email:/Phone:/Location:" label
             # lines — they must never be mistaken for a job title.
             if re.match(r'^\s*(name|email|phone|location)\s*:', _tl, re.I):
+                continue
+            # Skip a short, bare city/state line (e.g. "Bengaluru, IN") — a
+            # contact-header location that's easy to mistake for a title once
+            # a stripped URL leaves it as the only content on its line (e.g.
+            # "Bengaluru, IN | linkedin.com/in/..." losing its "| linkedin..."
+            # tail during LinkedIn-URL cleanup above and no longer being
+            # excluded as a contact line).
+            if len(_tl.split()) <= 5 and _LOCATION_LINE_RE.search(_tl):
                 continue
             # Long taglines often bundle "<Title> | <keyword> | <keyword>..."
             # or "<Title> – <keyword list>" (e.g. "QA Specialist – Design
@@ -3570,7 +4593,23 @@ def parse_resume_text(text, name_hint=None):
             r"noida|gurgaon|gurugram|coimbatore|trivandrum|kochi|jaipur|ahmedabad|kolkata|"
             r"ludhiana|chandigarh)\b", re.I
         )
-        for line in lines[:20]:
+        # Scoped to the header/contact block only (before the first real
+        # section heading, e.g. "Summary") — otherwise this matched the
+        # first mention of a country/city ANYWHERE in the first 20 lines,
+        # including deep inside Summary prose (e.g. "...sterile injectables
+        # and topicals to India and international markets...": the whole
+        # sentence got grabbed as "location" since it isn't bulleted/piped).
+        # A resume with no Work Experience/Projects headings pushes real
+        # prose well within the first 20 lines, so the line-count cap alone
+        # wasn't enough.
+        _header_end = next(
+            (i for i, l in enumerate(lines[:20]) if canonical_section_name(l)), 20
+        )
+        for line in lines[:_header_end]:
+            # Extra guard even within the header block: a genuine location
+            # line is short (a city/state/country list, not a sentence).
+            if len(line.split()) > 8:
+                continue
             if _loc_city_re.search(line):
                 # Split on pipe/bullet separators first; take only the segment
                 # that contains the city keyword — avoids grabbing "Open to
@@ -3590,86 +4629,18 @@ def parse_resume_text(text, name_hint=None):
 
     parsed.update(find_sections(lines))
 
-    # ── Post-process: Extract skills from 2-column layouts ──────────────────────
-    # In some PDFs (e.g., Sivaranjani's), skills are interleaved with summary due to
-    # column extraction. If skills section is missing, extract from summary AND certifications.
-    if not parsed.get("skills"):
-        skills_items = []
-
-        # Collect lines from multiple sections that might contain skills
-        sections_to_scan = []
-        for _sec_key in ("summary", "certifications", "training", "achievements", "career_highlights"):
-            if parsed.get(_sec_key):
-                sections_to_scan.extend(parsed[_sec_key].split('\n'))
-
-        for line in sections_to_scan:
-            line_stripped = line.strip()
-
-            if not line_stripped or len(line_stripped) < 5:
-                continue
-
-            # Must start with capital letter
-            if not line_stripped[0].isupper():
-                continue
-
-            # Skip full sentences that end with periods
-            if line_stripped.endswith('.'):
-                continue
-
-            # Extract skill, handling cases where skill + summary text appear on same line
-            # Pattern: skill text ends where summary paragraph begins (indicated by "Experienced", "professional", etc.)
-            skill_part = line_stripped
-            if any(marker in line_stripped for marker in [' Experienced ', ' professional ', ' compliance ', ' and compliance']):
-                # Find the skill part before summary text
-                for marker in [' Experienced ', ' professional ']:
-                    if marker in line_stripped:
-                        skill_part = line_stripped.split(marker)[0].strip()
-                        break
-
-            # Pattern 1: Ends with & or ( (incomplete lines are skills continuing to next line)
-            if skill_part.endswith('&') or skill_part.endswith('('):
-                skills_items.append(skill_part)
-                continue
-
-            # Pattern 2: Contains skill indicators (&, /, parens, colons) and is reasonably short
-            has_skill_indicator = any(c in skill_part for c in ['&', '/', '(', ')', ':'])
-            if has_skill_indicator and len(skill_part) <= 90:
-                # Accept if it has the skill pattern
-                word_count = len(skill_part.split())
-                if word_count <= 8:  # Allow slightly longer for multi-part skills
-                    skills_items.append(skill_part)
-                    continue
-
-            # Pattern 3: Short items (1-2 words, 5-40 chars) - likely single skill names
-            word_count = len(skill_part.split())
-            if 1 <= word_count <= 2 and 5 <= len(skill_part) <= 40:
-                skills_items.append(skill_part)
-                continue
-
-            # Pattern 4: Multi-word items with acronyms/standards (3-6 words with & or /)
-            # Examples: "Medical Device Lifecycle Management & UDI", "ASTM F1980 / ISO 20417"
-            if 3 <= word_count <= 6 and (has_skill_indicator or any(c.isdigit() for c in skill_part)):
-                # Likely a skill with special formatting
-                if len(skill_part) <= 90:
-                    skills_items.append(skill_part)
-                    continue
-
-            # Pattern 5: Lines with acronyms/numbers that look like skills even without & or /
-            # Examples: "MDD & EU MDR 745/2017", "ASTM F1980 / ISO 20417"
-            # Accept short-medium lines (up to 5 words) that have numbers and caps
-            if 2 <= word_count <= 5 and len(skill_part) <= 90:
-                has_number = any(c.isdigit() for c in skill_part)
-                has_caps = any(w.isupper() for w in skill_part.split())
-                if has_number and has_caps and not skill_part.endswith(' that') and not skill_part.endswith(' and'):
-                    skills_items.append(skill_part)
-
-        if skills_items:
-            parsed["skills"] = "\n".join(skills_items)
-            # Remove extracted skills from summary to clean it up
-            if parsed.get("summary"):
-                summary_lines = parsed["summary"].split('\n')
-                summary_cleaned = '\n'.join(l for l in summary_lines if l.strip() not in skills_items)
-                parsed["summary"] = summary_cleaned.strip()
+    # NOTE: deliberately no "scan Summary/Certifications/Achievements for
+    # skill-shaped lines" post-process here. That used to exist (meant for
+    # genuine 2-column layouts where a real Skills column got interleaved
+    # into Summary by column extraction), but its pattern match was far too
+    # loose — any capitalized, non-period-ending line with an "&", "/", a
+    # colon, or a couple of digits qualified — so on a single-column resume
+    # with no Skills section at all, it fabricated a "Skills" list out of
+    # ordinary Summary/Certifications prose (e.g. pulling "ACADEMIC
+    # QUALIFICATIONS/CERTIFICATIONS" and wrapped sentence fragments in as if
+    # they were skills). Skills must only ever come from a dedicated Skills/
+    # Technical Skills/Core Competencies section; if none exists, it stays
+    # blank rather than being inferred from other fields.
 
     # Capture the unheaded intro paragraph that precedes the first section heading.
     # Use it only when no explicitly labelled summary section was found; explicit
@@ -3757,6 +4728,14 @@ def parse_resume_text(text, name_hint=None):
         )
         edu_lines = [l for l in parsed["education"].splitlines() if not _personal_pat.search(l)]
         parsed["education"] = "\n".join(edu_lines).strip()
+
+    if parsed.get("education"):
+        _clean_edu, _rescued_certs = _split_education_and_certifications(parsed["education"])
+        if _rescued_certs:
+            parsed["education"] = _clean_edu
+            parsed["certifications"] = (
+                parsed["certifications"] + "\n" + _rescued_certs
+            ) if parsed.get("certifications") else _rescued_certs
 
     _TITLE_REJECTS = {
         "summary", "professional summary", "profile", "career profile",
@@ -3850,6 +4829,21 @@ def parse_resume_text(text, name_hint=None):
             if _recovered_skills:
                 parsed["skills"] = _merge_recovered_skills(parsed.get("skills", ""), _recovered_skills)
 
+    # Recover trailing degree/course content that has nowhere to go when a
+    # resume has no Education/Certifications heading at all (see
+    # _split_trailing_edu_certs_from_experience) — it otherwise just keeps
+    # accumulating past the last real job's bullets since no heading ever
+    # closes Experience. Only acts when those fields are still empty, so a
+    # resume with its own real Education/Certifications headings is untouched.
+    if parsed.get("experience") and not parsed.get("education") and not parsed.get("certifications"):
+        _clean_exp, _rescued_edu, _rescued_certs = _split_trailing_edu_certs_from_experience(parsed["experience"])
+        if _rescued_edu or _rescued_certs:
+            parsed["experience"] = _clean_exp
+            if _rescued_edu:
+                parsed["education"] = _rescued_edu
+            if _rescued_certs:
+                parsed["certifications"] = _rescued_certs
+
     # Strip resume-builder-template watermarks (e.g. "webuildcv.com", "Powered by
     # ...") that land as a bare branding line inside whichever section they
     # happen to fall in — most commonly the tail of Skills.
@@ -3859,6 +4853,29 @@ def parse_resume_text(text, name_hint=None):
         if _wm_text:
             _wm_lines = [l for l in _wm_text.splitlines() if not _WATERMARK_LINE_RE.match(l.strip())]
             parsed[_wm_field] = "\n".join(_wm_lines).strip()
+
+    parsed = _dedupe_cross_field_content(parsed)
+    parsed = _relocate_achievements_to_certifications(parsed)
+
+    # Strip wrapped-heading remnants ("STANDARDS" from a sidebar "REGULATIONS
+    # &\nSTANDARDS" heading wrapped onto two lines, "ME" from "ABOUT ME",
+    # etc.) that leaked in as a section's first line.
+    for _f in ("summary", "projects", "certifications"):
+        if parsed.get(_f):
+            parsed[_f] = _strip_heading_tail_prefix(parsed[_f])
+
+    # A declaration/signature sentence with no Declaration heading of its own
+    # ("I hereby declare..." — often mis-spaced as "I hear by declare...")
+    # routinely lands at the tail of whichever section happens to be open at
+    # the very end of the resume (here, Education) since nothing marks it as
+    # a boundary. Truncate it off wherever it's found.
+    _decl_re = re.compile(r"\n[ \t]*i\s+(?:here|hear)\s*by\s+declare\b", re.I)
+    for _f in _CORE_SECTIONS:
+        _decl_m = _decl_re.search(parsed.get(_f) or "")
+        if _decl_m:
+            _decl_trimmed = parsed[_f][:_decl_m.start()].strip()
+            if _decl_trimmed:
+                parsed[_f] = _decl_trimmed
 
     return parsed
 
@@ -3890,7 +4907,27 @@ _OLLAMA_TEXT_TIMEOUT = int(
 _OLLAMA_KEEP_ALIVE = os.environ.get("OLLAMA_KEEP_ALIVE", "30m")
 
 _OLLAMA_BUDGET_SECS = int(
-    os.environ.get("OLLAMA_BUDGET_SECS", "10")
+    # Was 10s, tuned back when _AI_FALLBACK had no "projects" entry. A
+    # heading-less resume (the case that actually needs more than one of
+    # these fallback fields at once) commonly needs both "experience" and
+    # "projects" filled from the same free-text Summary, and a single call
+    # against the small local model can take close to 10s on its own —
+    # 10s total meant the second field never even got attempted (confirmed
+    # live: "experience" filled correctly, then "AI budget exhausted —
+    # skipping remaining fallback fields" fired before "projects" ran at
+    # all). Well-structured resumes with real headings rarely trigger more
+    # than one fallback field anyway, so this only changes behavior for the
+    # worst-case/edge-case resumes this budget exists to bound in the first
+    # place.
+    #
+    # Bumped 45 -> 500: the heading-less-resume path now makes up to 3
+    # small, chunked Ollama calls for experience plus 1 for projects
+    # (each with its own 120s timeout) instead of one unified classifier
+    # call — see the "2d" block in parse_resume_with_llm_text. 500s
+    # comfortably covers all 4 running back to back worst-case (480s)
+    # while still leaving a little room for the per-field fallback loop
+    # afterward as a safety net.
+    os.environ.get("OLLAMA_BUDGET_SECS", "500")
 )
 
 import requests
@@ -3942,7 +4979,7 @@ _BLANK_FIELDS = (
 _HEADING_FIELD = {
     "technology": "skills", "technologies": "skills", "technical skills": "skills",
     "publications": "certifications", "awards": "certifications",
-    "achievements": "certifications", "certificates": "certifications",
+    "achievements": "experience", "certificates": "certifications",
 }
 
 
@@ -4078,6 +5115,49 @@ def _ollama_identity_extract(text, missing_fields):
         if val:
             filled[field] = val
     return filled
+
+
+_BULLET_LINE_RE = re.compile(r'^\s*[✓•●\-\*►▪]\s*\S|^\s*\d+[.)]\s*\S')
+
+
+def _split_intro_from_itemized(text):
+    """Split a combined Summary/Profile block into (intro_paragraph, rest).
+
+    Some resumes genuinely have a "Profile:" heading with a short overview,
+    immediately followed by a "Summary:" (or similarly-named) heading whose
+    own content is actually a long bulleted list of job duties, projects, and
+    achievements — disguised work history, not more summary prose. Since both
+    headings canonically map to "summary", the heading-based pass merges
+    them into one blob by design (needed for the ordinary case: two short
+    summary-style headings, e.g. "SUMMARY" + "OBJECTIVE", that genuinely
+    belong together). That blanket merge is wrong here: the bulleted section
+    isn't a continuation of the overview, so it would get treated as
+    "Summary" too — and later be entirely rewritten based on the model's own
+    (unreliable, inconsistent) read of what's "leftover" after classifying
+    the rest.
+
+    Splitting the two apart deterministically — at the transition from plain
+    prose into a run of bullet-marked lines — removes that guesswork
+    entirely: the intro stays Summary verbatim, no matter what, and only the
+    itemized remainder (which this function treats as a separate candidate)
+    is ever handed to the classifier. Returns (text, "") when no clear
+    transition exists (e.g. a short bare paragraph with no bulleted tail) —
+    the whole text is the intro, nothing to classify separately.
+    """
+    lines = text.split("\n")
+    first_bullet = next((i for i, l in enumerate(lines) if _BULLET_LINE_RE.match(l)), None)
+    if first_bullet is None:
+        return text, ""
+    bullet_count = sum(1 for l in lines[first_bullet:] if _BULLET_LINE_RE.match(l))
+    intro = "\n".join(lines[:first_bullet]).strip()
+    rest = "\n".join(lines[first_bullet:]).strip()
+    # Require a real paragraph before the bullets and a substantial bulleted
+    # run after — a one- or two-bullet list is ordinary short Summary
+    # formatting (e.g. "Key strengths:\n- Leadership\n- Communication"), not
+    # disguised work history, and must stay merged as Summary.
+    if len(intro) < 40 or bullet_count < 3:
+        return text, ""
+    return intro, rest
 
 
 def _split_resume_chunks(text):
@@ -4666,78 +5746,32 @@ def parse_resume_with_llm_text(path):
         # reads the PDF vector layer and would miss them.
         _ocr_email = _extract_email(raw_text)
         _ocr_phone = _extract_phone(raw_text)
-        _m_ocr_name = re.search(r'(?m)^\s*[Nn]ame\s*:\s*(.+)$', raw_text)
+        # Stop at "|" — a one-line contact header packs several labelled
+        # fields separated by pipes ("Name: X | Location: Y | Email: z"), and
+        # capturing to end-of-line merged whatever labelled field came next
+        # into this one too (same bug fixed in parse_label_value above).
+        _m_ocr_name = re.search(r'(?m)^\s*[Nn]ame\s*:\s*([^|\n]+)', raw_text)
         _ocr_name_line = _m_ocr_name.group(1).strip() if _m_ocr_name else ""
-        _m_ocr_loc = re.search(r'(?m)^\s*[Ll]ocation\s*:\s*(.+)$', raw_text)
+        _m_ocr_loc = re.search(r'(?m)^\s*[Ll]ocation\s*:\s*([^|\n]+)', raw_text)
         _ocr_loc_line = _m_ocr_loc.group(1).strip() if _m_ocr_loc else ""
-        two_col = _pdfplumber_two_col_text(path)
-        if two_col and len(two_col.strip()) >= len(raw_text.strip()) * 0.5:
-            _tc = two_col
-            def _cid_to_char_tc(m):
-                n = int(m.group(1))
-                return chr(n) if 33 <= n <= 126 else ''
-            _tc = re.sub(r'\(cid:(\d+)\)', _cid_to_char_tc, _tc)
-            # Reject two_col if it has significantly more word-fragment lines than
-            # the pymupdf raw_text — this detects false column splits where the
-            # pdfplumber gutter crop cuts through full-width single-column lines,
-            # leaving partial words (e.g. "fund pa", "fee reco") at line ends.
-            _FRAG_EXCL = {'and','the','of','in','to','for','at','by','or','on','an','be','as','it','its','has','was','are','may'}
-            def _frag_lines(t):
-                c = 0
-                for _l in t.splitlines():
-                    _ls = _l.strip()
-                    if len(_ls) >= 15:
-                        _m = re.search(r'\b([a-z]{1,4})$', _ls)
-                        if _m and _m.group(1) not in _FRAG_EXCL:
-                            c += 1
-                return c
-            # A WHOLE line that's just 1-2 letters (with optional trailing period,
-            # e.g. "s." or "on" sitting alone) is a stronger corruption signal than
-            # a trailing fragment — it means the column crop split a word/phrase
-            # apart entirely, not just at a line's tail. `_frag_lines` alone misses
-            # this since it only inspects lines >= 15 chars. Seen in practice: a
-            # skills-sidebar column crop leaving "s.\non Selenium WebDriver" where
-            # the source read "Skilled in Selenium WebDriver" as one line.
-            _ORPHAN_FRAG_RE = re.compile(r'^[a-z]{1,2}\.?$')
-            def _has_orphan_fragment_lines(t):
-                return any(_ORPHAN_FRAG_RE.match(_l.strip()) for _l in t.splitlines())
-            # A column crop can also misplace a fragment from the MIDDLE of a
-            # sentence to the very END of the document — e.g. "...suspicious user
-            # activities." loses its own tail into a stray "ser activities." line
-            # appended after the resume's true last content (its Education entry).
-            # A genuine re-extraction reorders content; it never invents new
-            # trailing material past where the document actually ends. So when the
-            # original raw_text's own true ending IS found inside two_col, anything
-            # non-trivial appended after that point is fabricated, not reordered.
-            _orig_tail = raw_text.strip()[-60:]
-            _tail_ok = True
-            if _orig_tail:
-                _tail_pos = _tc.find(_orig_tail)
-                if _tail_pos != -1:
-                    _extra_after_tail = _tc[_tail_pos + len(_orig_tail):].strip()
-                    _tail_ok = len(_extra_after_tail) <= 20
-            if (_frag_lines(_tc) <= _frag_lines(raw_text) + 2
-                    and not _has_orphan_fragment_lines(_tc) and _tail_ok):
-                raw_text = _tc
-            else:
-                logger.info("two_col rejected: pdfplumber false column split detected (word fragments)")
-            # Re-inject all OCR contact info if not already present in the new text.
-            # Name/Location use a "labelled line already exists" check rather than a
-            # raw substring search — a plain "in raw_text" check falsely matches when
-            # the same words appear incidentally elsewhere (e.g. a college's city
-            # matching the candidate's home city, like "...college, India, Chennai
-            # 2015" in the Education section), which silently drops the re-injection.
-            _post = []
-            if _ocr_name_line and not re.search(r'(?m)^\s*name\s*:', raw_text, re.I):
-                _post.append(f"Name: {_ocr_name_line}")
-            if _ocr_loc_line and not re.search(r'(?m)^\s*(location|address|city)\s*:', raw_text, re.I):
-                _post.append(f"Location: {_ocr_loc_line}")
-            if _ocr_email and _ocr_email not in raw_text:
-                _post.append(f"Email: {_ocr_email}")
-            if _ocr_phone and _ocr_phone not in raw_text:
-                _post.append(f"Phone: {_ocr_phone}")
-            if _post:
-                raw_text = "\n".join(_post) + "\n" + raw_text
+        raw_text = _apply_two_col_correction(path, raw_text)
+        # Re-inject all OCR contact info if not already present in the new text.
+        # Name/Location use a "labelled line already exists" check rather than a
+        # raw substring search — a plain "in raw_text" check falsely matches when
+        # the same words appear incidentally elsewhere (e.g. a college's city
+        # matching the candidate's home city, like "...college, India, Chennai
+        # 2015" in the Education section), which silently drops the re-injection.
+        _post = []
+        if _ocr_name_line and not re.search(r'(?m)^\s*name\s*:', raw_text, re.I):
+            _post.append(f"Name: {_ocr_name_line}")
+        if _ocr_loc_line and not re.search(r'(?m)^\s*(location|address|city)\s*:', raw_text, re.I):
+            _post.append(f"Location: {_ocr_loc_line}")
+        if _ocr_email and _ocr_email not in raw_text:
+            _post.append(f"Email: {_ocr_email}")
+        if _ocr_phone and _ocr_phone not in raw_text:
+            _post.append(f"Phone: {_ocr_phone}")
+        if _post:
+            raw_text = "\n".join(_post) + "\n" + raw_text
 
     # Strip standalone page numbers (e.g. "\n1\n", "\n 2 \n", "\n3" at end)
     raw_text = re.sub(r'\n[ \t]*\d{1,3}[ \t]*(?=\n|$)', '', raw_text)
@@ -4801,13 +5835,24 @@ def parse_resume_with_llm_text(path):
         "EXECUTIVE SUMMARY", "CAREER OBJECTIVE", "PROFESSIONAL PROFILE", "PROFILE",
         "AREAS OF EXPERTISE", "TECHNICAL SKILLS", "TECHINCAL SKILLS", "CORE COMPETENCIES", "KEY SKILLS",
         "ACADEMIC BACKGROUND", "ACADEMIC QUALIFICATIONS",
+        "ACADEMIC QUALIFICATIONS/CERTIFICATIONS", "ACADEMIC QUALIFICATIONS AND CERTIFICATIONS",
         "EDUCATIONAL QUALIFICATION", "EDUCATIONAL QUALIFICATIONS",
         "SUMMARY", "EXPERIENCE", "EMPLOYMENT", "SKILLS", "EDUCATION",
         "QUALIFICATIONS", "CERTIFICATIONS", "PROJECTS", "ACHIEVEMENTS",
-        "AWARDS", "REFERENCES",
+        "AWARDS", "REFERENCES", "PAPER PUBLICATION", "PAPER PUBLICATIONS", "PUBLICATIONS",
         "TOOLS & APPLICATIONS", "TOOLS AND APPLICATIONS", "TOOLS",
         "TOOLS & TECHNOLOGIES", "TOOLS AND TECHNOLOGIES", "EXPERTISE",
         "EARLY CAREER EXPERIENCE",
+        "CAREER PATH", "CAREERPATH", "CAREER PROGRESSION", "CAREER JOURNEY",
+        # "REGULATIONS" alone (not "REGULATIONS & STANDARDS" as one phrase):
+        # a sidebar heading narrow enough to wrap onto two lines appears in
+        # the extracted text as "REGULATIONS &" then "STANDARDS" as separate
+        # lines, so only the first line's word needs to be recognized here.
+        # Deliberately NOT "REGULATORY STANDARDS"/"COMPLIANCE STANDARDS" —
+        # confirmed live, those also match an ordinary in-Skills sub-label
+        # ("Regulatory Compliance & Standards:") on a different real resume,
+        # which isn't a section heading at all.
+        "REGULATIONS",
         "EDUCATION & CERTIFICATIONS", "EDUCATION AND CERTIFICATIONS",
         "TECHNICAL SKILLS & TOOLS", "TECHNICAL SKILLS AND TOOLS",
         "PROJECT DETAILS", "KEY PROJECTS", "KEY PROJECTS WORKED",
@@ -4815,8 +5860,13 @@ def parse_resume_with_llm_text(path):
         "Relevant Project/Organizational Details",
         "Project/Organizational Details",
         "PROFESSIONAL CERTIFICATIONS", "PROFESSIONAL CERTIFICATION",
+        "PROFESSIONAL CERTIFICATIONS & TRAININGS", "PROFESSIONAL CERTIFICATIONS AND TRAININGS",
         "CERTIFICATES", "CERTIFICATE", "CERTIFICATION",
         "AWARDS & RECOGNITION", "AWARDS AND RECOGNITION",
+        "HONOURS & AWARDS", "HONOURS AND AWARDS", "HONOURS&AWARDS",
+        "HONORS & AWARDS", "HONORS AND AWARDS", "HONORS&AWARDS",
+        "AWARDS & HONOURS", "AWARDS AND HONOURS",
+        "AWARDS & HONORS", "AWARDS AND HONORS",
         "LICENSES AND CERTIFICATIONS", "LICENSES & CERTIFICATIONS",
         "CERTIFICATES AND LICENSES", "CERTIFICATES & LICENSES",
         "CERTIFICATION AND TRAINING", "CERTIFICATIONS AND TRAINING",
@@ -4887,6 +5937,7 @@ def parse_resume_with_llm_text(path):
         if u in ("EXPERIENCE", "PROFESSIONAL EXPERIENCE", "WORK EXPERIENCE",
                  "EMPLOYMENT HISTORY", "EMPLOYMENT",
                  "EARLY CAREER EXPERIENCE", "EARLY CAREER",
+                 "CAREER PATH", "CAREERPATH", "CAREER PROGRESSION", "CAREER JOURNEY",
                  "ROLES AND RESPONSIBILITIES", "ROLE AND RESPONSIBILITIES",
                  "KEY RESPONSIBILITIES", "RESPONSIBILITIES"):
             return "experience"
@@ -4905,12 +5956,14 @@ def parse_resume_with_llm_text(path):
             return "skills"
         if u in ("EDUCATION", "QUALIFICATIONS", "ACADEMIC BACKGROUND",
                  "ACADEMIC QUALIFICATIONS", "EDUCATIONAL QUALIFICATIONS",
+                 "ACADEMIC QUALIFICATIONS/CERTIFICATIONS", "ACADEMIC QUALIFICATIONS AND CERTIFICATIONS",
                  "EDUCATIONAL QUALIFICATION", "EDUCATIONAL BACKGROUND",
                  "EDUCATION & CERTIFICATIONS", "EDUCATION AND CERTIFICATIONS",
                  "ACADEMIC DETAILS", "EDUCATIONAL DETAILS"):
             return "education"
         if u in ("CERTIFICATIONS", "CERTIFICATION",
                  "PROFESSIONAL CERTIFICATIONS", "PROFESSIONAL CERTIFICATION",
+                 "PROFESSIONAL CERTIFICATIONS & TRAININGS", "PROFESSIONAL CERTIFICATIONS AND TRAININGS",
                  "LICENSES AND CERTIFICATIONS", "LICENSES & CERTIFICATIONS",
                  "CERTIFICATES AND LICENSES", "CERTIFICATES & LICENSES",
                  "CERTIFICATION AND TRAINING", "CERTIFICATIONS AND TRAINING",
@@ -4920,12 +5973,18 @@ def parse_resume_with_llm_text(path):
                  "PROFESSIONAL DEVELOPMENT", "TRAINING",
                  "CERTIFICATES COURSES", "CERTIFICATE COURSES",
                  "CERTIFICATES AND COURSES", "COURSES AND CERTIFICATES",
-                 "COURSES", "CERTIFICATES", "CERTIFICATE"):
+                 "COURSES", "CERTIFICATES", "CERTIFICATE",
+                 "PAPER PUBLICATION", "PAPER PUBLICATIONS", "PUBLICATIONS",
+                 "REGULATIONS"):
             return "certifications"
         if u in ("ACHIEVEMENTS", "ACHIEVEMENT", "AWARDS", "AWARD",
                  "AWARDS & RECOGNITION", "AWARDS AND RECOGNITION",
                  "KEY ACHIEVEMENTS", "KEY ACCOMPLISHMENTS",
-                 "ACCOMPLISHMENTS", "ACCOMPLISHMENT"):
+                 "ACCOMPLISHMENTS", "ACCOMPLISHMENT",
+                 "HONOURS & AWARDS", "HONOURS AND AWARDS", "HONOURS&AWARDS",
+                 "HONORS & AWARDS", "HONORS AND AWARDS", "HONORS&AWARDS",
+                 "AWARDS & HONOURS", "AWARDS AND HONOURS",
+                 "AWARDS & HONORS", "AWARDS AND HONORS"):
             return "achievements"
         if u in ("PROJECTS", "PROJECT", "RELEVANT PROJECT EXPERIENCE",
                  "PROJECT DETAILS", "KEY PROJECTS", "KEY PROJECTS WORKED",
@@ -4970,6 +6029,24 @@ def parse_resume_with_llm_text(path):
         'CERTIFICATIONS', 'CERTIFICATION', 'ACHIEVEMENTS', 'ACHIEVEMENT',
         'AWARDS', 'AWARD', 'REFERENCES', 'PROJECTS', 'QUALIFICATIONS',
         'EDUCATION', 'RESPONSIBILITIES', 'HOBBIES',
+        # SKILLS/PROFILE/SUMMARY/OBJECTIVE added after a confirmed real-world
+        # failure: a sidebar resume's bare "Skills" heading immediately
+        # followed an Education entry ending in a bare year
+        # ("...\n2016\nSkills"), which has no terminal punctuation to satisfy
+        # _preceded_by_blank_or_sentence_end below — so "Skills" was rejected
+        # as a heading entirely and its whole section got swallowed into
+        # Education's verbatim chunk. The very next heading, "Profile:", hit
+        # the identical problem immediately after the (also unpunctuated)
+        # last Skills bullet, so Skills' chunk then swallowed Profile's
+        # content too, stopping only at the next heading that happened to be
+        # preceded by a real sentence ending. Like the other single-word
+        # headings above, these are unambiguous enough on their own line to
+        # skip the context check outright — sidebar/bullet content (degrees,
+        # years, institution names, skill phrases) routinely doesn't end in
+        # terminal punctuation, so requiring it before accepting one of these
+        # extremely common heading words causes exactly this kind of
+        # cross-section data loss.
+        'SKILLS', 'PROFILE', 'SUMMARY', 'OBJECTIVE',
     ])
 
     # Normalise sidebar-label lines where heading is merged with content on the same line
@@ -5013,10 +6090,24 @@ def parse_resume_with_llm_text(path):
     # content (that's already handled by the base regex parser/find_sections),
     # so it's tagged with a sentinel `_heading_field` never maps to a field —
     # boundary only, never overwrites `result["summary"]`.
+    #
+    # CRITICAL: the gaps around the colon must be [ \t]* (same line only), NOT
+    # \s* — \s* also matches a newline, so "SUMMARY:\n<content>" (the ORDINARY
+    # standalone-heading case, already correctly handled by _section_heading_re
+    # above) was ALSO matching here. That injected a phantom zero-width
+    # "heading" at (almost) the exact same position as the real SUMMARY
+    # heading, which starved the real heading's own chunk down to nothing and
+    # dumped the section's entire real content into `_unmapped_chunks` instead
+    # (where it's only rescued by an unrelated numbered-bullet heuristic) —
+    # silently discarding the whole Summary/Profile section's content on any
+    # resume where the heading and body sit on separate lines, i.e. nearly
+    # all of them. Confirmed live on a Gopinath-style resume: "SUMMARY:\nI
+    # have experience..." lost its entire body (and the un-headed work
+    # history after it) into `_unmapped_chunks` this way.
     for m in re.finditer(
         r'(?:^|(?<=\n))\s*(?:Professional Summary|Profile Summary|Career Summary|'
         r'Executive Summary|Career Objective|Objective|About Me|About|Summary)'
-        r'\s*:\s*\S',
+        r'[ \t]*:[ \t]*\S',
         raw_text, re.IGNORECASE,
     ):
         headings.append((m.start(), "\x00BOUNDARY\x00"))
@@ -5078,6 +6169,31 @@ def parse_resume_with_llm_text(path):
         content_start = nl_pos + 1 if nl_pos != -1 else pos + len(heading)
         content_end = headings[i + 1][0] if i + 1 < len(headings) else len(raw_text)
         text = raw_text[content_start:content_end].strip()
+
+        # A "Summary"/"Profile" chunk has no later "Experience" heading to stop
+        # it at on a resume whose job entries have no heading of their own
+        # (their own compact "<Title> - <Company> (<dates>)" line is the only
+        # signal) — so without this, the chunk keeps going all the way to the
+        # next heading this list DOES recognize (often "Achievements", pages
+        # later), swallowing every job entry into "summary" verbatim. A later
+        # dedup pass strips out the long lines that are also correctly in
+        # Experience, but short wrapped-continuation lines of those same
+        # bullets are under its length floor and survive — confirmed live on
+        # a real resume where this stranded page-break fragments and bullet
+        # tails ("devices & IVD products.") inside Professional Summary.
+        if field == "summary":
+            _sm_lines = text.split("\n")
+            for _sm_idx, _sm_line in enumerate(_sm_lines):
+                if _sm_idx > 0 and len(_sm_line) <= 160 and _JOB_DATE_RANGE_RE.search(_sm_line.strip()):
+                    _sm_lines = _sm_lines[:_sm_idx]
+                    break
+            # A page-break's repeated name header right before that cut point
+            # (the resume's own running header, e.g. "S Gopinath") is part of
+            # the same page-break artifact, not real summary content.
+            _sm_name = (result.get("full_name") or "").strip().lower()
+            if _sm_name and _sm_lines and _sm_lines[-1].strip().lower() == _sm_name:
+                _sm_lines.pop()
+            text = "\n".join(_sm_lines).rstrip()
 
         if heading.upper() in _ROLES_RESP_HEADINGS and i > 0:
             _prev_heading = headings[i - 1][1]
@@ -5312,7 +6428,12 @@ def parse_resume_with_llm_text(path):
             # so this rescue can't fire before that cleanup gets a chance to apply it.
             _edu_tail_pi_re = re.compile(
                 r"^(?:personal(?:\s+(?:information|details?))?|other\s+personal|"
-                r"declaration|i\s+hereby\s+declare\b.*|place\s*:.*|"
+                # "hereby" is routinely mistyped/mis-OCR'd as two words —
+                # "hear by"/"here by" — confirmed live on a real resume
+                # ("I hear by declare the above information is true...");
+                # the un-split spelling alone missed it entirely, letting the
+                # whole declaration+signature block get rescued into Skills.
+                r"declaration|i\s+(?:here|hear)\s*by\s+declare\b.*|place\s*:.*|"
                 r"father|mother|parent|guardian|date\s+of\s+birth|dob|gender|"
                 r"marital\s+status|nationality|passport\s+no\.?|"
                 # A 2-column sidebar can wrap "PERSONAL INFORMATION" so "PERSONAL"
@@ -5332,7 +6453,22 @@ def parse_resume_with_llm_text(path):
             )
             if _pi_idx is not None:
                 _edu_tail = _edu_tail[:_pi_idx]
-            _edu_stray = "\n".join(_edu_tail).strip()
+            # A tail line that reads as a genuine descriptive SENTENCE (an
+            # internship summary, a capstone project description, an award
+            # citation) is just as common here as a real stray tool/skill
+            # name — confirmed live on a real resume where "A Month-long
+            # industrial internship in basic Biomedical Systems at..." and a
+            # capstone-project description got misclassified as stray Skills
+            # this way, truncating a legitimate, richly-detailed Education
+            # entry. A genuine stray skill name is short; if ANY tail line
+            # looks like a full sentence, reject the rescue entirely rather
+            # than move only some lines — partial correctness here still
+            # corrupts both fields.
+            _edu_tail_has_prose = any(
+                len(l.strip().lstrip("•●▪◦-*").strip()) > 45
+                for l in _edu_tail
+            )
+            _edu_stray = "" if _edu_tail_has_prose else "\n".join(_edu_tail).strip()
             if _edu_stray:
                 result["education"] = "\n".join(_edu_lines[:_last_marker_idx + 1]).strip()
                 result["skills"] = (result.get("skills", "").rstrip() + "\n" + _edu_stray).strip()
@@ -5340,6 +6476,19 @@ def parse_resume_with_llm_text(path):
                     "Rescued %d line(s) of stray Skills content stranded past Education",
                     len(_edu_tail),
                 )
+
+    # Some resumes combine degrees and certifications under one heading (e.g.
+    # "ACADEMIC QUALIFICATIONS/CERTIFICATIONS") with no sub-label splitting the
+    # two — pull certification-shaped lines back out. See
+    # _split_education_and_certifications.
+    if result.get("education"):
+        _clean_edu, _rescued_certs = _split_education_and_certifications(result["education"])
+        if _rescued_certs:
+            result["education"] = _clean_edu
+            result["certifications"] = (
+                result["certifications"] + "\n" + _rescued_certs
+            ) if result.get("certifications") else _rescued_certs
+            logger.info("Split %d chars of certification content out of Education", len(_rescued_certs))
 
     # ── 2b-pre: prefer the OCR-recovered About Me paragraph over a column-split,
     # fragmented native extraction. OCR reads the page in true visual order, so
@@ -5470,6 +6619,18 @@ def parse_resume_with_llm_text(path):
             if trimmed_pi:
                 logger.info(f"Education trimmed at PERSONAL INFORMATION boundary")
                 result["education"] = trimmed_pi
+        # A declaration/signature sentence ("I hereby declare..." — often
+        # mis-spaced as "I hear by declare...") always sits at the very end,
+        # immediately followed by a signature line with no personal-info
+        # keyword of its own (e.g. "(Aravind Kumar K.)") — a per-line keyword
+        # filter alone drops the declaration sentence but leaves that
+        # trailing signature line stranded. Truncate everything from the
+        # declaration line onward instead.
+        _em_declare = re.search(r"\n[ \t]*i\s+(?:here|hear)\s*by\s+declare\b", result["education"], re.I)
+        if _em_declare:
+            trimmed_declare = result["education"][:_em_declare.start()].strip()
+            if trimmed_declare:
+                result["education"] = trimmed_declare
         _edu_pi_pat = re.compile(
             r"\b(father|mother|parent|guardian|date.{0,5}birth|born|dob\b|gender|sex\b|"
             r"marital|nationality|citizen|passport|religion|caste|languages\s+known|"
@@ -5824,6 +6985,155 @@ def parse_resume_with_llm_text(path):
             result["location"] = ", ".join(_loc_parts)[:180]
             logger.info(f"Location from City/Country label pair: {result['location']}")
 
+    # ── 2d. Summary/Profile classifier — strictly gated to the Gopinath-type
+    # case: NO dedicated Work Experience heading AND NO dedicated Project
+    # Details heading at all (everything narrated in Summary). If only one
+    # of the two is missing, that is a normal template variance (e.g. no
+    # separate Projects section because the role genuinely had none) and
+    # must NOT trigger mining the other field out of Summary — only the
+    # combination of both missing justifies treating Summary as a stand-in.
+    # A well-structured resume never reaches this (both fields already
+    # filled by the heading-based pass above), so this adds no latency or
+    # behavior change for the common case. Shares the same budget clock as
+    # the per-field AI fallback below, started here so a slow classifier
+    # call correctly leaves less time for that loop rather than resetting it.
+    import time as _time
+    _ai_budget_start = _time.monotonic()
+    # Identifies "this exact resume text" for the AI-fallback cache below —
+    # a hit skips the (slow, local-model) Ollama call entirely and reuses the
+    # value extracted the last time this same document was parsed (e.g. the
+    # existing preview-then-save flow re-parsing the identical file, or a
+    # resume re-uploaded after a failed save).
+    _ai_fallback_text_hash = hashlib.sha256(raw_text.encode("utf-8", errors="ignore")).hexdigest()
+
+    # A field prompted with "return nothing if truly absent" (currently just
+    # "projects") often can't resist writing a word instead of actually
+    # staying silent — seen live: "Nothing." as the entire response for a
+    # resume with no distinct project. That's correct IN SPIRIT (no invented
+    # project) but would still show "Nothing." as the field's value in the
+    # UI, which looks like a bug rather than an honestly-empty field. Short,
+    # whole-response matches only — long enough to never misfire on real
+    # content that merely starts with "No" (e.g. "Nortel migration project").
+    _NO_CONTENT_RE = re.compile(
+        r"^(nothing|none|n/?a|not applicable|no (distinct )?project[s]?( (found|mentioned|identified))?)\.?$",
+        re.I,
+    )
+
+    _experience_and_projects_both_missing = not result.get("experience") and not result.get("projects")
+    if _experience_and_projects_both_missing:
+        _summary_full = result.get("summary") or raw_text[:10000]
+        _summary_intro, _summary_rest = _split_intro_from_itemized(_summary_full)
+        if _summary_rest:
+            # Deterministic split found a real intro + an itemized tail (e.g.
+            # a "Profile:" paragraph followed by a "Summary:" heading whose
+            # own content is a bulleted job-history list). Lock in the intro
+            # as Summary right now — never overwritten below.
+            result["summary"] = _summary_intro
+            _unstructured_src = _summary_rest
+        else:
+            _unstructured_src = _summary_full
+
+        # Two small, focused extraction calls — NOT the unified 7-category
+        # classifier this replaced. Confirmed live that asking for all 7
+        # categories at once (text[:10000], up to 1800 output tokens) took
+        # 3-7+ minutes against this CPU-only small model and sometimes still
+        # came back completely empty even on a dense but genuine resume —
+        # too slow and too unreliable for a synchronous upload/preview
+        # request. These mirror the existing per-field "experience"/
+        # "projects" prompts in _AI_FALLBACK below (already proven fast and
+        # reliable there) but are scoped to just the unstructured Summary/
+        # Profile tail rather than the whole raw_text — a much smaller,
+        # more focused read, which is the whole point of doing this
+        # separately instead of just relying on that existing fallback.
+        # Certifications are deliberately NOT mined here: the heading-based
+        # pass already finds them correctly on this kind of resume (e.g.
+        # "Academic Qualifications/Certifications"), and asking a second
+        # model call to also guess at certifications from loose prose was
+        # exactly what produced hallucinated, wrongly-duplicated entries.
+        if not result.get("experience"):
+            _cached_exp = _ai_fallback_cache_get(_ai_fallback_text_hash, "experience")
+            if _cached_exp:
+                result["experience"] = _cached_exp
+                logger.info("Unstructured-summary experience filled from AI-fallback cache (no Ollama call)")
+            else:
+                # Chunked rather than one call over the whole text: confirmed
+                # live on this (CPU-only, no GPU) hardware that a single call
+                # covering the full unstructured work history (~7000+ chars,
+                # num_predict=1200+) routinely took several minutes and
+                # sometimes still came back empty — too slow and unreliable for
+                # a synchronous upload/preview request. A ~4000-char chunk with
+                # num_predict=700 reliably completes in a reasonable time, so
+                # the full text is covered by running the same prompt over
+                # successive chunks instead of asking for more than that in one
+                # call. Capped at 3 chunks (~12000 chars) to bound worst-case
+                # latency — long enough for even a very dense, multi-page,
+                # heading-less work history.
+                _exp_parts = []
+                _chunk_size = 4000
+                for _ci in range(0, min(len(_unstructured_src), _chunk_size * 3), _chunk_size):
+                    _chunk = _unstructured_src[_ci:_ci + _chunk_size]
+                    try:
+                        _exp_resp = _ollama_chat(
+                            "Extract the work experience from this text by its CONTENT, "
+                            "not a heading — there may be no 'Work Experience' label at "
+                            "all. Look for employment indicators: company/employer names "
+                            "(often in ALL CAPS or Title Case), job titles, date ranges "
+                            "(e.g. 'Jan 2020 - Present'), and responsibility bullets — "
+                            "these appear together as one employer's entry. Return "
+                            "ONLY the verbatim work experience text — company, "
+                            "dates, role, and bullets, one entry per employer. "
+                            "Do NOT return certifications, education, "
+                            "achievements, or publications — those belong to other "
+                            "sections even if they appear in this same text. If this "
+                            "text genuinely contains no work experience, return "
+                            "nothing at all.\n\nTEXT:\n" + _chunk,
+                            as_json=False, num_predict=700, num_ctx=2560, timeout=120,
+                        )
+                        _exp_clean = (_exp_resp or "").strip()
+                        if _exp_clean and not _NO_CONTENT_RE.match(_exp_clean):
+                            _exp_parts.append(_exp_clean)
+                    except Exception as e:
+                        logger.warning(f"Unstructured experience extraction failed on chunk at {_ci}: {e}")
+                if _exp_parts:
+                    result["experience"] = "\n".join(_exp_parts)
+                    logger.info(
+                        "Unstructured-summary experience extraction filled 'experience' "
+                        "(%d chunk(s))", len(_exp_parts),
+                    )
+                    _ai_fallback_cache_set(_ai_fallback_text_hash, "experience", result["experience"])
+
+        if not result.get("projects"):
+            _cached_proj = _ai_fallback_cache_get(_ai_fallback_text_hash, "projects")
+            if _cached_proj:
+                result["projects"] = _cached_proj
+                logger.info("Unstructured-summary projects filled from AI-fallback cache (no Ollama call)")
+            else:
+                try:
+                    _proj_resp = _ollama_chat(
+                        "This text has no 'Projects'/'Project Details' section "
+                        "— any project work may only be narrated inside work "
+                        "experience or a Summary paragraph instead. Identify any "
+                        "DISTINCT project by its content indicators: a project "
+                        "name, a client, the candidate's role on it, "
+                        "responsibilities, technologies/tools used, and what was "
+                        "delivered — look for client names, system/application "
+                        "names, and implementation/migration/rollout "
+                        "descriptions. A routine responsibility bullet with no "
+                        "named client, system, or deliverable is NOT a "
+                        "project. Return ONLY the verbatim project details, "
+                        "one project per paragraph. If genuinely no distinct "
+                        "projects are described, return nothing at all — "
+                        "never invent one.\n\nTEXT:\n" + _unstructured_src[:4000],
+                        as_json=False, num_predict=500, num_ctx=2560, timeout=120,
+                    )
+                    _proj_clean = (_proj_resp or "").strip()
+                    if _proj_clean and not _NO_CONTENT_RE.match(_proj_clean):
+                        result["projects"] = _proj_clean
+                        logger.info("Unstructured-summary project extraction filled 'projects'")
+                        _ai_fallback_cache_set(_ai_fallback_text_hash, "projects", result["projects"])
+                except Exception as e:
+                    logger.warning(f"Unstructured project extraction failed: {e}")
+
     # ── 3. AI fallback — fires only when a field is still empty ─────────────────
     _AI_FALLBACK = {
         "title": (
@@ -5840,29 +7150,47 @@ def parse_resume_with_llm_text(path):
             raw_text[:3000], False, 600, 2048,
         ),
         "experience": (
-            "Extract the work experience from this resume. "
-            "The experience section may NOT have a heading like 'Work Experience' — "
-            "look for company/employer names (often in ALL CAPS or Title Case) followed by "
-            "Duration, Designation/Title, and bullet-point responsibilities. "
+            "Extract the work experience from this resume by its CONTENT, not a "
+            "heading — it may NOT have a heading like 'Work Experience' at all. "
+            "Look for employment indicators: company/employer names (often in ALL "
+            "CAPS or Title Case), job titles, date ranges, and bullet-point "
+            "responsibilities appearing together as one employer's entry. "
             "Return ONLY the verbatim work experience text — company, dates, role, and bullets. "
-            "Do NOT return the profile summary or certifications.\n\nRESUME:\n",
+            "Do NOT return the profile summary, certifications, education, or "
+            "projects — those belong to other sections even if they appear in this "
+            "same resume.\n\nRESUME:\n",
             raw_text, False, 1600, 4096,
         ),
-        "skills": (
-            "This resume's Skills/Technical Skills/Core Competencies section could not be "
-            "found by normal parsing. Read the whole resume (summary, experience, tools "
-            "mentioned) and identify the specific skills, tools, technologies, and "
-            "methodologies the candidate ACTUALLY used or names — e.g. if it says "
-            "'experience on all ALM modules like Requirements, Test Lab, Test Plan and "
-            "Defects', extract each of those as its own item. "
-            "Every item must be traceable to something explicitly written in the resume — "
-            "never add a generic skill for the candidate's role/domain that isn't actually "
-            "named in the text. Never repeat the same skill twice. Keep each item short "
-            "(a skill/tool name, not a full sentence). If truly nothing skill-like is "
-            "mentioned anywhere, return an empty array. "
-            'Return ONLY JSON: {"skills":["s1","s2",...]} or {"skills":[]}.\n\nRESUME:\n',
-            raw_text[:3000], True, 400, 1024,
+        "projects": (
+            # Mirrors the "experience" entry above for the same real-world
+            # failure mode (a Summary-only resume with no dedicated heading at
+            # all) — except for *projects*, where the stakes of guessing
+            # wrong are inverted: a generic job-duty bullet with no named
+            # client/system/deliverable must NOT be promoted into a fake
+            # "project", so the prompt explicitly tells the model to return
+            # nothing rather than manufacture one (same contract the
+            # deliberately-omitted "education" entry above documents).
+            "This resume has no 'Projects'/'Project Details' section — any project work "
+            "may only be narrated inside the work experience or a single Summary "
+            "paragraph instead. Read the whole resume and identify any DISTINCT "
+            "project, client engagement, or system/application implementation the "
+            "candidate actually names — look for client names, system/application "
+            "names, implementation/migration/rollout descriptions, and the "
+            "technology stack used for each one. "
+            "Only include something if it reads as its own distinct piece of work, "
+            "not a generic duty — a routine responsibility bullet with no named "
+            "client, system, or deliverable is NOT a project. "
+            "Return ONLY the verbatim project details as plain text, one project per "
+            "paragraph (client/system name, then what was built/delivered and the "
+            "tech used). If the resume genuinely describes no distinct projects, "
+            "return nothing at all — never invent one.\n\nRESUME:\n",
+            raw_text, False, 1000, 4096,
         ),
+        # NOTE: deliberately no "skills" entry here. Skills must ONLY ever come
+        # from a dedicated Skills/Technical Skills/Core Competencies section —
+        # mining keywords out of Summary/Experience/Projects/raw text when no
+        # such section exists is exactly the cross-field contamination this
+        # parser must not do. If no Skills section exists, Skills stays blank.
         # NOTE: deliberately no "education" entry here. This fallback only ever
         # fires when the deterministic verbatim/heading-based pass found no
         # Education section at all — i.e. exactly the case where a blank field
@@ -5877,12 +7205,26 @@ def parse_resume_with_llm_text(path):
         # "no invented content" contract and is always correct in this case.
     }
 
-    import time as _time
-    _ai_budget_start = _time.monotonic()
+    # _NO_CONTENT_RE was already defined above (2d), before the unstructured
+    # experience/projects extraction, which reuses it.
+    # _ai_budget_start was already started above (2d), before that
+    # extraction, so its time counts against this same budget.
 
     for field, (prompt, ctx_text, as_json, num_predict, num_ctx) in _AI_FALLBACK.items():
         if result.get(field):
             continue  # already filled — skip AI
+        if field in ("experience", "projects") and not _experience_and_projects_both_missing:
+            # Mining raw text for whichever of the two is missing is only
+            # justified in the Gopinath-type case (both absent). If only one
+            # is missing, a dedicated section exists for the other, so this
+            # is ordinary template variance, not an unstructured resume —
+            # leave the missing one blank rather than guessing from raw text.
+            continue
+        _cached_val = _ai_fallback_cache_get(_ai_fallback_text_hash, field)
+        if _cached_val:
+            result[field] = _cached_val
+            logger.info(f"AI fallback for '{field}' filled from cache (no Ollama call)")
+            continue
         if _time.monotonic() - _ai_budget_start > _OLLAMA_BUDGET_SECS:
             logger.warning(f"AI budget exhausted — skipping remaining fallback fields")
             break
@@ -5895,10 +7237,12 @@ def parse_resume_with_llm_text(path):
                 if items:
                     result[field] = "\n".join(str(s) for s in items if str(s).strip())
             else:
-                if raw and raw.strip():
-                    result[field] = raw.strip()
+                _clean = raw.strip() if raw else ""
+                if _clean and not _NO_CONTENT_RE.match(_clean):
+                    result[field] = _clean
             if result.get(field):
                 logger.info(f"AI filled '{field}' ({len(result[field])} chars)")
+                _ai_fallback_cache_set(_ai_fallback_text_hash, field, result[field])
         except Exception as e:
             logger.warning(f"AI fallback '{field}' failed: {e}", exc_info=True)
 
@@ -5931,10 +7275,12 @@ def parse_resume_with_llm_text(path):
     _ai_meta_phrase_re = re.compile(
         r'\bbased on (?:the|this) resume\b|\bthe candidate\b|\bthis resume (?:shows|indicates|includes)\b'
         r'|\bi (?:can see|found|couldn\'?t find)\b|\bhere(?:\'s| is) (?:the|a)\b|\bno (?:education|experience|'
-        r'summary|skills|certifications?) (?:section|information|details)? ?(?:found|available|listed)\b',
+        r'summary|skills|certifications?|projects?) (?:section|information|details)? ?'
+        r'(?:found|available|listed|to extract)\b'
+        r'|\b(?:does not|doesn\'?t) contain (?:any\b)?|\bthere (?:is|are) no\b|\btherefore,?\s',
         re.I,
     )
-    for _cf in ("summary", "experience", "education", "skills", "certifications"):
+    for _cf in ("summary", "experience", "projects", "education", "skills", "certifications"):
         _cv = result.get(_cf, "")
         if not _cv:
             continue
@@ -6247,6 +7593,24 @@ def parse_resume_with_llm_text(path):
             else:
                 logger.info("Removed interleaved contact sidebar block from experience")
 
+    # Recover trailing degree/course content stuck in Experience when a
+    # resume has no Education/Certifications heading at all — see
+    # _split_trailing_edu_certs_from_experience. Only acts when those fields
+    # are still empty, so a resume with its own real headings is untouched.
+    if result.get("experience") and not result.get("education") and not result.get("certifications"):
+        _clean_exp, _rescued_edu, _rescued_certs = _split_trailing_edu_certs_from_experience(result["experience"])
+        if _rescued_edu or _rescued_certs:
+            result["experience"] = _clean_exp
+            if _rescued_edu:
+                result["education"] = _rescued_edu
+            if _rescued_certs:
+                result["certifications"] = _rescued_certs
+            logger.info(
+                "Rescued trailing degree/course content stuck in experience "
+                "(education: %d chars, certifications: %d chars)",
+                len(_rescued_edu), len(_rescued_certs),
+            )
+
     # Strip wrapped-heading remnants ("ME" from "ABOUT ME", "COMPELTED" from
     # "PROJECTS COMPELTED") that leaked in as a section's first line.
     for _f in ("summary", "projects", "certifications"):
@@ -6279,17 +7643,25 @@ def parse_resume_with_llm_text(path):
             result["experience"] = "Work summary\n" + _role_summary_text
         logger.info("Folded %d chars of role-based summary into Experience as 'Work summary'", len(_role_summary_text))
 
-    # Achievements are a Certifications sub-topic in this app's field model (there
-    # is no standalone Achievements field in the UI) — merge them in explicitly
-    # rather than letting them ride along as a stray, never-displayed "achievements"
-    # key. Guarded against duplication in case an earlier step already merged it.
+    # Achievements and certifications read as the same kind of content to a
+    # user reviewing a profile (both are "accomplishments/credentials"), so
+    # they're grouped together under Certifications — not left glued onto
+    # whichever job happened to be open when the "Achievements" heading was
+    # hit. Guarded against duplication in case an earlier step already
+    # merged the same text in (e.g. find_sections' own achievements guard
+    # leaves an in-flow "Achievements" block sitting inside Experience,
+    # which the relocation pass below also pulls into Certifications).
     _achievements_text = (result.pop("achievements", "") or "").strip()
     if _achievements_text and _achievements_text not in result.get("certifications", ""):
         if result.get("certifications", "").strip():
-            result["certifications"] = result["certifications"].rstrip() + "\n" + _achievements_text
+            result["certifications"] = result["certifications"].rstrip() + "\n\n" + _achievements_text
         else:
             result["certifications"] = _achievements_text
         logger.info("Merged %d chars of Achievements into Certifications", len(_achievements_text))
+
+    result = _dedupe_cross_field_content(result)
+    result = _relocate_achievements_to_certifications(result)
+    result = _merge_ocr_recovered_skills(result, path)
 
     return result, "llm_text"
 
@@ -6298,10 +7670,19 @@ def _parse_pdf_quick(path):
     """Fast rule-based PDF parse (no AI). Returns the parsed-fields dict.
 
     Used by bulk compare, where running the AI model on every file would be slow.
+    Still applies the pdfplumber 2-column correction (_apply_two_col_correction) —
+    that's geometric analysis only, no AI/Ollama call, so it costs nothing
+    close to what skipping AI here is meant to save, and a genuinely
+    2-column resume uploaded in bulk needs it just as much as a single one
+    does (interleaved Experience/Education/Skills otherwise, regardless of
+    how good the regex section parser is).
     """
     font_name = _extract_name_from_pdf_fonts(path)
     text = extract_resume_text(path, "pdf")
-    return parse_resume_text(text, name_hint=font_name)
+    text = _apply_two_col_correction(path, text)
+    parsed = parse_resume_text(text, name_hint=font_name)
+    parsed = _merge_ocr_recovered_skills(parsed, path)
+    return parsed
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -6410,6 +7791,28 @@ def edit_resume(resume_id=None):
             merged = merge_resume_data(form_data, parsed_data, overwrite=False)
             merged["resume_file"] = resume_file
 
+            # Requirement/JD link — resolved server-side (never trust the
+            # client's auto-filled "Linked JD" display) by looking the
+            # requirement up fresh and snapshotting its current jd_id/title.
+            # Shared by both the new-profile and edit paths below; only the
+            # new-profile path below actually enforces it as mandatory.
+            merged["requirement_id"] = None
+            merged["jd_id"] = None
+            merged["jd_title"] = ""
+            _linked_requirement_code = None
+            _req_id_raw = request.form.get("requirement_id", "").strip()
+            if _req_id_raw.isdigit():
+                _requirement_row = conn.execute(
+                    "SELECT r.id, r.requirement_code, r.jd_id, jd.title AS jd_title FROM requirement r "
+                    "LEFT JOIN job_description jd ON jd.id = r.jd_id WHERE r.id = %s",
+                    (int(_req_id_raw),),
+                ).fetchone()
+                if _requirement_row:
+                    _linked_requirement_code = _requirement_row["requirement_code"]
+                    merged["requirement_id"] = _requirement_row["id"]
+                    merged["jd_id"] = _requirement_row["jd_id"]
+                    merged["jd_title"] = _requirement_row["jd_title"] or ""
+
             if resume_id:
                 merged["slug"] = unique_slug(
                     conn, merged.get("full_name") or f"profile-{resume_id}", resume_id
@@ -6441,6 +7844,9 @@ def edit_resume(resume_id=None):
                     resume_file=%(resume_file)s,
                     exp_yrs=%(exp_yrs)s,
                     department=%(department)s,
+                    requirement_id=COALESCE(%(requirement_id)s, requirement_id),
+                    jd_id=COALESCE(%(jd_id)s, jd_id),
+                    jd_title=CASE WHEN %(requirement_id)s IS NOT NULL THEN %(jd_title)s ELSE jd_title END,
                     updated_at=NOW()
                     WHERE id=%(id)s
                     """,
@@ -6477,6 +7883,11 @@ def edit_resume(resume_id=None):
                     logger.exception("Failed to trigger background AI assessment")
 
                 log_audit("Resume Profiles", "Edit", record_id=resume_id, record_label=merged.get("full_name"))
+                if merged.get("requirement_id"):
+                    log_audit(
+                        "Resume Profiles", "Link Requirement", record_id=resume_id,
+                        record_label=f"{merged.get('full_name')} -> {_linked_requirement_code}",
+                    )
                 flash("Profile updated successfully!", "success")
 
                 return redirect(
@@ -6489,6 +7900,9 @@ def edit_resume(resume_id=None):
                 return redirect(url_for("edit_resume"))
             if not merged.get("location", "").strip():
                 flash("Location is required. Please enter a location before saving.", "error")
+                return redirect(url_for("edit_resume"))
+            if not merged.get("requirement_id"):
+                flash("Requirement is required. Please select a Requirement before saving.", "error")
                 return redirect(url_for("edit_resume"))
             # ─────────────────────────────────────────────────────────────
 
@@ -6523,11 +7937,11 @@ def edit_resume(resume_id=None):
                 INSERT INTO resume (
                     full_name, title, email, phone, linkedin, location, summary, skills,
                     experience, education, certifications, projects, slug, resume_file,
-                    exp_yrs, department, created_at, updated_at
+                    exp_yrs, department, requirement_id, jd_id, jd_title, created_at, updated_at
                 ) VALUES (
                     %(full_name)s, %(title)s, %(email)s, %(phone)s, %(linkedin)s, %(location)s, %(summary)s, %(skills)s,
                     %(experience)s, %(education)s, %(certifications)s, %(projects)s, %(slug)s, %(resume_file)s,
-                    %(exp_yrs)s, %(department)s, NOW(), NOW()
+                    %(exp_yrs)s, %(department)s, %(requirement_id)s, %(jd_id)s, %(jd_title)s, NOW(), NOW()
                 )
                 RETURNING id
                 """,
@@ -6549,6 +7963,10 @@ def edit_resume(resume_id=None):
                 logger.exception("Failed to trigger background AI assessment")
 
             log_audit("Resume Profiles", "Add", record_id=new_id, record_label=merged.get("full_name"))
+            log_audit(
+                "Resume Profiles", "Link Requirement", record_id=new_id,
+                record_label=f"{merged.get('full_name')} -> {_linked_requirement_code}",
+            )
             flash(
                 "Profile saved successfully! Here are your top matching roles.",
                 "success"
@@ -6588,16 +8006,22 @@ def edit_resume(resume_id=None):
                     "slug",
                     "resume_file",
                     "department",
+                    "requirement_id",
+                    "jd_title",
                 ]
             }
 
             resume["id"] = None
+
+        requirement_options = _requirement_options_for_profile(conn, resume.get("requirement_id"))
 
     # The "Bulk Upload" tab only applies to the Add Profile (new) flow, not editing.
     raw_files, jds = ([], []) if resume_id else _get_raw_files_and_jds()
     return render_template(
         "edit.html", resume=resume, raw_files=raw_files, jds=jds,
         profile_role_groups=get_role_taxonomy("profile"),
+        requirement_options=requirement_options,
+        division_options=DIVISION_GROUP_OPTIONS,
     )
 
 
@@ -6610,15 +8034,51 @@ def view_current_profile():
 def profile_list():
     if not _require_permission("view_profiles", write=False):
         abort(403)
+    # Optional filters — this route had none before; each is an exact-match
+    # WHERE clause added only when present, same ILIKE/exact-match style
+    # already used by requirement_management()'s own ?q= filter.
+    _f_requirement_id = request.args.get("requirement_id", "").strip()
+    _f_jd_id = request.args.get("jd_id", "").strip()
+    _f_interview_status = request.args.get("interview_status", "").strip()
+    _conds, _params = [], []
+    if _f_requirement_id.isdigit():
+        _conds.append("r.requirement_id = %s")
+        _params.append(int(_f_requirement_id))
+    if _f_jd_id.isdigit():
+        _conds.append("r.jd_id = %s")
+        _params.append(int(_f_jd_id))
+    if _f_interview_status:
+        _conds.append("r.interview_status = %s")
+        _params.append(_f_interview_status)
+    _where = f"WHERE {' AND '.join(_conds)}" if _conds else ""
     with db_conn() as conn:
         resumes = conn.execute(
-            """
-            SELECT id, full_name, title, email, phone, location, resume_file, created_at, updated_at
-            FROM resume
-            ORDER BY updated_at DESC, id DESC
-            """
+            f"""
+            SELECT r.id, r.full_name, r.title, r.email, r.phone, r.location,
+                   r.resume_file, r.created_at, r.updated_at, r.interview_status,
+                   r.requirement_id, r.jd_id, r.jd_title,
+                   req.requirement_code, req.requirement_name
+            FROM resume r
+            LEFT JOIN requirement req ON req.id = r.requirement_id
+            {_where}
+            ORDER BY r.updated_at DESC, r.id DESC
+            """,
+            _params,
         ).fetchall()
-    return render_template("profile_list.html", resumes=resumes)
+        # Filter dropdown options — every requirement (not just ones with
+        # profiles yet) and the fixed interview-status enum, so the filter
+        # bar works the same regardless of what's already in the table.
+        requirement_filter_options = [dict(x) for x in conn.execute(
+            "SELECT id, requirement_code, requirement_name FROM requirement ORDER BY created_at DESC"
+        ).fetchall()]
+    return render_template(
+        "profile_list.html", resumes=resumes,
+        requirement_filter_options=requirement_filter_options,
+        interview_statuses=INTERVIEW_STATUSES,
+        selected_requirement_id=_f_requirement_id,
+        selected_jd_id=_f_jd_id,
+        selected_interview_status=_f_interview_status,
+    )
 
 
 def _quick_estimate_jd_match(resume_dict, jd_dict):
@@ -8773,8 +10233,8 @@ def dashboard():
         # whether they've since joined). Deliberately excludes plain "Selected by
         # Client" — being selected doesn't yet mean an offer letter went out.
         offers_count = conn.execute(
-            "SELECT COUNT(*) AS count FROM resume WHERE interview_status IN"
-            " ('Client Offer Released', 'Joined Vaisesika')"
+            "SELECT COUNT(*) AS count FROM resume WHERE interview_status IN %s",
+            (OFFER_RELEASED_OR_LATER_STATUSES,),
         ).fetchone()["count"] or 0
 
         hired_count = conn.execute(
@@ -8784,9 +10244,8 @@ def dashboard():
         # "Profile Shared" — reached "Profile Shared With Client" or any later stage
         # (including candidates the client later rejected, since they did get shared).
         profile_shared_count = conn.execute(
-            "SELECT COUNT(*) AS count FROM resume WHERE interview_status IN"
-            " ('Profile Shared With Client', 'Client Offer Released', 'Selected by Client',"
-            "  'Joined Vaisesika', 'Rejected By Client')"
+            "SELECT COUNT(*) AS count FROM resume WHERE interview_status IN %s",
+            (PROFILE_SHARED_OR_LATER_STATUSES,),
         ).fetchone()["count"] or 0
 
         # "Client Selected" — reached "Selected by Client" or later (a narrower
@@ -8818,27 +10277,59 @@ def dashboard():
         recent_interviews = conn.execute(
             """
             SELECT i.id, i.position, i.interviewer, i.interview_date, i.status,
-                   r.id AS resume_id, r.full_name
+                   i.teams_meeting_id, i.teams_join_url, i.invite_status,
+                   r.id AS resume_id, r.full_name,
+                   r.requirement_id, req.requirement_code
             FROM interview_schedule i
             JOIN resume r ON r.id = i.resume_id
+            LEFT JOIN requirement req ON req.id = r.requirement_id
             ORDER BY i.created_at DESC
             LIMIT 8
             """
         ).fetchall()
 
-        top_requirements = conn.execute(
+        requirement_profile_counts = conn.execute(
             """
-            SELECT id, requirement_code, requirement_name, client, division,
-                   num_requirement, status, profiles_shared, interviewed, offered, onsite_offshore
-            FROM requirement
-            WHERE status = 'Open'
-            ORDER BY created_at DESC
-            LIMIT 6
+            SELECT req.id, req.requirement_code, req.requirement_name, COUNT(r.id) AS profile_count
+            FROM requirement req
+            JOIN resume r ON r.requirement_id = req.id
+            GROUP BY req.id, req.requirement_code, req.requirement_name
+            ORDER BY profile_count DESC
+            LIMIT 10
             """
         ).fetchall()
 
+        # Profiles Shared / Interviewed / Offered are no longer manually typed
+        # on the Requirement form — they're always live counts derived from
+        # linked candidates' Candidate Details interview status (see
+        # _requirement_pipeline_counts), computed here for all 6 rows in one
+        # query rather than one extra round trip per row.
+        top_requirements = conn.execute(
+            """
+            SELECT r.id, r.requirement_code, r.requirement_name, r.client, r.division,
+                   r.num_requirement, r.status, r.onsite_offshore,
+                   COUNT(DISTINCT res.id) FILTER (WHERE res.interview_status IN %(shared)s) AS profiles_shared,
+                   COUNT(DISTINCT ivs.resume_id) FILTER (WHERE ivs.status = 'Completed') AS interviewed,
+                   COUNT(DISTINCT res.id) FILTER (WHERE res.interview_status IN %(offered)s) AS offered
+            FROM requirement r
+            LEFT JOIN resume res ON res.requirement_id = r.id
+            LEFT JOIN interview_schedule ivs ON ivs.resume_id = res.id
+            WHERE r.status = 'Open'
+            GROUP BY r.id
+            ORDER BY r.created_at DESC
+            LIMIT 6
+            """,
+            {"shared": PROFILE_SHARED_OR_LATER_STATUSES, "offered": OFFER_RELEASED_OR_LATER_STATUSES},
+        ).fetchall()
+
         all_candidates_min = conn.execute(
-            "SELECT id, full_name FROM resume ORDER BY full_name"
+            """
+            SELECT r.id, r.full_name, r.email, r.requirement_id, r.jd_title,
+                   req.requirement_code, req.requirement_name
+            FROM resume r
+            LEFT JOIN requirement req ON req.id = r.requirement_id
+            ORDER BY r.full_name
+            """
         ).fetchall()
 
 
@@ -8905,6 +10396,7 @@ def dashboard():
         department_counts=list(department_counts),
         recent_interviews=list(recent_interviews),
         top_requirements=list(top_requirements),
+        requirement_profile_counts=list(requirement_profile_counts),
         all_candidates=list(all_candidates_min),
         interview_schedule_statuses=INTERVIEW_SCHEDULE_STATUSES,
     )
@@ -9033,7 +10525,12 @@ def upload_files():
 
     # GET
     raw_files, jds = _get_raw_files_and_jds()
-    return render_template("upload_files.html", raw_files=raw_files, jds=jds)
+    with db_conn() as conn:
+        requirement_options = _requirement_options_for_profile(conn)
+    return render_template("upload_files.html", raw_files=raw_files, jds=jds,
+                            division_options=DIVISION_GROUP_OPTIONS,
+                            profile_role_groups=get_role_taxonomy("profile"),
+                            requirement_options=requirement_options)
 
 
 @app.route("/uploads/raw/<path:filename>")
@@ -9086,6 +10583,36 @@ def process_raw_files():
     """
     _req_data = request.get_json(silent=True) or {}
     bulk_department = (_req_data.get("department") or "").strip()
+    bulk_role_group = (_req_data.get("role_group") or "").strip()
+    # Mirrors the Add Profile (single) flow's mandatory "Role & Group" field —
+    # the Bulk Upload UI already blocks the click client-side, this is the
+    # server-side backstop against a direct/bypassed call.
+    if not bulk_role_group:
+        return jsonify({
+            "processed": 0, "skipped": 0,
+            "errors": [{"file": "", "error": "Please select a Role & Group before parsing."}],
+        }), 400
+    # Requirement link — same mandatory-field shape as Role & Group above.
+    _bulk_requirement_raw = (_req_data.get("requirement_id") or "").strip()
+    if not _bulk_requirement_raw.isdigit():
+        return jsonify({
+            "processed": 0, "skipped": 0,
+            "errors": [{"file": "", "error": "Please select a Requirement before parsing."}],
+        }), 400
+    with db_conn() as conn:
+        _bulk_requirement_row = conn.execute(
+            "SELECT r.id, r.jd_id, jd.title AS jd_title FROM requirement r "
+            "LEFT JOIN job_description jd ON jd.id = r.jd_id WHERE r.id = %s",
+            (int(_bulk_requirement_raw),),
+        ).fetchone()
+    if not _bulk_requirement_row:
+        return jsonify({
+            "processed": 0, "skipped": 0,
+            "errors": [{"file": "", "error": "Selected Requirement could not be found."}],
+        }), 400
+    _bulk_requirement_id = _bulk_requirement_row["id"]
+    _bulk_jd_id = _bulk_requirement_row["jd_id"]
+    _bulk_jd_title = _bulk_requirement_row["jd_title"] or ""
     _selected_files = _req_data.get("files")
     _selected_names = set(_selected_files) if isinstance(_selected_files, list) and _selected_files else None
     meta = _load_raw_meta()
@@ -9170,6 +10697,18 @@ def process_raw_files():
                     _tc = _m.group(1).strip() if _m else ' '.join(_words[:5])
                 merged['title'] = _tc[:80]
 
+            # The selected Role & Group is the Title for every profile in this
+            # batch — same as the single-profile Add Profile flow, where
+            # picking a role group directly sets the Title field regardless
+            # of what's already there.
+            merged['title'] = bulk_role_group
+
+            # The selected Requirement (and the JD it's linked to) is applied
+            # to every profile in this batch — same pattern as department/title.
+            merged['requirement_id'] = _bulk_requirement_id
+            merged['jd_id'] = _bulk_jd_id
+            merged['jd_title'] = _bulk_jd_title
+
             with db_conn() as conn:
                 # ── Duplicate guard (same as single-profile save) ────────
                 _dup_email = (merged.get('email') or '').strip()
@@ -9203,11 +10742,11 @@ def process_raw_files():
                     INSERT INTO resume (
                         full_name, title, email, phone, linkedin, location, summary, skills,
                         experience, education, certifications, projects, slug, resume_file,
-                        exp_yrs, department, created_at, updated_at
+                        exp_yrs, department, requirement_id, jd_id, jd_title, created_at, updated_at
                     ) VALUES (
                         %(full_name)s, %(title)s, %(email)s, %(phone)s, %(linkedin)s, %(location)s, %(summary)s, %(skills)s,
                         %(experience)s, %(education)s, %(certifications)s, %(projects)s, %(slug)s, %(resume_file)s,
-                        %(exp_yrs)s, %(department)s, NOW(), NOW()
+                        %(exp_yrs)s, %(department)s, %(requirement_id)s, %(jd_id)s, %(jd_title)s, NOW(), NOW()
                     )
                     RETURNING id
                     """,
@@ -9216,6 +10755,10 @@ def process_raw_files():
                 new_id = cursor.fetchone()['id']
                 sync_skills(conn, new_id, merged.get('skills', ''))
 
+            log_audit(
+                "Resume Profiles", "Link Requirement", record_id=new_id,
+                record_label=f"{merged.get('full_name')} -> requirement #{_bulk_requirement_id}",
+            )
             meta[p.name] = dict(meta.get(p.name, {}), parsed=True, resume_id=new_id)
             processed.append({
                 'file': p.name,
@@ -9566,6 +11109,57 @@ def ensure_role_match_cache_table(conn):
     # Defensive migration — this table already existed in some dev environments
     # before the "extra" column (strengths/concerns/suggested_roles) was added.
     conn.execute("ALTER TABLE ai_match_cache ADD COLUMN IF NOT EXISTS extra JSONB DEFAULT '{}'::jsonb")
+
+
+def ensure_ai_fallback_cache_table(conn):
+    """Caches the AI-fallback path's per-field extraction result, keyed by a
+    hash of the resume's own extracted text — not by resume_id, since the
+    point is to recognize "this is the same document text we already ran the
+    (slow, local-model) fallback against," which also naturally covers the
+    existing preview-then-save flow re-parsing the identical file. A cache
+    hit skips the Ollama call entirely; a miss runs it once and writes the
+    result here for next time."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS ai_fallback_cache (
+            text_hash   VARCHAR(64) NOT NULL,
+            field       VARCHAR(40) NOT NULL,
+            value       TEXT NOT NULL,
+            created_at  TIMESTAMPTZ DEFAULT NOW(),
+            PRIMARY KEY (text_hash, field)
+        )
+    """)
+
+
+def _ai_fallback_cache_get(text_hash, field):
+    try:
+        with db_conn() as conn:
+            ensure_ai_fallback_cache_table(conn)
+            row = conn.execute(
+                "SELECT value FROM ai_fallback_cache WHERE text_hash = %s AND field = %s",
+                (text_hash, field),
+            ).fetchone()
+        return row["value"] if row else None
+    except Exception:
+        logger.exception("_ai_fallback_cache_get failed — treating as a cache miss")
+        return None
+
+
+def _ai_fallback_cache_set(text_hash, field, value):
+    if not value:
+        return
+    try:
+        with db_conn() as conn:
+            ensure_ai_fallback_cache_table(conn)
+            conn.execute(
+                """
+                INSERT INTO ai_fallback_cache (text_hash, field, value)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (text_hash, field) DO UPDATE SET value = EXCLUDED.value, created_at = NOW()
+                """,
+                (text_hash, field, value),
+            )
+    except Exception:
+        logger.exception("_ai_fallback_cache_set failed — proceeding without caching this result")
 
 
 def ensure_jd_table(conn):
@@ -12804,19 +14398,61 @@ _ensure_status_col()
 
 # ── NEW: Interview Status column + route ─────────────────────────────────────
 
+# Ordered as a funnel: active pipeline first (in the order a candidate
+# actually moves through them), then the statuses where they've stopped
+# progressing on this requirement. Membership checks elsewhere
+# (PROFILE_SHARED_OR_LATER_STATUSES, OFFER_RELEASED_OR_LATER_STATUSES,
+# valid_status below) don't depend on this list's order, only on which
+# values it contains, so reordering here is purely a dropdown-display change.
 INTERVIEW_STATUSES = [
+    # Active pipeline
     "To Be Interviewed",
     "Profile Shared With Client",
-    "Can be considered for Future Roles",
+    "Selected by Client",
     "Client Offer Released",
     "Joined Vaisesika",
-    "Not Available Currently",
-    "Not Shortlisted",
-    "Position Closed",
+    # Not moving forward on this requirement
     "Rejected By Client",
+    "Not Shortlisted",
     "Rejected Internally",
-    "Selected by Client",
+    "Not Available Currently",
+    "Can be considered for Future Roles",
+    "Position Closed",
 ]
+
+# Named once here so every place that needs "has this candidate at least
+# reached stage X" — the dashboard-wide pipeline funnel below, and each
+# Requirement's own Profiles Shared / Offered counts — uses the exact same
+# definition and can never drift apart.
+PROFILE_SHARED_OR_LATER_STATUSES = (
+    "Profile Shared With Client", "Client Offer Released",
+    "Selected by Client", "Joined Vaisesika", "Rejected By Client",
+)
+OFFER_RELEASED_OR_LATER_STATUSES = ("Client Offer Released", "Joined Vaisesika")
+
+
+def _requirement_pipeline_counts(conn, req_id):
+    """Live Profiles Shared / Interviewed / Offered for one Requirement,
+    derived from its linked candidates' Candidate Details interview status
+    (Profiles Shared, Offered) and completed interview_schedule rows
+    (Interviewed) — these 3 Requirement fields are no longer manually typed,
+    they always reflect current candidate data. COUNT(DISTINCT ...) avoids
+    double-counting a candidate who has more than one interview_schedule row."""
+    ensure_interview_schedule_table(conn)
+    row = conn.execute(
+        """
+        SELECT
+            COUNT(DISTINCT res.id) FILTER (WHERE res.interview_status IN %(shared)s) AS profiles_shared,
+            COUNT(DISTINCT ivs.resume_id) FILTER (WHERE ivs.status = 'Completed') AS interviewed,
+            COUNT(DISTINCT res.id) FILTER (WHERE res.interview_status IN %(offered)s) AS offered
+        FROM requirement r
+        LEFT JOIN resume res ON res.requirement_id = r.id
+        LEFT JOIN interview_schedule ivs ON ivs.resume_id = res.id
+        WHERE r.id = %(req_id)s
+        """,
+        {"shared": PROFILE_SHARED_OR_LATER_STATUSES, "offered": OFFER_RELEASED_OR_LATER_STATUSES, "req_id": req_id},
+    ).fetchone()
+    return dict(row) if row else {"profiles_shared": 0, "interviewed": 0, "offered": 0}
 
 # A separate, explicit follow-up ask: two post-join onboarding steps, shown as
 # their own "Onboarding Progress" group within the same Interview Status
@@ -12895,6 +14531,31 @@ def _ensure_department_col():
         pass
 
 
+def _ensure_requirement_link_cols():
+    """Links a resume/profile to the Requirement (and the JD it was raised
+    against) it was uploaded for. jd_id/jd_title are snapshotted at link
+    time rather than derived live via requirement.jd_id — a requirement's
+    own JD link can change later, but "which JD this candidate was actually
+    submitted against" should stay fixed to what was true at upload time.
+    ON DELETE SET NULL on requirement_id: deleting a requirement must never
+    delete the candidate's resume record, only drop the link."""
+    try:
+        with db_conn() as conn:
+            conn.execute(
+                "ALTER TABLE resume ADD COLUMN IF NOT EXISTS "
+                "requirement_id INTEGER REFERENCES requirement(id) ON DELETE SET NULL"
+            )
+            conn.execute(
+                "ALTER TABLE resume ADD COLUMN IF NOT EXISTS "
+                "jd_id INTEGER REFERENCES job_description(id) ON DELETE SET NULL"
+            )
+            conn.execute(
+                "ALTER TABLE resume ADD COLUMN IF NOT EXISTS jd_title TEXT DEFAULT ''"
+            )
+    except Exception:
+        pass
+
+
 try:
     with db_conn() as conn:
         ensure_role_match_cache_table(conn)
@@ -12963,6 +14624,23 @@ def ensure_requirement_table(conn):
 ONSITE_OFFSHORE_OPTIONS = ["Onsite", "Offshore", "Hybrid"]
 PRIORITY_LEVELS = ["Low", "Medium", "High", "Critical"]
 
+# Shared practice-area list used by the Requirement form's "Division/Group"
+# dropdown and the Bulk Upload "Role/Division" picker — one list for both so
+# a recruiter tags a requirement and a batch of resumes from the same set of
+# buckets.
+DIVISION_GROUP_OPTIONS = [
+    "Quality Assurance",
+    "Regulatory Affairs",
+    "IT Technology",
+    "Labelling",
+    "Market Access & RegDesk",
+    "Complaints Handling",
+    "QARA Data Analytics & AI",
+    "Document Control",
+    "Supplier Quality",
+    "Validation Roles",
+]
+
 
 def _ensure_onsite_offshore_col():
     try:
@@ -13009,6 +14687,7 @@ _migrate_requirement_status_filled_to_fulfilled()
 _ensure_onsite_offshore_col()
 _ensure_requirement_jd_col()
 _ensure_requirement_recruiter_priority_cols()
+_ensure_requirement_link_cols()
 
 
 def ensure_interview_schedule_table(conn):
@@ -13025,6 +14704,18 @@ def ensure_interview_schedule_table(conn):
         )
         """
     )
+    # Microsoft Teams invite columns — added here (not a separate import-time
+    # _ensure_*_col(), the usual pattern) because this table is itself only
+    # ever created lazily on first use by this same function, so adding the
+    # columns right after the CREATE TABLE guarantees correct ordering
+    # regardless of when this function first runs. All nullable/defaulted:
+    # every existing interview row keeps working with invite_status
+    # defaulting to 'Not Sent'.
+    conn.execute("ALTER TABLE interview_schedule ADD COLUMN IF NOT EXISTS interviewer_email TEXT DEFAULT ''")
+    conn.execute("ALTER TABLE interview_schedule ADD COLUMN IF NOT EXISTS teams_meeting_id TEXT DEFAULT ''")
+    conn.execute("ALTER TABLE interview_schedule ADD COLUMN IF NOT EXISTS teams_join_url TEXT DEFAULT ''")
+    conn.execute("ALTER TABLE interview_schedule ADD COLUMN IF NOT EXISTS invite_status TEXT DEFAULT 'Not Sent'")
+    conn.execute("ALTER TABLE interview_schedule ADD COLUMN IF NOT EXISTS invite_sent_timestamp TIMESTAMPTZ")
 
 
 # Child table of job_description — one row per generated/hand-added interview
@@ -13431,6 +15122,39 @@ def _recruiter_options(conn):
     ).fetchall()]
 
 
+def _requirement_options_for_profile(conn, current_requirement_id=None):
+    """Requirements a profile upload can be linked against — any not yet
+    Closed, plus (mirroring _jd_options_for_requirement's pattern) the
+    profile's currently-linked requirement even if it has since closed, so
+    editing an existing profile never silently drops its own link from the
+    dropdown. Each row carries jd_id/jd_title so the upload form can
+    auto-fill the read-only "Linked JD" field with no extra request."""
+    rows = [dict(r) for r in conn.execute(
+        """
+        SELECT r.id, r.requirement_code, r.requirement_name, r.jd_id,
+               jd.title AS jd_title
+        FROM requirement r
+        LEFT JOIN job_description jd ON jd.id = r.jd_id
+        WHERE r.status != 'Closed'
+        ORDER BY r.created_at DESC
+        """
+    ).fetchall()]
+    if current_requirement_id and not any(r["id"] == current_requirement_id for r in rows):
+        extra = conn.execute(
+            """
+            SELECT r.id, r.requirement_code, r.requirement_name, r.jd_id,
+                   jd.title AS jd_title
+            FROM requirement r
+            LEFT JOIN job_description jd ON jd.id = r.jd_id
+            WHERE r.id = %s
+            """,
+            (current_requirement_id,),
+        ).fetchone()
+        if extra:
+            rows.append(dict(extra))
+    return rows
+
+
 def _validate_jd_link(conn, jd_id_raw):
     """Empty selection is valid (means "no link"). Returns (jd_id_or_None,
     error_message_or_None) — server-side re-check beyond the dropdown
@@ -13460,11 +15184,14 @@ def requirement_add():
                 ["requirement_name", "client", "division", "status", "onsite_offshore", "priority"]}
         if data["priority"] not in PRIORITY_LEVELS:
             data["priority"] = "Medium"
-        for k in ["num_requirement", "profiles_shared", "interviewed", "offered"]:
-            try:
-                data[k] = int(request.form.get(k, "0") or "0")
-            except ValueError:
-                data[k] = 0
+        # Profiles Shared / Interviewed / Offered are no longer entered here —
+        # they're live-computed from linked candidates (see
+        # _requirement_pipeline_counts) — so only num_requirement is still a
+        # free-typed number on this form.
+        try:
+            data["num_requirement"] = int(request.form.get("num_requirement", "0") or "0")
+        except ValueError:
+            data["num_requirement"] = 0
         recruiter_raw = request.form.get("assigned_recruiter_id", "").strip()
         data["assigned_recruiter_id"] = int(recruiter_raw) if recruiter_raw.isdigit() else None
         with db_conn() as conn:
@@ -13477,20 +15204,22 @@ def requirement_add():
                     "requirement_form.html", requirement=None, statuses=REQUIREMENT_STATUSES,
                     onsite_offshore_options=ONSITE_OFFSHORE_OPTIONS, priority_levels=PRIORITY_LEVELS,
                     jd_options=_jd_options_for_requirement(conn), recruiter_options=_recruiter_options(conn),
+                    division_options=DIVISION_GROUP_OPTIONS,
                 ), 400
             data["jd_id"] = jd_id
             # requirement_code is system-generated, not user-entered — insert
             # with a placeholder, then derive the real code from the row's
             # own new id (unique by construction, no collision check needed).
+            # profiles_shared/interviewed/offered keep their DB default (0) —
+            # a brand-new requirement has no linked candidates yet anyway.
             cursor = conn.execute(
                 """
                 INSERT INTO requirement
                     (requirement_code, requirement_name, client, division, num_requirement,
-                     status, profiles_shared, interviewed, offered, onsite_offshore, jd_id,
-                     assigned_recruiter_id, priority)
+                     status, onsite_offshore, jd_id, assigned_recruiter_id, priority)
                 VALUES
                     ('', %(requirement_name)s, %(client)s, %(division)s,
-                     %(num_requirement)s, %(status)s, %(profiles_shared)s, %(interviewed)s, %(offered)s,
+                     %(num_requirement)s, %(status)s,
                      %(onsite_offshore)s, %(jd_id)s, %(assigned_recruiter_id)s, %(priority)s)
                 RETURNING id
                 """,
@@ -13509,7 +15238,7 @@ def requirement_add():
     return render_template("requirement_form.html", requirement=None,
                             statuses=REQUIREMENT_STATUSES, onsite_offshore_options=ONSITE_OFFSHORE_OPTIONS,
                             jd_options=jd_options, recruiter_options=recruiter_options,
-                            priority_levels=PRIORITY_LEVELS)
+                            priority_levels=PRIORITY_LEVELS, division_options=DIVISION_GROUP_OPTIONS)
 
 
 @app.route("/requirement/<int:req_id>")
@@ -13527,7 +15256,11 @@ def requirement_detail(req_id):
         ).fetchone()
         if not requirement:
             return "Requirement not found", 404
-    return render_template("requirement_detail.html", requirement=dict(requirement))
+        requirement = dict(requirement)
+        # Profiles Shared / Interviewed / Offered are live-computed from
+        # linked candidates, not manually typed — see _requirement_pipeline_counts.
+        requirement.update(_requirement_pipeline_counts(conn, req_id))
+    return render_template("requirement_detail.html", requirement=requirement)
 
 
 @app.route("/requirement/<int:req_id>/edit", methods=["GET", "POST"])
@@ -13542,25 +15275,33 @@ def requirement_edit(req_id):
                     ["requirement_name", "client", "division", "status", "onsite_offshore", "priority"]}
             if data["priority"] not in PRIORITY_LEVELS:
                 data["priority"] = "Medium"
-            for k in ["num_requirement", "profiles_shared", "interviewed", "offered"]:
-                try:
-                    data[k] = int(request.form.get(k, "0") or "0")
-                except ValueError:
-                    data[k] = 0
+            # Profiles Shared / Interviewed / Offered are no longer entered
+            # here — see _requirement_pipeline_counts — only num_requirement
+            # is still a free-typed number on this form.
+            try:
+                data["num_requirement"] = int(request.form.get("num_requirement", "0") or "0")
+            except ValueError:
+                data["num_requirement"] = 0
             recruiter_raw = request.form.get("assigned_recruiter_id", "").strip()
             data["assigned_recruiter_id"] = int(recruiter_raw) if recruiter_raw.isdigit() else None
             jd_id, jd_error = _validate_jd_link(conn, request.form.get("jd_id"))
             if jd_error:
                 flash(jd_error, "error")
                 existing = conn.execute("SELECT * FROM requirement WHERE id = %s", (req_id,)).fetchone()
+                existing = dict(existing) if existing else None
+                if existing:
+                    existing.update(_requirement_pipeline_counts(conn, req_id))
                 return render_template(
-                    "requirement_form.html", requirement=dict(existing) if existing else None,
+                    "requirement_form.html", requirement=existing,
                     statuses=REQUIREMENT_STATUSES, onsite_offshore_options=ONSITE_OFFSHORE_OPTIONS,
                     jd_options=_jd_options_for_requirement(conn, existing["jd_id"] if existing else None),
                     recruiter_options=_recruiter_options(conn), priority_levels=PRIORITY_LEVELS,
+                    division_options=DIVISION_GROUP_OPTIONS,
                 ), 400
             # requirement_code is intentionally left out of this UPDATE — it's
             # system-generated once at creation and immutable afterward.
+            # profiles_shared/interviewed/offered are likewise left out — they're
+            # no longer stored values this form can change, only live counts.
             data["jd_id"] = jd_id
             data["id"] = req_id
             conn.execute(
@@ -13568,8 +15309,7 @@ def requirement_edit(req_id):
                 UPDATE requirement SET
                     requirement_name=%(requirement_name)s,
                     client=%(client)s, division=%(division)s, num_requirement=%(num_requirement)s,
-                    status=%(status)s, profiles_shared=%(profiles_shared)s,
-                    interviewed=%(interviewed)s, offered=%(offered)s, onsite_offshore=%(onsite_offshore)s,
+                    status=%(status)s, onsite_offshore=%(onsite_offshore)s,
                     jd_id=%(jd_id)s, assigned_recruiter_id=%(assigned_recruiter_id)s, priority=%(priority)s,
                     updated_at=NOW()
                 WHERE id=%(id)s
@@ -13584,12 +15324,14 @@ def requirement_edit(req_id):
         ).fetchone()
         if not requirement:
             return "Requirement not found", 404
+        requirement = dict(requirement)
+        requirement.update(_requirement_pipeline_counts(conn, req_id))
         jd_options = _jd_options_for_requirement(conn, requirement["jd_id"])
         recruiter_options = _recruiter_options(conn)
-    return render_template("requirement_form.html", requirement=dict(requirement),
+    return render_template("requirement_form.html", requirement=requirement,
                             statuses=REQUIREMENT_STATUSES, onsite_offshore_options=ONSITE_OFFSHORE_OPTIONS,
                             jd_options=jd_options, recruiter_options=recruiter_options,
-                            priority_levels=PRIORITY_LEVELS)
+                            priority_levels=PRIORITY_LEVELS, division_options=DIVISION_GROUP_OPTIONS)
 
 
 @app.route("/requirement/<int:req_id>/delete", methods=["POST"])
@@ -13612,6 +15354,7 @@ def schedule_interview():
     data = request.get_json(silent=True) or {}
     resume_id = data.get("resume_id")
     interviewer = (data.get("interviewer") or "").strip()
+    interviewer_email = (data.get("interviewer_email") or "").strip()
     interview_date = (data.get("interview_date") or "").strip() or None
     status = (data.get("status") or "Scheduled").strip()
     if not resume_id or not interviewer or not interview_date:
@@ -13625,17 +15368,22 @@ def schedule_interview():
             return jsonify({"ok": False, "error": "Candidate not found"}), 404
         new_interview_id = conn.execute(
             """
-            INSERT INTO interview_schedule (resume_id, position, interviewer, interview_date, status)
-            VALUES (%s, %s, %s, %s, %s)
+            INSERT INTO interview_schedule (resume_id, position, interviewer, interviewer_email, interview_date, status)
+            VALUES (%s, %s, %s, %s, %s, %s)
             RETURNING id
             """,
-            (resume_id, resume_row["title"] or "", interviewer, interview_date, status),
+            (resume_id, resume_row["title"] or "", interviewer, interviewer_email, interview_date, status),
         ).fetchone()["id"]
     log_audit(
         "Interviews", "Schedule", record_id=new_interview_id,
         record_label=f"{resume_row['full_name']} with {interviewer} ({status})",
     )
-    return jsonify({"ok": True})
+    # Best-effort Teams meeting + calendar invite — never blocks or fails the
+    # interview-creation response above (which has already succeeded by this
+    # point); additive-only "teams_invite" key, existing callers that only
+    # look at today's "ok" key are unaffected.
+    teams_invite = _send_teams_interview_invite(new_interview_id)
+    return jsonify({"ok": True, "teams_invite": teams_invite})
 
 
 # Interview EVENT status — the 4-value Scheduled/Completed/Pending/Cancelled
@@ -13700,6 +15448,23 @@ def update_interview_schedule(interview_id):
         record_label=f"{row['full_name']} with {interviewer} ({status})",
     )
     return jsonify({"ok": True})
+
+
+@app.route("/api/interview/<int:interview_id>/resend-invite", methods=["POST"])
+def resend_interview_invite(interview_id):
+    """Re-attempts the Teams meeting + calendar invite for an interview whose
+    invite_status is Failed/Skipped/Not Sent — same permission gate as editing
+    the interview itself."""
+    if not _require_permission("update_interview_status"):
+        abort(403)
+    with db_conn() as conn:
+        exists = conn.execute(
+            "SELECT id FROM interview_schedule WHERE id = %s", (interview_id,)
+        ).fetchone()
+    if not exists:
+        return jsonify({"ok": False, "error": "Interview not found"}), 404
+    teams_invite = _send_teams_interview_invite(interview_id)
+    return jsonify({"ok": teams_invite.get("status") == "Sent", "teams_invite": teams_invite})
 
 
 @app.route("/profile/<int:resume_id>/save-comments", methods=["POST"])
@@ -14379,6 +16144,203 @@ def _record_password_change(conn, user_id, old_hash):
         (user_id, PASSWORD_HISTORY_COUNT),
     )
     conn.execute("UPDATE app_user SET password_changed_at = NOW() WHERE id = %s", (user_id,))
+
+
+# ── Microsoft Graph: Teams meeting + Outlook calendar invite ──────────────────
+# App-only (client-credentials) auth — one shared "organizer" mailbox
+# (TEAMS_ORGANIZER_UPN) creates every meeting, no per-recruiter Microsoft
+# login. Same "log/skip instead of failing the caller" discipline as
+# _send_email below: every function here returns a result/error tuple and
+# never raises, so a Graph outage or missing credentials never breaks
+# interview scheduling itself.
+
+_graph_token_cache = {"token": None, "expires_at": 0}
+
+
+def _get_graph_token():
+    """Client-credentials OAuth2 token for Microsoft Graph. Returns None
+    when Azure isn't configured (AZURE_TENANT_ID blank — the default, since
+    no app registration exists until AZURE_SETUP.md is completed) or the
+    token request itself fails; callers treat None as "skip, don't send"."""
+    import time as _time
+    if not (AZURE_TENANT_ID and AZURE_CLIENT_ID and AZURE_CLIENT_SECRET):
+        return None
+    if _graph_token_cache["token"] and _graph_token_cache["expires_at"] > _time.time() + 60:
+        return _graph_token_cache["token"]
+    try:
+        resp = requests.post(
+            f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/oauth2/v2.0/token",
+            data={
+                "grant_type": "client_credentials",
+                "client_id": AZURE_CLIENT_ID,
+                "client_secret": AZURE_CLIENT_SECRET,
+                "scope": "https://graph.microsoft.com/.default",
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        _graph_token_cache["token"] = data["access_token"]
+        _graph_token_cache["expires_at"] = _time.time() + int(data.get("expires_in", 3600))
+        return _graph_token_cache["token"]
+    except Exception as e:
+        logger.warning(f"_get_graph_token failed: {e}")
+        return None
+
+
+def _create_teams_meeting(subject, start_dt, end_dt):
+    """Creates an online meeting under TEAMS_ORGANIZER_UPN. Returns
+    (meeting_id, join_url, error) — error is None on success."""
+    token = _get_graph_token()
+    if not token:
+        return None, None, "Microsoft Graph not configured"
+    try:
+        resp = requests.post(
+            f"https://graph.microsoft.com/v1.0/users/{TEAMS_ORGANIZER_UPN}/onlineMeetings",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={
+                "subject": subject,
+                "startDateTime": start_dt.isoformat(),
+                "endDateTime": end_dt.isoformat(),
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("id"), data.get("joinWebUrl"), None
+    except Exception as e:
+        logger.warning(f"_create_teams_meeting failed: {e}")
+        return None, None, str(e)
+
+
+def _send_interview_calendar_invite(subject, start_dt, end_dt, attendee_emails, body_html):
+    """Sends an Outlook calendar event (with the Teams join link in its body)
+    to every given attendee email, from TEAMS_ORGANIZER_UPN. Returns
+    (ok, error)."""
+    token = _get_graph_token()
+    if not token:
+        return False, "Microsoft Graph not configured"
+    attendees = [
+        {"emailAddress": {"address": e}, "type": "required"}
+        for e in attendee_emails if e
+    ]
+    if not attendees:
+        return False, "No attendee email addresses available"
+    try:
+        resp = requests.post(
+            f"https://graph.microsoft.com/v1.0/users/{TEAMS_ORGANIZER_UPN}/events",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={
+                "subject": subject,
+                "body": {"contentType": "HTML", "content": body_html},
+                "start": {"dateTime": start_dt.isoformat(), "timeZone": "UTC"},
+                "end": {"dateTime": end_dt.isoformat(), "timeZone": "UTC"},
+                "attendees": attendees,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return True, None
+    except Exception as e:
+        logger.warning(f"_send_interview_calendar_invite failed: {e}")
+        return False, str(e)
+
+
+def _update_invite_status(interview_id, status, meeting_id, join_url):
+    with db_conn() as conn:
+        conn.execute(
+            """
+            UPDATE interview_schedule SET
+                invite_status = %s,
+                teams_meeting_id = COALESCE(%s, teams_meeting_id),
+                teams_join_url = COALESCE(%s, teams_join_url),
+                invite_sent_timestamp = CASE WHEN %s = 'Sent' THEN NOW() ELSE invite_sent_timestamp END
+            WHERE id = %s
+            """,
+            (status, meeting_id, join_url, status, interview_id),
+        )
+
+
+def _send_teams_interview_invite(interview_id):
+    """Creates a Teams meeting + sends the Outlook calendar invite for an
+    already-saved interview_schedule row, then updates that row's invite
+    columns. Never raises and never blocks interview scheduling itself —
+    callers (schedule_interview, the /resend-invite route) call this as a
+    best-effort follow-up step, not a precondition for saving the interview.
+    """
+    try:
+        with db_conn() as conn:
+            row = conn.execute(
+                """
+                SELECT i.id, i.interviewer, i.interviewer_email, i.interview_date, i.position,
+                       r.full_name, r.email AS candidate_email, r.requirement_id, r.jd_title,
+                       req.requirement_code
+                FROM interview_schedule i
+                JOIN resume r ON r.id = i.resume_id
+                LEFT JOIN requirement req ON req.id = r.requirement_id
+                WHERE i.id = %s
+                """,
+                (interview_id,),
+            ).fetchone()
+        if not row:
+            return {"status": "Failed", "join_url": None, "error": "Interview not found"}
+
+        if not (AZURE_TENANT_ID and AZURE_CLIENT_ID and AZURE_CLIENT_SECRET and TEAMS_ORGANIZER_UPN):
+            _update_invite_status(interview_id, "Skipped (not configured)", None, None)
+            return {"status": "Skipped (not configured)", "join_url": None}
+
+        jd_part = f" — {row['jd_title']}" if row["jd_title"] else ""
+        req_part = f" (Req {row['requirement_code']})" if row["requirement_code"] else ""
+        subject = f"Interview: {row['full_name']}{jd_part}{req_part}"
+
+        interview_date = row["interview_date"]
+        if interview_date:
+            start_dt = datetime.combine(interview_date, datetime.min.time()).replace(hour=10, tzinfo=timezone.utc)
+        else:
+            start_dt = datetime.now(timezone.utc)
+        end_dt = start_dt + timedelta(hours=1)
+
+        meeting_id, join_url, meeting_err = _create_teams_meeting(subject, start_dt, end_dt)
+        if meeting_err:
+            _update_invite_status(interview_id, "Failed", None, None)
+            log_audit(
+                "Interviews", "Teams Invite Failed", record_id=interview_id,
+                record_label=f"{row['full_name']}: {meeting_err}",
+            )
+            return {"status": "Failed", "join_url": None, "error": meeting_err}
+
+        body_html = (
+            f"<p>Interview scheduled for <b>{row['full_name']}</b>{jd_part}{req_part}.</p>"
+            f"<p>Interviewer: {row['interviewer'] or '—'}</p>"
+            f'<p><a href="{join_url}">Join Microsoft Teams Meeting</a></p>'
+        )
+        attendee_emails = [row["candidate_email"], row["interviewer_email"]]
+        invite_ok, invite_err = _send_interview_calendar_invite(subject, start_dt, end_dt, attendee_emails, body_html)
+
+        if invite_ok:
+            _update_invite_status(interview_id, "Sent", meeting_id, join_url)
+            log_audit(
+                "Interviews", "Teams Invite Sent", record_id=interview_id,
+                record_label=f"{row['full_name']} ({row['interviewer'] or 'no interviewer'})",
+            )
+            return {"status": "Sent", "join_url": join_url}
+        else:
+            # The meeting itself WAS created even though the calendar send
+            # failed — keep the join link rather than silently losing it, but
+            # surface the failure via invite_status so "Resend" is offered.
+            _update_invite_status(interview_id, "Failed", meeting_id, join_url)
+            log_audit(
+                "Interviews", "Teams Invite Failed", record_id=interview_id,
+                record_label=f"{row['full_name']}: {invite_err}",
+            )
+            return {"status": "Failed", "join_url": join_url, "error": invite_err}
+    except Exception:
+        logger.exception(f"_send_teams_interview_invite failed for interview_id={interview_id}")
+        try:
+            _update_invite_status(interview_id, "Failed", None, None)
+        except Exception:
+            pass
+        return {"status": "Failed", "join_url": None, "error": "Unexpected error"}
 
 
 def _send_email(to_addr, subject, body):

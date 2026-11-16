@@ -12,6 +12,34 @@
     {% endif %}
 </section>
 
+<section class="card" style="margin-bottom:16px;">
+    <form method="get" style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end;">
+        <div class="field-group" style="min-width:220px;">
+            <label for="filter_requirement_id">Requirement</label>
+            <select id="filter_requirement_id" name="requirement_id" class="form-select" onchange="this.form.submit()">
+                <option value="">— All Requirements —</option>
+                {% for r in requirement_filter_options %}
+                <option value="{{ r.id }}" {% if selected_requirement_id and selected_requirement_id|string == r.id|string %}selected{% endif %}>
+                    {{ r.requirement_code }} — {{ r.requirement_name }}
+                </option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="field-group" style="min-width:200px;">
+            <label for="filter_interview_status">Interview Status</label>
+            <select id="filter_interview_status" name="interview_status" class="form-select" onchange="this.form.submit()">
+                <option value="">— All Statuses —</option>
+                {% for s in interview_statuses %}
+                <option value="{{ s }}" {% if selected_interview_status == s %}selected{% endif %}>{{ s }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        {% if selected_requirement_id or selected_interview_status %}
+        <a class="button secondary" href="{{ url_for('profile_list') }}">Clear Filters</a>
+        {% endif %}
+    </form>
+</section>
+
 <section class="card">
     {% if resumes %}
         <div class="resume-list">
@@ -25,6 +53,17 @@
                         {% if resume.email %}<span class="contact-item small"><span class="contact-icon">✉</span>{{ resume.email }}</span>{% endif %}
                         {% if resume.phone %}<span class="contact-item small"><span class="contact-icon">📞</span>{{ resume.phone }}</span>{% endif %}
                         {% if resume.location %}<span class="contact-item small"><span class="contact-icon">📍</span>{{ resume.location }}</span>{% endif %}
+                    </div>
+                    <div class="contact-grid" style="margin-top:4px;">
+                        {% if resume.requirement_id %}
+                        <span class="contact-item small"><span class="contact-icon">📋</span>
+                            <a href="{{ url_for('requirement_detail', req_id=resume.requirement_id) }}">{{ resume.requirement_code }} — {{ resume.requirement_name }}</a>
+                        </span>
+                        {% else %}
+                        <span class="contact-item small muted">📋 No Requirement linked</span>
+                        {% endif %}
+                        {% if resume.jd_title %}<span class="contact-item small"><span class="contact-icon">📄</span>{{ resume.jd_title }}</span>{% endif %}
+                        {% if resume.interview_status %}<span class="contact-item small"><span class="contact-icon">🗓</span>{{ resume.interview_status }}</span>{% endif %}
                     </div>
                 </div>
                 <div class="resume-actions">

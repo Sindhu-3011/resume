@@ -399,7 +399,8 @@ def _unlabeled_projects_pdf(path):
     name/duration line. Also covers per-skill role-based summary headings
     (common in QA/testing resumes) that must fold into Experience as a
     trailing "Work summary" block instead of bleeding into Certifications, and
-    Achievements merging into Certifications alongside real certificates."""
+    an Achievements heading staying part of the open Experience section
+    instead of opening its own Certifications-bound section."""
     from reportlab.lib.styles import getSampleStyleSheet
     from reportlab.platypus import Paragraph
     ss = getSampleStyleSheet()
@@ -467,8 +468,144 @@ def _assert_unlabeled_projects(parsed):
         problems.append("role-based summary content leaked into 'certifications': %r" % certifications)
     if "ISTQB" not in certifications:
         problems.append("genuine Certification content was lost: %r" % certifications)
+    if "Individual Value Award" in experience:
+        problems.append(
+            "Achievements content was not relocated out of Experience "
+            "(it should be grouped with Certifications, not glued onto the "
+            "job entry that was open when 'ACHIEVEMENTS' appeared): %r" % experience
+        )
     if "Individual Value Award" not in certifications:
-        problems.append("Achievements were not merged into 'certifications': %r" % certifications)
+        problems.append(
+            "Achievements content was not relocated into 'certifications': %r" % certifications
+        )
+    return problems
+
+
+def _summary_only_location_pdf(path):
+    """Real-world case: S Gopinath's resume has no 'Work Experience' or
+    'Projects' heading at all — everything lives in a single Summary
+    paragraph — and that paragraph's prose happens to mention a country
+    ("...sterile injectables and topicals to India and international
+    markets..."). The naive location fallback scanned the first 20 lines for
+    ANY line containing a country/city keyword and grabbed the whole line —
+    with no Experience/Projects headings to push real content further down
+    the page, that prose sentence landed well within the first 20 lines and
+    got mistaken for the location, producing a garbled multi-clause
+    "location" instead of the real short contact-line location above it."""
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.platypus import Paragraph
+    ss = getSampleStyleSheet()
+    h, n = ss["Heading2"], ss["BodyText"]
+    story = [
+        Paragraph("S GOPINATH", ss["Title"]),
+        Paragraph("Regulatory Affairs Specialist", n),
+        Paragraph("Chennai, India | sgpnath@gmail.com | +917305312251", n),
+        Paragraph("SUMMARY", h),
+        Paragraph(
+            "Regulatory affairs professional with 10+ years of experience "
+            "supporting in vitro diagnostics, Drug-Device Combination, and "
+            "sterile injectables and topicals to India and international "
+            "markets, leading submissions and liaising with clients and "
+            "regulatory bodies worldwide.", n
+        ),
+        Paragraph("SKILLS", h),
+        Paragraph("Regulatory submissions, CMC documentation, Labeling compliance", n),
+    ]
+    _make_pdf(path, story)
+
+
+def _assert_summary_only_location(parsed):
+    problems = []
+    location = str(parsed.get("location") or "")
+    if "india" not in location.lower() and location != "Chennai, India":
+        problems.append("real header location 'Chennai, India' was not extracted: %r" % location)
+    if "injectables" in location.lower() or "markets" in location.lower():
+        problems.append("Summary prose was grabbed as 'location' instead of the real header line: %r" % location)
+    summary = str(parsed.get("summary") or "")
+    if "sterile injectables" not in summary:
+        problems.append("Summary content itself was lost: %r" % summary)
+    return problems
+
+
+def _summary_only_full_pdf(path):
+    """Real-world shape (S Gopinath-style): a Summary-only resume with NO
+    Work Experience/Projects/Skills/Languages headings at all — a role,
+    employer, dates, a named project, a tool/skill, AND a spoken-language
+    mention are all narrated inside one paragraph under a bare "SUMMARY"
+    heading. Exercises the new Summary/Profile classifier's call site
+    end-to-end (crash-safety); the stubbed Ollama call returns no buckets,
+    so this does not assert the classifier's actual extraction quality —
+    that's covered by the live smoke test — only that the gate runs without
+    crashing and never lets a language leak into Skills."""
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.platypus import Paragraph
+    ss = getSampleStyleSheet()
+    h, n = ss["Heading2"], ss["BodyText"]
+    story = [
+        Paragraph("PRIYA RAMAN", ss["Title"]),
+        Paragraph("Chennai, India | priya.raman@example.com | +919876543210", n),
+        Paragraph("SUMMARY", h),
+        Paragraph(
+            "Software engineer who led the Falcon Billing Platform project "
+            "at Acme Corp from 2019 to 2023, building services in Python "
+            "and Kubernetes. Fluent in English and Tamil.", n
+        ),
+    ]
+    _make_pdf(path, story)
+
+
+def _assert_summary_only_full(parsed):
+    problems = []
+    for field in ("experience", "projects", "skills", "certifications"):
+        val = str(parsed.get(field) or "").lower()
+        if "english" in val or "tamil" in val:
+            problems.append("spoken language leaked into %r: %r" % (field, parsed.get(field)))
+    return problems
+
+
+def _experience_only_no_projects_pdf(path):
+    """Work Experience IS present as a dedicated heading, but there is no
+    Projects heading at all — a normal template variance (the role simply
+    had no separate named projects), NOT a Gopinath-type unstructured
+    resume. The Summary paragraph mentions something that reads like a
+    project ("the Falcon Billing Platform") and there is no Skills heading
+    either. The Summary-fallback mechanism must NOT fire here at all: since
+    Work Experience already exists, "both Experience and Projects missing"
+    is false, so Projects must stay blank rather than being mined out of
+    Summary/Experience text, and Skills must stay blank regardless (Skills
+    never comes from anywhere but a dedicated Skills section)."""
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.platypus import Paragraph
+    ss = getSampleStyleSheet()
+    h, n = ss["Heading2"], ss["BodyText"]
+    story = [
+        Paragraph("TAYLOR MORGAN", ss["Title"]),
+        Paragraph("Backend Engineer", n),
+        Paragraph("SUMMARY", h),
+        Paragraph(
+            "Backend engineer who led the Falcon Billing Platform effort, "
+            "built with Python and Kubernetes, and enjoys mentoring juniors.", n
+        ),
+        Paragraph("WORK EXPERIENCE", h),
+        Paragraph("Backend Engineer, Acme Corp, 2021-01 - Current", n),
+        Paragraph("Owned the billing platform's core services.", n),
+    ]
+    _make_pdf(path, story)
+
+
+def _assert_experience_only_no_projects(parsed):
+    problems = []
+    if str(parsed.get("projects") or "").strip():
+        problems.append(
+            "Projects was populated from Summary/Experience even though a dedicated "
+            "Work Experience section already existed (fallback must require BOTH "
+            "Experience and Projects missing, not just one): %r" % parsed.get("projects")
+        )
+    if str(parsed.get("skills") or "").strip():
+        problems.append(
+            "Skills was populated with no dedicated Skills section present — "
+            "skills must never be inferred from Summary/Experience: %r" % parsed.get("skills")
+        )
     return problems
 
 
@@ -532,6 +669,24 @@ def check_parsing_runtime():
          # summary headings fold into Experience as "Work summary";
          # Achievements merge into Certifications
          ["full_name", "experience", "projects", "certifications"], _assert_unlabeled_projects),
+        ("summary-only-location", os.path.join(tmp, "summary_only_location.pdf"), _summary_only_location_pdf,
+         # a Summary-only resume (no Experience/Projects headings) whose
+         # prose mentions a country mid-sentence must not have that whole
+         # sentence grabbed as "location" — the real short header line
+         # ("Chennai, India") must win instead
+         ["full_name", "location", "summary"], _assert_summary_only_location),
+        ("summary-only-full", os.path.join(tmp, "summary_only_full.pdf"), _summary_only_full_pdf,
+         # Summary-only resume with a role/project/skill AND a spoken-language
+         # mention all in one paragraph, no Experience/Projects/Skills/Languages
+         # headings — exercises the new Summary/Profile classifier call site
+         # without crashing; a spoken language must never land in Skills
+         ["full_name", "summary"], _assert_summary_only_full),
+        ("experience-only-no-projects", os.path.join(tmp, "experience_only_no_projects.pdf"),
+         _experience_only_no_projects_pdf,
+         # Work Experience exists, Projects doesn't, no Skills section —
+         # Summary-fallback must require BOTH missing, so Projects/Skills
+         # must both stay blank rather than being mined from Summary
+         ["full_name", "experience"], _assert_experience_only_no_projects),
     ]
     for label, path, builder, required, custom in cases:
         try:
@@ -871,6 +1026,52 @@ def check_skill_fragment_helper():
         if got_name2 != "Jamie Rivera":
             _fail("font-based name extraction gave %r — a smaller bold job-title "
                   "line outscored the actual (larger, unstyled) name" % got_name2)
+
+    # _split_intro_from_itemized: deterministic Summary/Profile vs. itemized-
+    # work-history split, locked in without any live model call.
+    split_fn = getattr(app, "_split_intro_from_itemized", None)
+    if split_fn is None:
+        _fail("_split_intro_from_itemized helper is missing")
+    else:
+        # A real intro paragraph followed by 3+ check-mark bullets (the
+        # Gopinath-type shape: "PROFILE:" then a "SUMMARY:" that's actually
+        # disguised job-history) must split into (intro, bulleted rest).
+        gopinath_shape = (
+            "A qualified lead auditor with 18+ years of industry experience "
+            "in quality management and regulatory affairs across medical "
+            "devices and IVD products in India and international markets.\n"
+            "✓ Led submissions for sterile injectables and topicals.\n"
+            "✓ Certified Lead Auditor ISO 13485, Internal Auditor MDSAP.\n"
+            "✓ Vendor management, vendor audit, CAPA, change management."
+        )
+        intro, rest = split_fn(gopinath_shape)
+        if "qualified lead auditor" not in intro:
+            _fail("_split_intro_from_itemized lost the real intro paragraph: %r" % intro)
+        if "✓ Led submissions" not in rest or "✓ Certified Lead Auditor" not in rest:
+            _fail("_split_intro_from_itemized lost bulleted content from the itemized tail: %r" % rest)
+        if "✓" in intro:
+            _fail("_split_intro_from_itemized let a bullet leak into the intro: %r" % intro)
+
+        # A short paragraph with only 1-2 bullets (ordinary "Key strengths:"
+        # style formatting, not disguised work history) must NOT be split —
+        # the whole thing stays as Summary verbatim.
+        short_bullets = (
+            "Detail-oriented analyst who thrives in fast-paced environments.\n"
+            "- Strong communicator\n"
+            "- Team player"
+        )
+        intro2, rest2 = split_fn(short_bullets)
+        if rest2 != "" or intro2 != short_bullets:
+            _fail(
+                "_split_intro_from_itemized wrongly split a short 1-2 bullet "
+                "list (ordinary Summary formatting): intro=%r rest=%r" % (intro2, rest2)
+            )
+
+        # A bare paragraph with no bullets at all must never split.
+        plain = "Just a short summary paragraph with no bullet points at all."
+        intro3, rest3 = split_fn(plain)
+        if rest3 != "" or intro3 != plain:
+            _fail("_split_intro_from_itemized wrongly split plain prose with no bullets: %r / %r" % (intro3, rest3))
 
     if not FAILURES:
         print("  OK: skills + experience + heading-tail + keyword helpers all correct")

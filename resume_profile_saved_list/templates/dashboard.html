@@ -141,13 +141,20 @@
                 <select id="schedCandidate" class="form-select">
                     <option value="">— Select candidate —</option>
                     {% for c in all_candidates %}
-                    <option value="{{ c.id }}">{{ c.full_name }}</option>
+                    <option value="{{ c.id }}"
+                            data-requirement="{{ c.requirement_code or '' }} — {{ c.requirement_name or '' }}"
+                            data-jd-title="{{ c.jd_title or '' }}">{{ c.full_name }}</option>
                     {% endfor %}
                 </select>
+                <p id="schedReqInfo" class="muted small" style="margin-top:4px;"></p>
             </div>
             <div>
                 <label for="schedInterviewer">Interviewer</label>
                 <input id="schedInterviewer" placeholder="e.g. David Lee">
+            </div>
+            <div>
+                <label for="schedInterviewerEmail">Interviewer Email <span class="muted" style="font-weight:400;">(optional, for Teams invite)</span></label>
+                <input id="schedInterviewerEmail" type="email" placeholder="e.g. david.lee@company.com">
             </div>
             <div>
                 <label for="schedDate">Date</label>
@@ -205,16 +212,31 @@
     <div style="overflow-x:auto;">
     <table class="jdm-table">
         <thead>
-            <tr><th>Candidate</th><th>Position</th><th>Interviewer</th><th>Date</th><th>Status</th><th>Actions</th></tr>
+            <tr><th>Candidate</th><th>Requirement ID</th><th>Position</th><th>Interviewer</th><th>Date &amp; Time</th><th>Status</th><th>Teams Meeting Link</th><th>Actions</th></tr>
         </thead>
         <tbody>
         {% for iv in recent_interviews %}
             <tr>
                 <td><a class="jdm-link" href="{{ url_for('profile_detail', resume_id=iv.resume_id) }}">{{ iv.full_name }}</a></td>
+                <td>
+                    {% if iv.requirement_id %}
+                    <a class="jdm-link" href="{{ url_for('requirement_detail', req_id=iv.requirement_id) }}">{{ iv.requirement_code }}</a>
+                    {% else %}—{% endif %}
+                </td>
                 <td>{{ iv.position or '—' }}</td>
                 <td>{{ iv.interviewer or '—' }}</td>
                 <td>{{ iv.interview_date.strftime('%Y-%m-%d') if iv.interview_date else '—' }}</td>
                 <td><span class="role-badge">{{ iv.status }}</span></td>
+                <td>
+                    {% if iv.invite_status == 'Sent' and iv.teams_join_url %}
+                    <a class="button secondary" style="padding:4px 12px;font-size:0.8rem;" href="{{ iv.teams_join_url }}" target="_blank" rel="noopener">&#128222; Join</a>
+                    {% else %}
+                    <span class="muted small">{{ iv.invite_status or 'Not Sent' }}</span>
+                    {% if can_write('update_interview_status') %}
+                    <button type="button" class="button secondary resend-invite-btn" style="padding:4px 10px;font-size:0.75rem;margin-left:4px;" data-id="{{ iv.id }}">Resend</button>
+                    {% endif %}
+                    {% endif %}
+                </td>
                 <td>
                     {% if can_write('update_interview_status') or (current_role == 'interviewer' and is_my_assigned_interview(iv.interviewer)) %}
                     <button type="button" class="button secondary edit-iv-btn" style="padding:4px 12px;font-size:0.8rem;"
@@ -234,6 +256,28 @@
     <p class="muted" style="text-align:center;padding:24px 0;">No interviews scheduled yet.</p>
     {% endif %}
 </div>
+
+{% if requirement_profile_counts %}
+<div class="card">
+    <div class="section-header" style="margin-bottom:14px;">
+        <div class="section-icon icon-experience">&#128202;</div>
+        <h2>Candidates per Requirement</h2>
+    </div>
+    <div style="overflow-x:auto;">
+    <table class="jdm-table">
+        <thead><tr><th>Requirement</th><th>Candidates</th></tr></thead>
+        <tbody>
+        {% for rc in requirement_profile_counts %}
+            <tr>
+                <td><a class="jdm-link" href="{{ url_for('requirement_detail', req_id=rc.id) }}">{{ rc.requirement_code }} — {{ rc.requirement_name }}</a></td>
+                <td>{{ rc.profile_count }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    </div>
+</div>
+{% endif %}
 
 <script>
 (function () {
@@ -360,6 +404,20 @@
     var showBtn = document.getElementById('showScheduleBtn');
     var wrap = document.getElementById('scheduleFormWrap');
     var msg = document.getElementById('scheduleMsg');
+    var schedCandidateSel = document.getElementById('schedCandidate');
+    var schedReqInfo = document.getElementById('schedReqInfo');
+    if (schedCandidateSel && schedReqInfo) {
+        schedCandidateSel.addEventListener('change', function () {
+            var opt = schedCandidateSel.options[schedCandidateSel.selectedIndex];
+            var req = opt ? (opt.getAttribute('data-requirement') || '') : '';
+            var jd = opt ? (opt.getAttribute('data-jd-title') || '') : '';
+            if (!opt || !opt.value) { schedReqInfo.textContent = ''; return; }
+            var parts = [];
+            if (req && req.replace(/[\s—]/g, '')) parts.push('Requirement: ' + req);
+            if (jd) parts.push('JD: ' + jd);
+            schedReqInfo.textContent = parts.length ? parts.join(' · ') : 'No Requirement linked to this candidate yet.';
+        });
+    }
     if (showBtn) {
         showBtn.addEventListener('click', function () {
             if (editWrap) editWrap.style.display = 'none';
@@ -369,6 +427,7 @@
         document.getElementById('saveScheduleBtn').addEventListener('click', function () {
             var resumeId = document.getElementById('schedCandidate').value;
             var interviewer = document.getElementById('schedInterviewer').value.trim();
+            var interviewerEmail = document.getElementById('schedInterviewerEmail').value.trim();
             var date = document.getElementById('schedDate').value;
             var status = document.getElementById('schedStatus').value;
             if (!resumeId || !interviewer || !date) {
@@ -380,7 +439,10 @@
             fetch('/api/schedule-interview', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ resume_id: parseInt(resumeId), interviewer: interviewer, interview_date: date, status: status })
+                body: JSON.stringify({
+                    resume_id: parseInt(resumeId), interviewer: interviewer,
+                    interviewer_email: interviewerEmail, interview_date: date, status: status
+                })
             }).then(function (r) { return r.json(); }).then(function (d) {
                 if (d.ok) {
                     location.reload();
@@ -396,6 +458,22 @@
             });
         });
     }
+
+    // Resend Teams invite
+    document.querySelectorAll('.resend-invite-btn').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            btn.disabled = true;
+            btn.textContent = 'Sending…';
+            fetch('/api/interview/' + btn.getAttribute('data-id') + '/resend-invite', { method: 'POST' })
+                .then(function (r) { return r.json(); })
+                .then(function () { location.reload(); })
+                .catch(function () {
+                    btn.disabled = false;
+                    btn.textContent = 'Resend';
+                    alert('Network error. Please try again.');
+                });
+        });
+    });
 
     // Edit Interview — pre-fills from the row's own data-* attributes (no
     // extra fetch needed), candidate is shown read-only and is never sent

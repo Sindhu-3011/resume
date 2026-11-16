@@ -5,17 +5,6 @@
         <p class="muted">Upload resumes individually or as a ZIP bundle. Supported: PDF, DOCX, ZIP. Max 50 MB.</p>
     </div>
     <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
-        {% if raw_files %}
-        <div class="field-group" style="min-width:200px;">
-            <label for="bulk_department">Department <span class="muted" style="font-weight:400;">(optional)</span></label>
-            <select id="bulk_department" name="bulk_department" class="form-select">
-                <option value="">— Not set —</option>
-                {% for dept in ['IT', 'QA', 'Finance', 'HR', 'Sales', 'Marketing', 'Operations', 'Other'] %}
-                <option value="{{ dept }}">{{ dept }}</option>
-                {% endfor %}
-            </select>
-        </div>
-        {% endif %}
         <a class="button secondary" href="{{ url_for('profile_list') }}">&#128203; View Profiles</a>
         {% if raw_files %}
         <button class="button" id="parse-all-btn" type="button"
@@ -24,6 +13,46 @@
         {% endif %}
     </div>
 </section>
+
+<!-- Role & Group / Requirement — selected up front, before any files are
+     uploaded, so the whole batch can be tagged with them when parsed. -->
+<div class="card" style="margin-bottom:16px;">
+    <div style="display:flex;gap:24px;flex-wrap:wrap;">
+        <div class="field-group" style="max-width:320px;flex:1;min-width:240px;">
+            <label for="bulk_role_group">Role &amp; Group <span class="required-star">*</span></label>
+            <select id="bulk_role_group" name="bulk_role_group" class="form-select">
+                <option value="">— Select a role group —</option>
+                {% for category, roles in profile_role_groups.items() %}
+                <optgroup label="{{ category }}">
+                    {% for r in roles %}
+                    <option value="{{ r }}">{{ r }}</option>
+                    {% endfor %}
+                </optgroup>
+                {% endfor %}
+            </select>
+            <p id="bulk_role_group_error" class="field-error-msg" style="display:none;">&#9888; Please select a Role &amp; Group before parsing.</p>
+            <p class="muted" style="font-size:0.8rem;margin-top:4px;">Set as the Title on every profile saved from the files uploaded below.</p>
+        </div>
+        <div class="field-group" style="max-width:320px;flex:1;min-width:240px;">
+            <label for="bulk_requirement">Requirement <span class="required-star">*</span></label>
+            {% if requirement_options %}
+            <select id="bulk_requirement" name="bulk_requirement" class="form-select">
+                <option value="">— Select a Requirement —</option>
+                {% for r in requirement_options %}
+                <option value="{{ r.id }}">{{ r.requirement_code }} — {{ r.requirement_name }}</option>
+                {% endfor %}
+            </select>
+            <p id="bulk_requirement_error" class="field-error-msg" style="display:none;">&#9888; Please select a Requirement before parsing.</p>
+            <p class="muted" style="font-size:0.8rem;margin-top:4px;">Links every profile saved from this batch to the Requirement and its JD.</p>
+            {% else %}
+            <select class="form-select" disabled>
+                <option>— No open requirements yet —</option>
+            </select>
+            <p class="form-hint"><a href="{{ url_for('requirement_add') }}" target="_blank" rel="noopener">+ Add a Requirement first</a></p>
+            {% endif %}
+        </div>
+    </div>
+</div>
 
 <!-- Duplicate warning banner (hidden by default) -->
 <div id="bulkDupBanner" class="card" style="display:none;margin-bottom:16px;background:#fef2f2;border:1.5px solid #fca5a5;border-radius:10px;padding:14px 16px;">
@@ -686,10 +715,38 @@
     var parseAllBtn = document.getElementById('parse-all-btn');
     if (parseAllBtn) {
         parseAllBtn.addEventListener('click', function () {
+            var roleGroupSelect = document.getElementById('bulk_role_group');
+            var roleGroupError = document.getElementById('bulk_role_group_error');
+            var roleGroupValue = roleGroupSelect ? roleGroupSelect.value : '';
+            if (roleGroupSelect && !roleGroupValue) {
+                roleGroupSelect.classList.add('field-error');
+                if (roleGroupError) roleGroupError.style.display = 'block';
+                roleGroupSelect.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                roleGroupSelect.focus();
+                return;
+            }
+            if (roleGroupSelect) {
+                roleGroupSelect.classList.remove('field-error');
+                if (roleGroupError) roleGroupError.style.display = 'none';
+            }
+
+            var requirementSelect = document.getElementById('bulk_requirement');
+            var requirementError = document.getElementById('bulk_requirement_error');
+            var requirementValue = requirementSelect ? requirementSelect.value : '';
+            if (requirementSelect && !requirementValue) {
+                requirementSelect.classList.add('field-error');
+                if (requirementError) requirementError.style.display = 'block';
+                requirementSelect.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                requirementSelect.focus();
+                return;
+            }
+            if (requirementSelect) {
+                requirementSelect.classList.remove('field-error');
+                if (requirementError) requirementError.style.display = 'none';
+            }
+
             parseAllBtn.disabled = true;
             parseAllBtn.textContent = '⏳ Parsing…';
-            var deptSelect = document.getElementById('bulk_department');
-            var deptValue = deptSelect ? deptSelect.value : '';
             // Scope to whatever's checked in the table — matches how
             // "Compare Selected" already works on this same page. Nothing
             // checked falls back to processing every unparsed file, same as
@@ -729,7 +786,7 @@
                 parseAllBtn.innerHTML = '&#128196; Parse &amp; Save to Profiles';
                 showResult('Network error. Please try again.', 'error');
             };
-            xhr.send(JSON.stringify({ department: deptValue, files: selectedNames }));
+            xhr.send(JSON.stringify({ role_group: roleGroupValue, requirement_id: requirementValue, files: selectedNames }));
         });
     }
 

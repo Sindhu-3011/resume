@@ -126,6 +126,44 @@
         </div>
     </div>
 
+    <!-- ── Section 2c: Requirement (mandatory) ─────────────────────── -->
+    <div class="form-section card">
+        <div class="form-section-hdr">
+            <span class="form-section-icon" style="background:#fef3c7;color:#92400e;">&#128203;</span>
+            <div>
+                <h2 class="form-section-title">Requirement <span class="required-star">*</span></h2>
+                <p class="form-section-sub">Which requirement is this candidate being submitted for — the linked Job Description fills in automatically</p>
+            </div>
+        </div>
+        <div class="groups-field-wrap">
+            {% if requirement_options %}
+            <input type="text" id="requirement_search" class="form-select" placeholder="Type to search requirements…" autocomplete="off" style="margin-bottom:8px;">
+            <select id="requirement_select" name="requirement_id" class="form-select groups-select">
+                <option value="">— Select a Requirement —</option>
+                {% for r in requirement_options %}
+                <option value="{{ r.id }}" data-jd-title="{{ r.jd_title or '' }}"
+                        {% if resume.requirement_id and resume.requirement_id|string == r.id|string %}selected{% endif %}>
+                    {{ r.requirement_code }} — {{ r.requirement_name }}
+                </option>
+                {% endfor %}
+            </select>
+            <div class="field-group" style="margin-top:10px;">
+                <label for="linked_jd_display">Linked JD</label>
+                <input id="linked_jd_display" type="text" value="{{ resume.jd_title or '' }}" readonly placeholder="— auto-filled from Requirement —">
+            </div>
+            <p id="requirement_error" class="field-error-msg" style="display:none;">&#9888; Please select a Requirement before saving.</p>
+            {% else %}
+            <select class="form-select" disabled>
+                <option>— No open requirements yet —</option>
+            </select>
+            <p class="form-hint">
+                <a href="{{ url_for('requirement_add') }}" target="_blank" rel="noopener">+ Add a Requirement first</a>,
+                then come back and refresh this page.
+            </p>
+            {% endif %}
+        </div>
+    </div>
+
     <!-- ── Section 3: Personal Information ──────────────────────────── -->
     <div class="form-section card">
         <div class="form-section-hdr">
@@ -610,6 +648,39 @@
     window.syncGroupSelect();
 })();
 
+/* ── Requirement dropdown: search filter + auto-fill Linked JD ─────────── */
+(function () {
+    var reqSel  = document.getElementById("requirement_select");
+    var reqSearch = document.getElementById("requirement_search");
+    var jdDisplay = document.getElementById("linked_jd_display");
+    var reqErr  = document.getElementById("requirement_error");
+    if (!reqSel) return;
+
+    function fillLinkedJd() {
+        var opt = reqSel.options[reqSel.selectedIndex];
+        var jdTitle = opt ? (opt.getAttribute("data-jd-title") || "") : "";
+        if (jdDisplay) jdDisplay.value = jdTitle || "— No JD linked to this requirement —";
+        if (reqSel.value) {
+            reqSel.classList.remove("field-error");
+            if (reqErr) reqErr.style.display = "none";
+        }
+    }
+
+    reqSel.addEventListener("change", fillLinkedJd);
+    fillLinkedJd(); // runs on load too, so editing a profile shows its current JD immediately
+
+    if (reqSearch) {
+        reqSearch.addEventListener("input", function () {
+            var q = reqSearch.value.trim().toLowerCase();
+            for (var i = 0; i < reqSel.options.length; i++) {
+                var o = reqSel.options[i];
+                if (!o.value) continue; // keep the placeholder option always visible
+                o.style.display = (!q || o.text.toLowerCase().indexOf(q) !== -1) ? "" : "none";
+            }
+        });
+    }
+})();
+
 /* ── Duplicate profile check ──────────────────────────────────────────── */
 (function () {
     var resumeId   = {{ resume.id | tojson }};  // null for new, int for edit
@@ -700,6 +771,21 @@
             } else if (locInput) {
                 locInput.classList.remove('field-error');
                 if (locErr) locErr.style.display = 'none';
+            }
+
+            // Requirement is mandatory for NEW profiles only — an existing
+            // profile saved before this field existed must stay editable
+            // even if nobody has linked it to a Requirement yet.
+            var reqSel = document.getElementById('requirement_select');
+            var reqErr = document.getElementById('requirement_error');
+            if (!resumeId && reqSel && !reqSel.value) {
+                reqSel.classList.add('field-error');
+                if (reqErr) reqErr.style.display = 'block';
+                if (!blocked) { reqSel.scrollIntoView({behavior:'smooth',block:'center'}); reqSel.focus(); }
+                blocked = true;
+            } else if (reqSel) {
+                reqSel.classList.remove('field-error');
+                if (reqErr) reqErr.style.display = 'none';
             }
 
             if (blocked) return;

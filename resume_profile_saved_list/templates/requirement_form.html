@@ -35,8 +35,15 @@
 
     <div>
         <label for="division">Division/Group</label>
-        <input id="division" name="division" placeholder="e.g. IT, Validation, Finance"
-               value="{{ requirement.division if requirement else '' }}">
+        <select id="division" name="division" class="form-select">
+            <option value="">—</option>
+            {% for d in division_options %}
+            <option value="{{ d }}" {% if requirement and requirement.division == d %}selected{% endif %}>{{ d }}</option>
+            {% endfor %}
+            {% if requirement and requirement.division and requirement.division not in division_options %}
+            <option value="{{ requirement.division }}" selected>{{ requirement.division }}</option>
+            {% endif %}
+        </select>
     </div>
 
     <div>
@@ -56,20 +63,20 @@
 
     <div>
         <label for="profiles_shared"># of Profiles Shared</label>
-        <input id="profiles_shared" name="profiles_shared" type="number" min="0" step="1"
-               value="{{ requirement.profiles_shared if requirement else 0 }}">
+        <input id="profiles_shared" type="number" value="{{ requirement.profiles_shared if requirement else 0 }}" disabled>
+        <p class="muted" style="font-size:0.78rem; margin-top:4px;">Auto-calculated from linked candidates' Interview Status — not manually editable.</p>
     </div>
 
     <div>
         <label for="interviewed">Interviewed</label>
-        <input id="interviewed" name="interviewed" type="number" min="0" step="1"
-               value="{{ requirement.interviewed if requirement else 0 }}">
+        <input id="interviewed" type="number" value="{{ requirement.interviewed if requirement else 0 }}" disabled>
+        <p class="muted" style="font-size:0.78rem; margin-top:4px;">Auto-calculated from completed interviews for linked candidates.</p>
     </div>
 
     <div>
         <label for="offered">Offered</label>
-        <input id="offered" name="offered" type="number" min="0" step="1"
-               value="{{ requirement.offered if requirement else 0 }}">
+        <input id="offered" type="number" value="{{ requirement.offered if requirement else 0 }}" disabled>
+        <p class="muted" style="font-size:0.78rem; margin-top:4px;">Auto-calculated from linked candidates' Interview Status — not manually editable.</p>
     </div>
 
     <div>
