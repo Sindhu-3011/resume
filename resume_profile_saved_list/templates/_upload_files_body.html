@@ -755,6 +755,12 @@
                 document.querySelectorAll('.file-chk:checked'),
                 function (chk) { return chk.getAttribute('data-name'); }
             );
+            if (selectedNames.length > 10) {
+                parseAllBtn.disabled = false;
+                parseAllBtn.innerHTML = '&#128196; Parse &amp; Save to Profiles';
+                showResult('Too many files selected (' + selectedNames.length + '). Please select 10 or fewer at a time.', 'error');
+                return;
+            }
             var xhr = new XMLHttpRequest();
             xhr.open('POST', '/api/process-raw-files', true);
             xhr.setRequestHeader('Content-Type', 'application/json');

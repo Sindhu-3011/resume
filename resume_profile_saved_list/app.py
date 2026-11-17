@@ -10162,6 +10162,11 @@ RAW_UPLOAD_FOLDER.mkdir(exist_ok=True)
 
 _RAW_META_PATH = RAW_UPLOAD_FOLDER / "_meta.json"
 _RAW_UPLOAD_ALLOWED = {"pdf", "docx", "doc"}  # allowed inside ZIP / direct
+# One "Parse & Save to Profiles" click processes every file synchronously in
+# a single request (no background queue), so an unbounded batch size risks a
+# very slow/timing-out request. Matches the batch size discussed in the
+# 2026-11-17 client demo.
+BULK_PROCESS_MAX_FILES = 10
 
 
 def _load_raw_meta():
@@ -10765,6 +10770,16 @@ def process_raw_files():
         if fm.get('parsed') and (_rid is None or _rid in _live_ids):
             continue
         files_to_process.append(p)
+
+    if len(files_to_process) > BULK_PROCESS_MAX_FILES:
+        return jsonify({
+            "processed": 0, "skipped": 0,
+            "errors": [{
+                "file": "",
+                "error": f"Too many files selected ({len(files_to_process)}). "
+                         f"Please select {BULK_PROCESS_MAX_FILES} or fewer at a time.",
+            }],
+        }), 400
 
     skipped = []
     for p in files_to_process:
