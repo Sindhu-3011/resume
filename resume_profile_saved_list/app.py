@@ -25,6 +25,8 @@ import zipfile
 import json
 import logging
 import os
+import base64
+import time
 import urllib.request
 import urllib.error
 from contextlib import contextmanager
@@ -116,6 +118,15 @@ AZURE_CLIENT_SECRET = os.environ.get("AZURE_CLIENT_SECRET", "")
 # real, licensed mailbox in the tenant; Graph creates the meeting/event as
 # this user, not as whichever recruiter clicked "Schedule Interview".
 TEAMS_ORGANIZER_UPN = os.environ.get("TEAMS_ORGANIZER_UPN", "")
+
+# External resume ingestion API (/api/ingest-resume) — lets another system
+# (a client's ATS, a careers-page backend) push a resume file directly into
+# this app's parsing pipeline over HTTP instead of a person uploading it
+# through the Upload Files screen. Same "blank means disabled" pattern as
+# SMTP/Azure above, but inverted for safety: a blank key disables the route
+# entirely (501) rather than leaving it open with no auth. Set a long random
+# value here and give it to the external system as its "X-Api-Key" header.
+INGESTION_API_KEY = os.environ.get("INGESTION_API_KEY", "")
 
 # Account lockout — locks an account after this many consecutive failed
 # logins (reset to 0 by any successful login). No auto-expiry: an Admin
@@ -10568,6 +10579,107 @@ def delete_all_uploads():
     return jsonify({"success": True, "deleted": deleted})
 
 
+def _parse_and_insert_resume(p, role_group, department, requirement_id, jd_id, jd_title):
+    """Parses one resume file and inserts it as a resume profile. Shared by
+    the Bulk Upload screen (process_raw_files) and the external ingestion
+    API (ingest_resume_api), so both save identically. Returns
+    {"status": "duplicate", "existing_id", "existing_name", "name"} or
+    {"status": "processed", "id", "name"}. Raises on parse/DB errors —
+    callers catch and report those per-file.
+    """
+    ext = p.suffix.lower().lstrip('.')
+    # Bulk uploads use the fast regex/heading parser only — no Ollama calls
+    # at all. A bulk batch runs every file sequentially inside one request,
+    # so per-file AI latency multiplies across the whole batch; skipping AI
+    # here restores the original bulk-upload speed. Single-profile uploads
+    # (Add Profile) and the Test Resume sandbox are unaffected.
+    if ext == 'pdf':
+        parsed_data = _parse_pdf_quick(p)
+    else:
+        parsed_data = parse_resume_text(extract_resume_text(p, ext))
+
+    form_data = {k: '' for k in [
+        'full_name', 'title', 'email', 'phone', 'linkedin', 'location', 'summary',
+        'skills', 'experience', 'education', 'certifications', 'projects',
+    ]}
+    merged = merge_resume_data(form_data, parsed_data, overwrite=False)
+    merged['resume_file'] = p.name
+    merged['exp_yrs'] = _detect_years_of_experience(merged, p, ext)
+    merged['department'] = department
+
+    if merged.get('title'):
+        _tc = re.split(r'[,|/\\–—]', merged['title'])[0].strip()
+        _tc = re.sub(r'[\(\[].*$', '', _tc).strip()
+        _tc = re.sub(
+            r'^(experienced|skilled|dedicated|results.driven|dynamic|seasoned|'
+            r'highly experienced|passionate|motivated|proactive|hands.on)\s+',
+            '', _tc, flags=re.I,
+        ).strip()
+        _words = _tc.split()
+        if len(_words) > 5:
+            _m = re.match(r'^((?:[A-Z][a-zA-Z]*(?:\s+|$)){1,5})', _tc)
+            _tc = _m.group(1).strip() if _m else ' '.join(_words[:5])
+        merged['title'] = _tc[:80]
+
+    # The selected Role & Group is the Title — same as the single-profile
+    # Add Profile flow, where picking a role group directly sets Title
+    # regardless of what parsing found.
+    merged['title'] = role_group
+    merged['requirement_id'] = requirement_id
+    merged['jd_id'] = jd_id
+    merged['jd_title'] = jd_title
+
+    with db_conn() as conn:
+        # ── Duplicate guard (same as single-profile save) ────────────────
+        _dup_email = (merged.get('email') or '').strip()
+        _dup_phone = re.sub(r"[\s\-\(\)]", "", (merged.get('phone') or '').strip())
+        _dup_conds, _dup_params = [], []
+        if _dup_email:
+            _dup_conds.append("LOWER(TRIM(email)) = LOWER(TRIM(%s))")
+            _dup_params.append(_dup_email)
+        if _dup_phone:
+            _dup_conds.append("REGEXP_REPLACE(phone, '[\\s\\-\\(\\)]', '', 'g') = %s")
+            _dup_params.append(_dup_phone)
+        if _dup_conds:
+            _dup_row = conn.execute(
+                "SELECT id, full_name FROM resume WHERE (" + " OR ".join(_dup_conds) + ") LIMIT 1",
+                _dup_params,
+            ).fetchone()
+            if _dup_row:
+                return {
+                    "status": "duplicate",
+                    "existing_id": _dup_row['id'],
+                    "existing_name": _dup_row['full_name'],
+                    "name": merged.get('full_name') or p.stem,
+                }
+        # ─────────────────────────────────────────────────────────────────
+
+        merged['slug'] = unique_slug(conn, merged.get('full_name') or 'profile')
+        cursor = conn.execute(
+            """
+            INSERT INTO resume (
+                full_name, title, email, phone, linkedin, location, summary, skills,
+                experience, education, certifications, projects, slug, resume_file,
+                exp_yrs, department, requirement_id, jd_id, jd_title, created_at, updated_at
+            ) VALUES (
+                %(full_name)s, %(title)s, %(email)s, %(phone)s, %(linkedin)s, %(location)s, %(summary)s, %(skills)s,
+                %(experience)s, %(education)s, %(certifications)s, %(projects)s, %(slug)s, %(resume_file)s,
+                %(exp_yrs)s, %(department)s, %(requirement_id)s, %(jd_id)s, %(jd_title)s, NOW(), NOW()
+            )
+            RETURNING id
+            """,
+            merged,
+        )
+        new_id = cursor.fetchone()['id']
+        sync_skills(conn, new_id, merged.get('skills', ''))
+
+    log_audit(
+        "Resume Profiles", "Link Requirement", record_id=new_id,
+        record_label=f"{merged.get('full_name')} -> requirement #{requirement_id}",
+    )
+    return {"status": "processed", "id": new_id, "name": merged.get('full_name') or p.stem}
+
+
 @app.route("/api/process-raw-files", methods=["POST"])
 def process_raw_files():
     """Parse unprocessed files in RAW_UPLOAD_FOLDER and insert into resume DB.
@@ -10656,115 +10768,22 @@ def process_raw_files():
 
     skipped = []
     for p in files_to_process:
-        ext = p.suffix.lower().lstrip('.')
         try:
-            # Bulk uploads use the fast regex/heading parser only — no Ollama
-            # calls at all. A bulk batch runs every file sequentially inside
-            # one request, so per-file AI latency (identity extraction is
-            # unconditional, plus _AI_FALLBACK) multiplies across the whole
-            # batch; skipping AI here restores the original bulk-upload speed.
-            # Single-profile uploads (Add Profile) and the Test Resume sandbox
-            # are unaffected and still get full AI-assisted parsing.
-            if ext == 'pdf':
-                parsed_data = _parse_pdf_quick(p)
-            else:
-                parsed_data = parse_resume_text(extract_resume_text(p, ext))
-
-            form_data = {k: '' for k in [
-                'full_name', 'title', 'email', 'phone', 'linkedin', 'location', 'summary',
-                'skills', 'experience', 'education', 'certifications', 'projects',
-            ]}
-            merged = merge_resume_data(form_data, parsed_data, overwrite=False)
-            merged['resume_file'] = p.name
-            # New: auto-detect "X+ years of experience" for bulk uploads too,
-            # same as the single-profile Add Profile flow.
-            merged['exp_yrs'] = _detect_years_of_experience(merged, p, ext)
-            # New: apply the Department picked once for this bulk batch,
-            # same column the single-profile Add Profile flow already uses.
-            merged['department'] = bulk_department
-
-            if merged.get('title'):
-                _tc = re.split(r'[,|/\\–—]', merged['title'])[0].strip()
-                _tc = re.sub(r'[\(\[].*$', '', _tc).strip()
-                _tc = re.sub(
-                    r'^(experienced|skilled|dedicated|results.driven|dynamic|seasoned|'
-                    r'highly experienced|passionate|motivated|proactive|hands.on)\s+',
-                    '', _tc, flags=re.I,
-                ).strip()
-                _words = _tc.split()
-                if len(_words) > 5:
-                    _m = re.match(r'^((?:[A-Z][a-zA-Z]*(?:\s+|$)){1,5})', _tc)
-                    _tc = _m.group(1).strip() if _m else ' '.join(_words[:5])
-                merged['title'] = _tc[:80]
-
-            # The selected Role & Group is the Title for every profile in this
-            # batch — same as the single-profile Add Profile flow, where
-            # picking a role group directly sets the Title field regardless
-            # of what's already there.
-            merged['title'] = bulk_role_group
-
-            # The selected Requirement (and the JD it's linked to) is applied
-            # to every profile in this batch — same pattern as department/title.
-            merged['requirement_id'] = _bulk_requirement_id
-            merged['jd_id'] = _bulk_jd_id
-            merged['jd_title'] = _bulk_jd_title
-
-            with db_conn() as conn:
-                # ── Duplicate guard (same as single-profile save) ────────
-                _dup_email = (merged.get('email') or '').strip()
-                _dup_phone = re.sub(r"[\s\-\(\)]", "", (merged.get('phone') or '').strip())
-                _dup_conds, _dup_params = [], []
-                if _dup_email:
-                    _dup_conds.append("LOWER(TRIM(email)) = LOWER(TRIM(%s))")
-                    _dup_params.append(_dup_email)
-                if _dup_phone:
-                    _dup_conds.append("REGEXP_REPLACE(phone, '[\\s\\-\\(\\)]', '', 'g') = %s")
-                    _dup_params.append(_dup_phone)
-                if _dup_conds:
-                    _dup_row = conn.execute(
-                        "SELECT id, full_name FROM resume WHERE (" + " OR ".join(_dup_conds) + ") LIMIT 1",
-                        _dup_params,
-                    ).fetchone()
-                    if _dup_row:
-                        meta[p.name] = dict(meta.get(p.name, {}), parsed=True, duplicate_of=_dup_row['id'])
-                        skipped.append({
-                            'file': p.name,
-                            'name': merged.get('full_name') or p.stem,
-                            'existing_id': _dup_row['id'],
-                            'existing_name': _dup_row['full_name'],
-                        })
-                        continue
-                # ─────────────────────────────────────────────────────────
-
-                merged['slug'] = unique_slug(conn, merged.get('full_name') or 'profile')
-                cursor = conn.execute(
-                    """
-                    INSERT INTO resume (
-                        full_name, title, email, phone, linkedin, location, summary, skills,
-                        experience, education, certifications, projects, slug, resume_file,
-                        exp_yrs, department, requirement_id, jd_id, jd_title, created_at, updated_at
-                    ) VALUES (
-                        %(full_name)s, %(title)s, %(email)s, %(phone)s, %(linkedin)s, %(location)s, %(summary)s, %(skills)s,
-                        %(experience)s, %(education)s, %(certifications)s, %(projects)s, %(slug)s, %(resume_file)s,
-                        %(exp_yrs)s, %(department)s, %(requirement_id)s, %(jd_id)s, %(jd_title)s, NOW(), NOW()
-                    )
-                    RETURNING id
-                    """,
-                    merged,
-                )
-                new_id = cursor.fetchone()['id']
-                sync_skills(conn, new_id, merged.get('skills', ''))
-
-            log_audit(
-                "Resume Profiles", "Link Requirement", record_id=new_id,
-                record_label=f"{merged.get('full_name')} -> requirement #{_bulk_requirement_id}",
+            outcome = _parse_and_insert_resume(
+                p, bulk_role_group, bulk_department,
+                _bulk_requirement_id, _bulk_jd_id, _bulk_jd_title,
             )
-            meta[p.name] = dict(meta.get(p.name, {}), parsed=True, resume_id=new_id)
-            processed.append({
-                'file': p.name,
-                'name': merged.get('full_name') or p.stem,
-                'id': new_id,
-            })
+            if outcome["status"] == "duplicate":
+                meta[p.name] = dict(meta.get(p.name, {}), parsed=True, duplicate_of=outcome["existing_id"])
+                skipped.append({
+                    'file': p.name,
+                    'name': outcome["name"],
+                    'existing_id': outcome["existing_id"],
+                    'existing_name': outcome["existing_name"],
+                })
+                continue
+            meta[p.name] = dict(meta.get(p.name, {}), parsed=True, resume_id=outcome["id"])
+            processed.append({'file': p.name, 'name': outcome["name"], 'id': outcome["id"]})
         except Exception as e:
             errors.append({'file': p.name, 'error': str(e)})
 
@@ -10776,6 +10795,101 @@ def process_raw_files():
         'errors': errors,
         'candidates': processed,
     })
+
+
+@app.route("/api/ingest-resume", methods=["POST"])
+def ingest_resume_api():
+    """External/machine-to-machine resume ingestion — lets another system
+    (a client's ATS, a careers-page backend) push a resume file directly
+    into this app's parsing pipeline over HTTP, instead of a person
+    uploading it through the Upload Files screen. Reuses the exact same
+    parse/insert logic as that screen via _parse_and_insert_resume, so a
+    profile created this way is identical to one created by hand.
+
+    Auth: a shared secret in the "X-Api-Key" header, checked against
+    INGESTION_API_KEY. A blank INGESTION_API_KEY disables this route
+    entirely (501) rather than leaving it open with no auth.
+
+    Accepts EITHER:
+      - multipart/form-data: file field "file" + form fields
+        "requirement_id" (required) and "role_group" (required) — same
+        required fields as the Bulk Upload screen — plus optional
+        "department".
+      - application/json: {"filename": "...", "content_base64": "...",
+        "requirement_id": ..., "role_group": ..., "department": ...}
+        (content_base64 is the raw file bytes, base64-encoded.)
+    """
+    if not INGESTION_API_KEY:
+        return jsonify({"error": "Resume ingestion API is not configured on this server."}), 501
+    if request.headers.get("X-Api-Key") != INGESTION_API_KEY:
+        return jsonify({"error": "Invalid or missing API key."}), 401
+
+    if request.content_type and "multipart/form-data" in request.content_type:
+        f = request.files.get("file")
+        if not f or not f.filename:
+            return jsonify({"error": "No file provided (expected form field 'file')."}), 400
+        filename = f.filename
+        file_bytes = f.read()
+        fields = request.form
+    else:
+        body = request.get_json(silent=True) or {}
+        filename = (body.get("filename") or "").strip()
+        content_b64 = body.get("content_base64") or ""
+        if not filename or not content_b64:
+            return jsonify({"error": "JSON body must include 'filename' and 'content_base64'."}), 400
+        try:
+            file_bytes = base64.b64decode(content_b64)
+        except Exception:
+            return jsonify({"error": "content_base64 could not be decoded."}), 400
+        fields = body
+
+    name = secure_filename(filename)
+    ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    if ext not in ("pdf", "docx", "doc"):
+        return jsonify({"error": "Unsupported format — only PDF/DOC/DOCX are accepted."}), 400
+
+    role_group = str(fields.get("role_group") or "").strip()
+    if not role_group:
+        return jsonify({"error": "'role_group' is required."}), 400
+    requirement_raw = str(fields.get("requirement_id") or "").strip()
+    if not requirement_raw.isdigit():
+        return jsonify({"error": "'requirement_id' is required."}), 400
+    department = str(fields.get("department") or "").strip()
+
+    with db_conn() as conn:
+        req_row = conn.execute(
+            "SELECT r.id, r.jd_id, jd.title AS jd_title FROM requirement r "
+            "LEFT JOIN job_description jd ON jd.id = r.jd_id WHERE r.id = %s",
+            (int(requirement_raw),),
+        ).fetchone()
+    if not req_row:
+        return jsonify({"error": "Requirement not found."}), 400
+
+    stem = Path(name).stem
+    save_name = f"{slugify(stem)}-{int(time.time())}.{ext}"
+    dest = RAW_UPLOAD_FOLDER / save_name
+    dest.write_bytes(file_bytes)
+
+    try:
+        outcome = _parse_and_insert_resume(
+            dest, role_group, department,
+            req_row["id"], req_row["jd_id"], req_row["jd_title"] or "",
+        )
+    except Exception as e:
+        return jsonify({"error": f"Parsing failed: {e}"}), 500
+
+    if outcome["status"] == "duplicate":
+        return jsonify({
+            "status": "duplicate",
+            "existing_resume_id": outcome["existing_id"],
+            "existing_name": outcome["existing_name"],
+        }), 200
+
+    return jsonify({
+        "status": "processed",
+        "resume_id": outcome["id"],
+        "name": outcome["name"],
+    }), 201
 
 
 @app.route("/api/export-compare-pdf", methods=["POST"])
@@ -16400,7 +16514,12 @@ def _inject_auth_context():
     }
 
 
-_LOGIN_EXEMPT_ENDPOINTS = {"login", "static", "change_expired_password"}
+_LOGIN_EXEMPT_ENDPOINTS = {
+    "login", "static", "change_expired_password",
+    # Machine-to-machine route — authenticates its own callers via the
+    # X-Api-Key header (see ingest_resume_api) instead of a browser session.
+    "ingest_resume_api",
+}
 
 
 @app.before_request
