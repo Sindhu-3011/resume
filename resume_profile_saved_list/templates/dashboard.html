@@ -123,6 +123,127 @@
     {% endif %}
 </div>
 
+<!-- Interview Calendar -->
+<style>
+    .cal-wrap { display:grid; grid-template-columns:1.1fr 1fr; gap:24px; align-items:start; }
+    @media (max-width:720px) { .cal-wrap { grid-template-columns:1fr; } }
+    .cal-grid { display:grid; grid-template-columns:repeat(7,1fr); gap:4px; }
+    .cal-dow { text-align:center; font-size:0.72rem; font-weight:600; color:var(--tx-muted); padding:4px 0; }
+    .cal-cell { position:relative; aspect-ratio:1/1; display:flex; align-items:center; justify-content:center;
+                border-radius:8px; cursor:pointer; font-size:0.8rem; background:var(--surface-raised); }
+    .cal-cell:hover { background:var(--clr-accent-light); }
+    .cal-cell-empty, .cal-cell-empty:hover { cursor:default; background:transparent; }
+    .cal-cell-today { outline:2px solid var(--clr-accent); }
+    .cal-cell-selected { background:var(--clr-accent-light); }
+    .cal-dot { position:absolute; bottom:2px; font-size:0.62rem; line-height:1; background:var(--clr-accent);
+               color:#fff; border-radius:50%; width:15px; height:15px; display:flex; align-items:center; justify-content:center; }
+    .cal-day-item { padding:8px 10px; border:1px solid var(--border-s); border-radius:8px; margin-bottom:6px; font-size:0.85rem; }
+</style>
+<div class="card">
+    <div class="section-header" style="margin-bottom:14px;">
+        <div class="section-icon icon-experience">&#128197;</div>
+        <h2>Interview Calendar</h2>
+        <div style="margin-left:auto;display:flex;align-items:center;gap:10px;">
+            <button class="button secondary" type="button" id="calPrevBtn" style="padding:4px 10px;">&larr;</button>
+            <span id="calMonthLabel" class="muted" style="min-width:120px;text-align:center;font-weight:600;"></span>
+            <button class="button secondary" type="button" id="calNextBtn" style="padding:4px 10px;">&rarr;</button>
+        </div>
+    </div>
+    <p class="muted small" style="margin-top:-8px;margin-bottom:14px;">Showing scheduled interviews from the last 3 months.</p>
+    <div class="cal-wrap">
+        <div id="calGrid" class="cal-grid"></div>
+        <div>
+            <h3 id="calDayTitle" style="margin:0 0 8px;font-size:0.95rem;">Select a day</h3>
+            <div id="calDayList"></div>
+        </div>
+    </div>
+</div>
+<script>
+(function () {
+    var events = {{ calendar_events | tojson }};
+    var eventsByDate = {};
+    events.forEach(function (e) {
+        (eventsByDate[e.date] = eventsByDate[e.date] || []).push(e);
+    });
+
+    var monthNames = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+    var today = new Date();
+    var viewYear = today.getFullYear();
+    var viewMonth = today.getMonth();
+    var selectedCell = null;
+
+    var grid = document.getElementById('calGrid');
+    var label = document.getElementById('calMonthLabel');
+    var dayTitle = document.getElementById('calDayTitle');
+    var dayList = document.getElementById('calDayList');
+
+    function pad(n) { return n < 10 ? '0' + n : '' + n; }
+
+    function renderDayList(dateStr) {
+        var items = eventsByDate[dateStr] || [];
+        dayTitle.textContent = items.length ? ('Interviews on ' + dateStr) : ('No interviews on ' + dateStr);
+        dayList.innerHTML = '';
+        items.forEach(function (e) {
+            var row = document.createElement('div');
+            row.className = 'cal-day-item';
+            row.innerHTML = '<strong>' + e.candidate + '</strong> &mdash; ' + e.position +
+                '<br><span class="muted">Interviewer: ' + e.interviewer + ' &middot; <span class="role-badge">' + e.status + '</span></span>';
+            dayList.appendChild(row);
+        });
+    }
+
+    function render() {
+        label.textContent = monthNames[viewMonth] + ' ' + viewYear;
+        grid.innerHTML = '';
+        ['Su','Mo','Tu','We','Th','Fr','Sa'].forEach(function (d) {
+            var h = document.createElement('div');
+            h.className = 'cal-dow';
+            h.textContent = d;
+            grid.appendChild(h);
+        });
+        var firstDay = new Date(viewYear, viewMonth, 1).getDay();
+        var daysInMonth = new Date(viewYear, viewMonth + 1, 0).getDate();
+        for (var i = 0; i < firstDay; i++) {
+            var blank = document.createElement('div');
+            blank.className = 'cal-cell cal-cell-empty';
+            grid.appendChild(blank);
+        }
+        var todayStr = today.getFullYear() + '-' + pad(today.getMonth() + 1) + '-' + pad(today.getDate());
+        for (var d = 1; d <= daysInMonth; d++) {
+            var dateStr = viewYear + '-' + pad(viewMonth + 1) + '-' + pad(d);
+            var cell = document.createElement('div');
+            cell.className = 'cal-cell' + (dateStr === todayStr ? ' cal-cell-today' : '');
+            var count = (eventsByDate[dateStr] || []).length;
+            cell.innerHTML = '<span>' + d + '</span>' +
+                (count ? '<span class="cal-dot" title="' + count + ' interview(s)">' + count + '</span>' : '');
+            cell.addEventListener('click', (function (ds, el) {
+                return function () {
+                    if (selectedCell) selectedCell.classList.remove('cal-cell-selected');
+                    el.classList.add('cal-cell-selected');
+                    selectedCell = el;
+                    renderDayList(ds);
+                };
+            })(dateStr, cell));
+            grid.appendChild(cell);
+        }
+        renderDayList(todayStr);
+    }
+
+    document.getElementById('calPrevBtn').addEventListener('click', function () {
+        viewMonth--;
+        if (viewMonth < 0) { viewMonth = 11; viewYear--; }
+        render();
+    });
+    document.getElementById('calNextBtn').addEventListener('click', function () {
+        viewMonth++;
+        if (viewMonth > 11) { viewMonth = 0; viewYear++; }
+        render();
+    });
+
+    render();
+})();
+</script>
+
 <!-- Recent Interviews -->
 <div class="card">
     <div class="section-header" style="margin-bottom:14px;">

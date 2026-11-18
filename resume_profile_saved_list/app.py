@@ -10290,6 +10290,11 @@ def dashboard():
             """
         ).fetchall()
 
+        # Dashboard cards/tables only show the last 3 months of activity so the
+        # page doesn't get overloaded with old data (per Harish's feedback in
+        # the 2026-11-17 demo). Interviews with no date yet (not scheduled)
+        # still show. This is a dashboard-only restriction — the full history
+        # is still visible on the Requirements and Interview pages themselves.
         recent_interviews = conn.execute(
             """
             SELECT i.id, i.position, i.interviewer, i.interview_date, i.status,
@@ -10299,8 +10304,23 @@ def dashboard():
             FROM interview_schedule i
             JOIN resume r ON r.id = i.resume_id
             LEFT JOIN requirement req ON req.id = r.requirement_id
+            WHERE i.interview_date IS NULL OR i.interview_date >= NOW() - INTERVAL '3 months'
             ORDER BY i.created_at DESC
             LIMIT 8
+            """
+        ).fetchall()
+
+        # Calendar widget — every interview in the same 3-month window,
+        # not just the latest 8, so the calendar grid can show a dot on any
+        # day that has an interview.
+        calendar_interviews = conn.execute(
+            """
+            SELECT i.interview_date, i.status, i.position, i.interviewer, r.full_name
+            FROM interview_schedule i
+            JOIN resume r ON r.id = i.resume_id
+            WHERE i.interview_date IS NOT NULL
+              AND i.interview_date >= NOW() - INTERVAL '3 months'
+            ORDER BY i.interview_date
             """
         ).fetchall()
 
@@ -10309,6 +10329,7 @@ def dashboard():
             SELECT req.id, req.requirement_code, req.requirement_name, COUNT(r.id) AS profile_count
             FROM requirement req
             JOIN resume r ON r.requirement_id = req.id
+            WHERE req.created_at >= NOW() - INTERVAL '3 months'
             GROUP BY req.id, req.requirement_code, req.requirement_name
             ORDER BY profile_count DESC
             LIMIT 10
@@ -10330,7 +10351,7 @@ def dashboard():
             FROM requirement r
             LEFT JOIN resume res ON res.requirement_id = r.id
             LEFT JOIN interview_schedule ivs ON ivs.resume_id = res.id
-            WHERE r.status = 'Open'
+            WHERE r.status = 'Open' AND r.created_at >= NOW() - INTERVAL '3 months'
             GROUP BY r.id
             ORDER BY r.created_at DESC
             LIMIT 6
@@ -10391,6 +10412,17 @@ def dashboard():
         _ist = _c["interview_status"]
         interview_status_counts[_ist] = interview_status_counts.get(_ist, 0) + 1
 
+    calendar_events = [
+        {
+            "date": r["interview_date"].strftime("%Y-%m-%d"),
+            "candidate": r["full_name"] or "—",
+            "position": r["position"] or "—",
+            "interviewer": r["interviewer"] or "—",
+            "status": r["status"] or "Scheduled",
+        }
+        for r in calendar_interviews
+    ]
+
     return render_template(
         "dashboard.html",
         total_resumes=total_resumes,
@@ -10411,6 +10443,7 @@ def dashboard():
         funnel_stages=funnel_stages,
         department_counts=list(department_counts),
         recent_interviews=list(recent_interviews),
+        calendar_events=calendar_events,
         top_requirements=list(top_requirements),
         requirement_profile_counts=list(requirement_profile_counts),
         all_candidates=list(all_candidates_min),
